@@ -7,21 +7,21 @@
 - [x] **0.2** Verify Electron 44 runtime (`Node 24.22.2`) native `node:sqlite` + `FTS5` readiness
 - [x] **0.3** Design original ToB enterprise architecture: **Federation Hub (Multi-Repo Governance)**, **DDD Ubiquitous Language Engine**, **Infra Control Plane & `Infra Steward Agent`**, **Collapsible Twin Graph (`Decision -> Restore -> Checkpoint` + `GhostNode`)**, **8h Unattended Continuity Engine**, **Dual Ebbinghaus Cognitive Memory**, and **Lightweight Live Operational Telemetry**
 - [x] **0.4** Author synchronized bilingual specifications ([SPEC.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.md) & [SPEC.zh-CN.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.zh-CN.md)), [DEV-PIPELINE.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/DEV-PIPELINE.md), and [CHANGELOG.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/CHANGELOG.md)
-- [ ] **0.5** User confirmation to launch M1–M8 implementation
+- [x] **0.5** User confirmation to launch M1–M8 implementation
 
 ---
 
 ## Phase 1 (M1): Toolchain, Shared Schemas & Pure Domain Core
-- [ ] **1.1** Configure `package.json`, Google Style (`gts`), `tsconfig.json`, `tsconfig.host.json`, `tsconfig.renderer.json`, and Vite 8
-- [ ] **1.2** Implement `src/shared/` types, API contracts, `AgentAdapterManifest`, `DomainTermEntry`, reason codes, and boundary validators
-- [ ] **1.3** Implement `src/core/twin-graph.ts` (`WBS <-> Execution Graph` compiler, collapsible `PhaseContainer` layout, `Decision -> Restore -> Checkpoint` branch-isolated `RewindSet`, `GhostNode` splicing)
-- [ ] **1.4** Implement `src/core/ddd.ts` (Bounded Context registry, canonical term prompt builder, `forbiddenAliases` lexical drift detector)
-- [ ] **1.5** Implement `src/core/cognitive.ts` (Human Ebbinghaus $R_{\text{human}}$ + mutation entropy $\Delta_{\text{entropy}}$ + 3-tier capsule selector + Cross-Project Attention priority ranker + Agent utility retention $R_{\text{agent}}$)
-- [ ] **1.6** Implement `src/core/telemetry.ts` & `src/core/policy.ts` (`env_fault` vs `task_failure` circuit-breaker, rolling cost/pass efficiency, `Turbo | Supervised | Strict` governance)
+- [x] **1.1** Configure `package.json`, Google Style (`gts`), `tsconfig.json`, `tsconfig.renderer.json`, and Vite 8
+- [x] **1.2** Implement `src/shared/` types, API contracts, `AgentAdapterManifest`, `DomainTermEntry`, reason codes, and boundary validators
+- [x] **1.3** Implement `src/core/twin-graph.ts` (`WBS <-> Execution Graph` compiler, collapsible `PhaseContainer` layout, `Decision -> Restore -> Checkpoint` branch-isolated `RewindSet`, `GhostNode` splicing)
+- [x] **1.4** Implement `src/core/ddd.ts` (Bounded Context registry, canonical term prompt builder, `forbiddenAliases` lexical drift detector)
+- [x] **1.5** Implement `src/core/cognitive.ts` (Human Ebbinghaus $R_{\text{human}}$ + mutation entropy $\Delta_{\text{entropy}}$ + 3-tier capsule selector + Cross-Project Attention priority ranker + Agent utility retention $R_{\text{agent}}$)
+- [x] **1.6** Implement `src/core/telemetry.ts` & `src/core/policy.ts` (`env_fault` vs `task_failure` circuit-breaker, rolling cost/pass efficiency, `Turbo | Supervised | Strict` governance)
 
 ## Phase 2 (M2): Unified SQLite+FTS5 Store & Multi-Repo Git Worktree Sandbox
-- [ ] **2.1** Implement `src/store/database.ts` (`node:sqlite` WAL, `SCHEMA_VERSION = 1`, `atomic()` single-writer transactions, `EffectsOutbox` `afterCommit` dispatcher)
-- [ ] **2.2** Implement repositories for Federation Hubs, Member Repos (`infra` vs `service`), DDD Terms, Changes, Twin Graph, Checkpoints, Attention Queue, Engineering Rooms, FTS5 Evidence (`messages_fts`), Bi-Temporal Semantic Memory (`memories_fts`), Skills Bank, and Audit Ledger
+- [x] **2.1** Implement `src/store/database.ts` (`node:sqlite` WAL, `SCHEMA_VERSION = 1`, `atomic()` single-writer transactions, `EffectsOutbox` `afterCommit` dispatcher)
+- [x] **2.2** Implement repositories for Federation Hubs, Member Repos (`infra` vs `service`), DDD Terms, Changes, Twin Graph, Checkpoints, Attention Queue, Engineering Rooms, FTS5 Evidence (`messages_fts`), Bi-Temporal Semantic Memory (`memories_fts`), Skills Bank, and Audit Ledger
 - [ ] **2.3** Implement `src/sandbox/process-runner.ts` (`shell: false`, Windows `PATHEXT` executable resolver, case-insensitive credential env scrubbing, `taskkill /T /F` tree teardown)
 - [ ] **2.4** Implement `src/sandbox/git-worktree.ts` (`resolveInside` symlink-safe lock, multi-repo `git worktree` provisioning, atomic checkpoint tags, `refs/forgeops-backup/...` rescue refs prior to physical rewind)
 
