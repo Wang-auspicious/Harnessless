@@ -1,4 +1,4 @@
-# Isolated reference materials, legacy prototypes, and ad-hoc scratch/bench sandboxes
+# Isolated reference materials, legacy prototypes, and local scratch sandboxes
 /.isolated/
 
 # Dependencies & build artifacts
@@ -9,7 +9,7 @@
 *.tsbuildinfo
 
 # Runtime state & local databases
-/.sef-data/
+/.forgeops/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

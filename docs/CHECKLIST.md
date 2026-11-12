@@ -1,71 +1,62 @@
-# ASF v2 — Engineering Milestone & Gate Checklist
+# ForgeOps — Engineering Milestone & Gate Checklist
 
-> Updated continuously after every milestone and architectural decision.
+> Synchronized with [SPEC.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.md) and [SPEC.zh-CN.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.zh-CN.md). Updated continuously after every milestone.
 
-## Phase 0: Audit, SOTA Kernel Research & Master Specification
-- [x] **0.1** Audit legacy prototype (`.isolated/legacy-se-factory`) and catalog all 16 architectural/security/correctness defects
-- [x] **0.2** Inspect reusable building blocks in `D:/Desktop/Courses_27/SE/H2` (`claude-code`, `codex`, `opencode`, `pi`, `mcp-station`, `code-workspace`, `collaboration`)
-- [x] **0.3** Study classroom reference photos of Professor's **ASF Console**, **HAMA-Loop** PDF, Workflow V2 doc, and **Raft/Slock** UI
-- [x] **0.4** Clone & analyze SOTA kernels in `.isolated/references/`:
-  - [x] `deepseek-ai/dsh-superagent-prototype` (Attention conservation, `Trigger -> Eval -> Ticket -> Mandate`, `off/observe/auto`, reserved human concurrency slot, `Effects` outbox)
-  - [x] `deepseek-ai/deepseek-harness` (`goal-round-driver` premature-stop root causes, `subagent-acp` JSON-RPC 2.0 wire lifecycle, compiler face rules)
-  - [x] `tommy0103/obelisk` (`node:sqlite` + FTS5 unified transcript evidence store, 4-section epistemic context rollover)
-  - [x] `frontier-harness-eval/eval` (`pass_rate`, `effective_cost_per_pass`, `cache_hit_rate_normalized`, `infra_invalid` separation)
-  - [x] 2026 Multi-Agent Memory & Cognitive Science (`Letta` Sleep-Time Compute, `Graphiti` bi-temporal validity, `MemoryBank` Ebbinghaus retention & spaced repetition)
-- [x] **0.5** Verify Electron 44 runtime embeds Node `24.22.2` with native `node:sqlite` + `FTS5_OK`
-- [x] **0.6** Clean global root `d:/Desktop/Courses_27/SE/Software-factory`, isolate references into `.isolated/`, initialize root Git repository
-- [x] **0.7** Author [SPEC.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.md), [DEV-PIPELINE.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/DEV-PIPELINE.md), [CHECKLIST.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/CHECKLIST.md), and [CHANGELOG.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/CHANGELOG.md)
-- [ ] **0.8** User alignment & sign-off on `SPEC.md` v2.0 before executing M1–M8
+## Phase 0 (M0): Architecture Design, Bilingual Specification & Workspace Foundation
+- [x] **0.1** Establish clean root Git repository at `d:/Desktop/Courses_27/SE/Software-factory` with `.isolated/` workspace boundary
+- [x] **0.2** Verify Electron 44 runtime (`Node 24.22.2`) native `node:sqlite` + `FTS5` readiness
+- [x] **0.3** Design original ToB enterprise architecture: **Federation Hub (Multi-Repo Governance)**, **DDD Ubiquitous Language Engine**, **Infra Control Plane & `Infra Steward Agent`**, **Collapsible Twin Graph (`Decision -> Restore -> Checkpoint` + `GhostNode`)**, **8h Unattended Continuity Engine**, **Dual Ebbinghaus Cognitive Memory**, and **Lightweight Live Operational Telemetry**
+- [x] **0.4** Author synchronized bilingual specifications ([SPEC.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.md) & [SPEC.zh-CN.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/SPEC.zh-CN.md)), [DEV-PIPELINE.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/DEV-PIPELINE.md), and [CHANGELOG.md](file:///d:/Desktop/Courses_27/SE/Software-factory/docs/CHANGELOG.md)
+- [ ] **0.5** User confirmation to launch M1–M8 implementation
 
 ---
 
-## Phase 1 (M1): Toolchain, Shared Contracts & Pure Core Engine
-- [ ] **1.1** Initialize `package.json`, `gts` ESLint config, `tsconfig.json`, `tsconfig.host.json`, `tsconfig.renderer.json`, and Vite 8 config
-- [ ] **1.2** Implement `src/shared/` strict types, API route contracts, `AgentAdapterManifest` schema, error/reason codes, and runtime validators
-- [ ] **1.3** Implement `src/core/dag.ts` (`TaskTree` ↔ `LogicGraph` sync, nested `PhaseNode` layout, `RewindSet` graph reachability, `GhostNode` splicing)
-- [ ] **1.4** Implement `src/core/cognitive.ts` (Human Ebbinghaus $R_{\text{human}}$ + mutation entropy $\Delta_{\text{entropy}}$ + 3-tier capsule selector + Cross-Project Attention ranker + Agent Ebbinghaus $R_{\text{agent}}$)
-- [ ] **1.5** Implement `src/core/bench.ts` (`FrontierHarness` normalized trial aggregator + `RoleFitnessScore` calculator + adaptive router)
-- [ ] **1.6** Implement `src/core/policy.ts` (`Turbo | Supervised | Strict` gates, `dsh-superagent` admission `off | observe | auto`, Ticket stages)
+## Phase 1 (M1): Toolchain, Shared Schemas & Pure Domain Core
+- [ ] **1.1** Configure `package.json`, Google Style (`gts`), `tsconfig.json`, `tsconfig.host.json`, `tsconfig.renderer.json`, and Vite 8
+- [ ] **1.2** Implement `src/shared/` types, API contracts, `AgentAdapterManifest`, `DomainTermEntry`, reason codes, and boundary validators
+- [ ] **1.3** Implement `src/core/twin-graph.ts` (`WBS <-> Execution Graph` compiler, collapsible `PhaseContainer` layout, `Decision -> Restore -> Checkpoint` branch-isolated `RewindSet`, `GhostNode` splicing)
+- [ ] **1.4** Implement `src/core/ddd.ts` (Bounded Context registry, canonical term prompt builder, `forbiddenAliases` lexical drift detector)
+- [ ] **1.5** Implement `src/core/cognitive.ts` (Human Ebbinghaus $R_{\text{human}}$ + mutation entropy $\Delta_{\text{entropy}}$ + 3-tier capsule selector + Cross-Project Attention priority ranker + Agent utility retention $R_{\text{agent}}$)
+- [ ] **1.6** Implement `src/core/telemetry.ts` & `src/core/policy.ts` (`env_fault` vs `task_failure` circuit-breaker, rolling cost/pass efficiency, `Turbo | Supervised | Strict` governance)
 
-## Phase 2 (M2): Unified SQLite+FTS5 Store & Git Worktree Sandbox
-- [ ] **2.1** Implement `src/store/database.ts` (`node:sqlite` WAL, `SCHEMA_VERSION = 1`, `atomic()` `BEGIN IMMEDIATE` transactions, `afterCommit` hook)
-- [ ] **2.2** Implement repositories for Projects, Changes, Twin Graph, Checkpoints, Attention, Channels/Threads, Obelisk FTS5 (`messages_fts`), Temporal Semantic Memories (`memories_fts`), and `Effects` Outbox
-- [ ] **2.3** Implement `src/sandbox/process-runner.ts` (`shell: false`, Windows `PATHEXT` resolution, case-insensitive secret env scrubbing, `taskkill /T /F` tree cleanup)
-- [ ] **2.4** Implement `src/sandbox/git-worktree.ts` (`resolveInside` realpath lock, per-Change `git worktree` lifecycle, atomic slice commits, `refs/sef-backup/...` rescue refs before physical Checkpoint rewind)
+## Phase 2 (M2): Unified SQLite+FTS5 Store & Multi-Repo Git Worktree Sandbox
+- [ ] **2.1** Implement `src/store/database.ts` (`node:sqlite` WAL, `SCHEMA_VERSION = 1`, `atomic()` single-writer transactions, `EffectsOutbox` `afterCommit` dispatcher)
+- [ ] **2.2** Implement repositories for Federation Hubs, Member Repos (`infra` vs `service`), DDD Terms, Changes, Twin Graph, Checkpoints, Attention Queue, Engineering Rooms, FTS5 Evidence (`messages_fts`), Bi-Temporal Semantic Memory (`memories_fts`), Skills Bank, and Audit Ledger
+- [ ] **2.3** Implement `src/sandbox/process-runner.ts` (`shell: false`, Windows `PATHEXT` executable resolver, case-insensitive credential env scrubbing, `taskkill /T /F` tree teardown)
+- [ ] **2.4** Implement `src/sandbox/git-worktree.ts` (`resolveInside` symlink-safe lock, multi-repo `git worktree` provisioning, atomic checkpoint tags, `refs/forgeops-backup/...` rescue refs prior to physical rewind)
 
-## Phase 3 (M3): Universal `AgentHub` & Scoped `sef_station` MCP
-- [ ] **3.1** Implement `src/adapters/mcp-station.ts` (ephemeral per-attempt Bearer token + 7 `sef_*` tools: contract, upstream artifacts, FTS5/semantic memory query, progress, `ask_human`, `propose_ghost_node`, `submit`)
-- [ ] **3.2** Implement `src/adapters/acp-client.ts` (JSON-RPC 2.0 stdio `initialize -> session/new -> session/prompt -> session/update -> session/request_permission` for `Kimi`, `Hermes`, `DSH`, `OpenCode ACP`, custom ACP agents)
-- [ ] **3.3** Implement `src/adapters/cli-stream.ts` (built-in presets for `Codex`, `Claude Code`, `OpenCode`, `Pi`, `WorkBuddy` + declarative Custom CLI manifest runner + `doctor` probe)
+## Phase 3 (M3): Universal `AgentHub`, Scoped `forge_station` MCP & Resource Broker
+- [ ] **3.1** Implement `src/adapters/mcp-station.ts` (per-attempt Bearer token + 7 `forge_*` tools: contract, artifact read, memory search, progress, `ask_human`, `propose_amendment`, `submit`)
+- [ ] **3.2** Implement `src/adapters/acp-client.ts` (JSON-RPC 2.0 stdio `initialize -> session/new -> session/prompt -> session/update -> session/request_permission` for `Kimi`, `Hermes`, `OpenCode ACP`, custom ACP binaries)
+- [ ] **3.3** Implement `src/adapters/cli-stream.ts` (first-class presets for `Codex`, `Claude Code`, `OpenCode`, `Pi`, `WorkBuddy` + declarative Custom CLI manifest + readiness probe)
 - [ ] **3.4** Implement `src/adapters/native-api.ts` (OpenAI-compatible + Anthropic Messages streaming tool-loop with confined workspace tools)
-- [ ] **3.5** Implement `src/adapters/resource-broker.ts` (`N` background worker slots + `1` reserved priority human-interaction slot)
+- [ ] **3.5** Implement `src/adapters/resource-broker.ts` (`N` worker slots + `1` dedicated human priority interaction slot)
 
-## Phase 4 (M4): HAMA-Loop, 8-Hour `MarathonDaemon`, `DreamingDaemon` & `BenchCoordinator`
-- [ ] **4.1** Implement `src/daemons/hama-loop.ts` (7-stage requirement grill, fail-closed 4D `TQLA` evaluators, `G1/G2/G3` reject-to-restore routing)
-- [ ] **4.2** Implement `src/daemons/certifier.ts` (deterministic Host `Gate` runner + independent read-only `Evaluator` session + zero self-grading enforcement)
-- [ ] **4.3** Implement `src/daemons/marathon.ts` (fresh-context slice loop, 4-section Epistemic Rollover, premature-stop counter & auto-continuation, rate-limit `CooldownHolding` backoff, 2x worker fail -> Strong Lead escalation, crash recovery notes)
-- [ ] **4.4** Implement `src/daemons/dreaming.ts` (sleep-time pitfall distillation, `git diff` anchor drift invalidation `valid_until`, Ebbinghaus cold-pruning, instant human Re-hydration capsule pre-computation)
-- [ ] **4.5** Implement `src/daemons/bench-runner.ts` (5 disposable-worktree micro-bench calibration tasks + live passive telemetry + health degradation auto-rerouting)
+## Phase 4 (M4): Requirement Closure, 8h Continuity Engine, `Infra Steward` & Sleep Consolidator
+- [ ] **4.1** Implement `src/engines/requirement-closure.ts` (Hub-level `grill-with-docs`, DDD term grounding, fail-closed dual-level QA evaluation, cross-repo Change decomposition)
+- [ ] **4.2** Implement `src/engines/certifier.ts` (deterministic `GatesNode` runner + DDD compliance check + independent read-only `AuditNode` sessions)
+- [ ] **4.3** Implement `src/engines/continuity.ts` (fresh-context slice loop, 4-section epistemic rollover, premature-stop blocker & auto-continuation, `CooldownHolding` rate-limit resilience, 2-strike Strong Lead escalation, crash recovery notes)
+- [ ] **4.4** Implement `src/engines/infra-steward.ts` (Environment Doctor, post-change `Retro` `agent-wiki` pruner & skill distiller, governed `INFRA` self-evolution workflow)
+- [ ] **4.5** Implement `src/engines/dreaming.ts` (sleep-time pitfall extraction, `git diff` anchor drift invalidation `valid_until`, Ebbinghaus cold-archiving, instant human capsule pre-computation)
 
-## Phase 5 (M5): Authenticated Host Server, Slock Hub Engine & Electron Shell
-- [ ] **5.1** Implement `src/server/secret-vault.ts` (host-only credential storage; masked write-only API contract)
-- [ ] **5.2** Implement `src/server/slock-hub.ts` (persistent Channels, Threads, `@agent` dispatch across all 5 collaboration scenarios, Promote-to-Change bridge)
-- [ ] **5.3** Implement `src/server/http-router.ts` (`127.0.0.1:0` ephemeral port, CSPRNG Bearer token validation, non-blocking async endpoints + multiplexed SSE stream)
-- [ ] **5.4** Implement `src/electron/main.ts` & `src/electron/preload.ts` (`contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`, native folder picker IPC, clean daemon shutdown on quit)
+## Phase 5 (M5): Authenticated Host Server, Engineering Rooms & Electron Desktop Shell
+- [ ] **5.1** Implement `src/server/secret-vault.ts` (host-isolated API key vault with masked write-only responses)
+- [ ] **5.2** Implement `src/server/rooms-service.ts` (`#req-grill`, `#arch-council`, `#triage-ops`, `#direct-ops`, `#exec-briefing` channels, Thread Mandates, `@agent` routing, 1-click Promote-to-Change)
+- [ ] **5.3** Implement `src/server/http-router.ts` (`127.0.0.1:0` loopback server, CSPRNG Bearer token auth, non-blocking async commands + live SSE bus)
+- [ ] **5.4** Implement `src/electron/main.ts` & `src/electron/preload.ts` (`contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`, directory picker IPC, graceful daemon shutdown)
 
-## Phase 6 (M6): Renderer Desktop UI — Overview, Projects & Twin-Graph Workstation
-- [ ] **6.1** Build ASF v2 dark precision design system, Multi-Project top/left rail with live $R_{\text{human}}$ Retention Badges & `Needs You` counters
-- [ ] **6.2** Build **Executive Overview** (`Needs You Now` 1-question action cards, Ebbinghaus Re-hydration Capsules, Marathon & Slot load monitor)
-- [ ] **6.3** Build **Project Registry & Change Dashboard** (`Turbo / Supervised / Strict` selector, `TQLA` breakdown, Team assignment, Docs viewer, scoped `Archive Change`)
-- [ ] **6.4** Build **Workstation**: synchronized `TaskTree` WBS + `@xyflow/react` nested `PhaseNode` `LogicGraph` + `GhostNode` controls + streaming Flow Monitor + bottom Git SHA `Checkpoints` bar with Diff & Safe Rewind
+## Phase 6 (M6): Renderer UI Part 1 — Overview, Federation Hub/DDD & Twin-Graph Workstation
+- [ ] **6.1** Build ForgeOps enterprise precision theme + Global Hub/Project switcher with live $R_{\text{human}}$ Retention Badges & `Needs You` indicators
+- [ ] **6.2** Build **Attention & Executive Overview** (1-question structured `Attention` cards, 3-tier Ebbinghaus Re-hydration Capsules, 8h Continuity & Slot dashboard)
+- [ ] **6.3** Build **Federation Hub, DDD Ubiquitous Language Studio & Change Dashboard** (`INFRA` vs `Service` repos, cross-repo contract map, DDD glossary editor, Change Team/Docs/Gates, scoped `Archive Change`)
+- [ ] **6.4** Build **Workstation**: synchronized WBS tree + collapsible `PhaseContainer` `@xyflow/react` canvas (`Verify -> Gates -> SelfCheck -> JQA/SQA Audit -> Decision -> Restore -> Checkpoint` + dashed `GhostNode`s) + streaming Flow Monitor + bottom Git SHA Checkpoints bar
 
-## Phase 7 (M7): Renderer Desktop UI — Slock Hub, Cognitive Observatory, Bench & Infra
-- [ ] **7.1** Build **Slock / Raft Collaboration Hub** (5 scenario channels, Thread Mandate drawer, `@agent` composer, 1-click Promote-to-Change)
-- [ ] **7.2** Build **Memory & Cognitive Observatory** (interactive Human × Agent Ebbinghaus curves, `"Acknowledge & Anchor"` spaced review action, Obelisk FTS5 search, Active vs Superseded Temporal Memory table)
-- [ ] **7.3** Build **Bench Center, Agents Market & Models Pool** (`FrontierHarness` Cost-vs-Pass scatter plot, 1-click Calibration Run, Custom Adapter Manifest modal + `Doctor` probe, Sovereign DNA editor, masked Models Pool)
-- [ ] **7.4** Build **Infra Center** (versioned `Soul Constitution`, `Marathon / Dreaming / Bench` daemon controls, live `Evolution Logs`)
+## Phase 7 (M7): Renderer UI Part 2 — Engineering Rooms, Memory Observatory & Infra Plane
+- [ ] **7.1** Build **Engineering Rooms** (5 scenario channels, Thread Mandate drawer, `@agent` autocomplete, Promote-to-Change modal)
+- [ ] **7.2** Build **Cognitive Memory Observatory** (interactive Human × Agent Ebbinghaus curves, `"Acknowledge & Anchor"` spaced review button, FTS5 evidence search, Active vs. Superseded Temporal Memory browser)
+- [ ] **7.3** Build **Infra Control Plane & Agent Factory** (`Infra Steward Agent` console, `Soul Constitution`, `Skills Bank`, `Agents Market` w/ Custom Manifest + live operational badges + `Doctor` check, `Models Pool`, `Daemon Agents`, `Evolution & Audit Logs`)
 
-## Phase 8 (M8): Lean E2E Verification, Live Electron Smoke & Release Sign-Off
-- [ ] **8.1** Author lean verification gates (`verify/core-and-memory.verify.ts`, `verify/marathon-and-adapters.verify.ts`, `verify/fullstack-smoke.verify.ts`) keeping `verify/` `< 12%` of total LoC
-- [ ] **8.2** Pass `npm run verify` (`gts lint` + dual `tsc` + Vite build + all E2E verification gates = `0` errors)
-- [ ] **8.3** Launch Electron desktop app, verify live interactive flows & visual polish, tag `v2.0.0`
+## Phase 8 (M8): Lean E2E Verification, Live Desktop Smoke & Release
+- [ ] **8.1** Implement compact E2E verification gates (`verify/*.verify.ts` `< 12%` of total LoC)
+- [ ] **8.2** Pass `npm run verify` (`gts lint` + dual `tsc` + Vite build + all verification gates = `0` errors)
+- [ ] **8.3** Verify live Electron desktop startup, seed realistic multi-repo + DDD workspace, and tag `v2.1.0`
