@@ -18,6 +18,7 @@ import type {
   RegisterAdapterRequest,
   RegisterRepoRequest,
   RoomDetailSnapshot,
+  UpdateChangeTeamRequest,
   UpdateProviderSecretRequest,
   UpsertDomainTermRequest,
 } from '../../../src/shared/api.ts';
@@ -164,6 +165,15 @@ export const forgeApi = {
       {method: 'POST'},
     ),
 
+  updateChangeTeam: (
+    changeId: string,
+    body: UpdateChangeTeamRequest,
+  ): Promise<ChangeRecord> =>
+    apiFetch<ChangeRecord>(
+      `/api/changes/${encodeURIComponent(changeId)}/team`,
+      {method: 'POST', body},
+    ),
+
   restoreToCheckpoint: (
     changeId: string,
     checkpointId: string,
@@ -284,6 +294,11 @@ export const forgeApi = {
     readonly manifest: AgentAdapterManifest;
     readonly probe: {readonly ok: boolean; readonly message: string};
   }> => apiFetch('/api/infra/adapters', {method: 'POST', body}),
+
+  deleteAdapter: (adapterId: string): Promise<{readonly ok: boolean}> =>
+    apiFetch(`/api/infra/adapters/${encodeURIComponent(adapterId)}/delete`, {
+      method: 'POST',
+    }),
 
   updateProviderSecret: (
     body: UpdateProviderSecretRequest,

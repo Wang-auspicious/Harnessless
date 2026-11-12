@@ -1,76 +1,212 @@
-import React, {useCallback, useEffect, useState} from 'react';
-import type {BootstrapSnapshot} from '../../src/shared/api.ts';
+import {useCallback, useEffect, useState, type ReactElement} from 'react';
+import type {BootstrapSnapshot, ForgeSseEvent} from '../../src/shared/api.ts';
+import type {
+  PermissionTier,
+  TranscriptMessage,
+} from '../../src/shared/types.ts';
 import {forgeApi} from './api/client.ts';
-import {HubDddView} from './views/HubDddView.tsx';
-import {InfraFactoryView} from './views/InfraFactoryView.tsx';
-import {MemoryObservatoryView} from './views/MemoryObservatoryView.tsx';
-import {OverviewView} from './views/OverviewView.tsx';
+import {
+  ActivityIcon,
+  BookOpenIcon,
+  BoxIcon,
+  BriefcaseIcon,
+  CalendarIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  CpuIcon,
+  FileTextIcon,
+  GithubIcon,
+  GlobeIcon,
+  GridIcon,
+  HelpCircleIcon,
+  PanelLeftCloseIcon,
+  PlugIcon,
+  RadioIcon,
+  SettingsIcon,
+  SparklesIcon,
+  UsersIcon,
+  WifiIcon,
+  ZapIcon,
+} from './components/Icons.tsx';
+import {AgentFactoryView} from './views/AgentFactoryView.tsx';
+import {ChangeDashboardView} from './views/ChangeDashboardView.tsx';
+import {ControlTaskView} from './views/ControlTaskView.tsx';
+import {InfraCenterView} from './views/InfraCenterView.tsx';
+import {RegistryView} from './views/RegistryView.tsx';
 import {RoomsView} from './views/RoomsView.tsx';
 import {WorkstationView} from './views/WorkstationView.tsx';
 
-type NavTab =
-  'overview' | 'hub_ddd' | 'workstation' | 'rooms' | 'memory' | 'infra';
+type NavRoute =
+  | 'infra-center'
+  | 'registry'
+  | 'change-dashboard'
+  | 'workstation'
+  | 'agents-market'
+  | 'models-pool'
+  | 'skills-bank'
+  | 'mcp-protocol'
+  | 'channels-gear'
+  | 'sessions'
+  | 'cron-jobs'
+  | 'heartbeat'
+  | 'environments';
 
-export function App(): React.ReactElement {
+const ROUTE_TITLES: Record<NavRoute, string> = {
+  'infra-center': 'Infra Center',
+  registry: 'Registry',
+  'change-dashboard': 'Change Dashboard',
+  workstation: 'Workstation',
+  'agents-market': 'Agents Market',
+  'models-pool': 'Models',
+  'skills-bank': 'Skills Bank',
+  'mcp-protocol': 'MCP Protocol',
+  'channels-gear': 'Channels Gear',
+  sessions: 'Sessions',
+  'cron-jobs': 'Cron Jobs',
+  heartbeat: 'Heartbeat',
+  environments: 'Environments',
+};
+
+export function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
-  const [activeTab, setActiveTab] = useState<NavTab>('overview');
-  const [activeHubId, setActiveHubId] = useState<string>('');
-  const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null);
-  const [sseTick, setSseTick] = useState(0);
-  const [bootError, setBootError] = useState<string | null>(null);
+  const [route, setRoute] = useState<NavRoute>('workstation');
+  const [prevRouteBeforeDash, setPrevRouteBeforeDash] =
+    useState<NavRoute>('registry');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    project: true,
+    factory: true,
+    control: true,
+    settings: true,
+  });
 
-  const refreshBootstrap = useCallback(async () => {
+  const [activeHubId, setActiveHubId] = useState<string>('');
+  const [activeChangeId, setActiveChangeId] = useState<string | null>(null);
+  const [liveChunks, setLiveChunks] = useState<TranscriptMessage[]>([]);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [lang, setLang] = useState<'EN' | 'ZH'>('EN');
+  const [infoModal, setInfoModal] = useState<
+    'changelog' | 'doc' | 'faq' | null
+  >(null);
+
+  // Create Change / Epic Modal State
+  const [showCreateChange, setShowCreateChange] = useState(false);
+  const [isEpicMode, setIsEpicMode] = useState(false);
+  const [chgRepoId, setChgRepoId] = useState('');
+  const [epicRepoIds, setEpicRepoIds] = useState<string[]>([]);
+  const [chgTitle, setChgTitle] = useState('');
+  const [chgSummary, setChgSummary] = useState('');
+  const [chgTier, setChgTier] = useState<PermissionTier>('turbo');
+  const [creatingChg, setCreatingChg] = useState(false);
+
+  const reloadBootstrap = useCallback(async () => {
     try {
-      const data = await forgeApi.getBootstrap();
-      setSnapshot(data);
-      setBootError(null);
-      setActiveHubId(prev => prev || data.hubs[0]?.id || '');
-      setSelectedChangeId(prev => prev || data.changes[0]?.id || null);
+      const boot = await forgeApi.getBootstrap();
+      setSnapshot(boot);
+      setActiveHubId(prev => prev || boot.hubs[0]?.id || '');
+      setActiveChangeId(prev => prev ?? boot.changes[0]?.id ?? null);
+      setErrorBanner(null);
     } catch (err) {
-      setBootError(err instanceof Error ? err.message : String(err));
+      setErrorBanner(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
   useEffect(() => {
-    void refreshBootstrap();
-    const unsubscribe = forgeApi.subscribeEvents(() => {
-      setSseTick(t => t + 1);
-      void refreshBootstrap();
+    void reloadBootstrap();
+  }, [reloadBootstrap]);
+
+  useEffect(() => {
+    const unsubscribe = forgeApi.subscribeEvents((ev: ForgeSseEvent) => {
+      if (ev.type === 'transcript.chunk') {
+        setLiveChunks(prev => [...prev.slice(-30), ev.message]);
+      } else {
+        void reloadBootstrap();
+        setRefreshTick(t => t + 1);
+      }
     });
     return unsubscribe;
-  }, [refreshBootstrap]);
+  }, [reloadBootstrap]);
 
-  const handleOpenWorkstation = useCallback((changeId: string) => {
-    setSelectedChangeId(changeId);
-    setActiveTab('workstation');
-  }, []);
+  const toggleGroup = (key: string): void => {
+    setOpenGroups(prev => ({...prev, [key]: !prev[key]}));
+  };
 
-  if (bootError) {
-    return (
-      <div style={{padding: 36}}>
-        <div className="card" style={{borderColor: 'var(--accent-rose)'}}>
-          <h3 className="card-title">ForgeOps Host Connection Error</h3>
-          <p className="mono muted">{bootError}</p>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => void refreshBootstrap()}
-          >
-            Retry Connection
-          </button>
-        </div>
-      </div>
+  const openChangeDashboard = (changeId: string): void => {
+    setPrevRouteBeforeDash(route === 'change-dashboard' ? 'registry' : route);
+    setActiveChangeId(changeId);
+    setRoute('change-dashboard');
+  };
+
+  const openWorkstationForChange = (changeId: string): void => {
+    setActiveChangeId(changeId);
+    setRoute('workstation');
+  };
+
+  const openCreateChangeModal = (defaultRepoId?: string): void => {
+    const hubRepos = (snapshot?.repositories ?? []).filter(
+      r => r.hubId === activeHubId,
     );
-  }
+    setChgRepoId(defaultRepoId ?? hubRepos[0]?.id ?? '');
+    setEpicRepoIds(hubRepos.map(r => r.id));
+    setIsEpicMode(false);
+    setShowCreateChange(true);
+  };
+
+  const handleSubmitCreateChange = async (): Promise<void> => {
+    if (!chgTitle.trim() || !activeHubId) return;
+    setCreatingChg(true);
+    try {
+      if (isEpicMode) {
+        const created = await forgeApi.createEpicChanges({
+          hubId: activeHubId,
+          repoIds: epicRepoIds,
+          epicTitle: chgTitle.trim(),
+          summary:
+            chgSummary.trim() ||
+            'Coordinated cross-repository specification & verification slice.',
+          permissionTier: chgTier,
+        });
+        await reloadBootstrap();
+        if (created[0]) {
+          setActiveChangeId(created[0].id);
+          setRoute('workstation');
+        }
+      } else {
+        const created = await forgeApi.createChange({
+          hubId: activeHubId,
+          repoId: chgRepoId,
+          title: chgTitle.trim(),
+          summary:
+            chgSummary.trim() ||
+            'Specification-driven WBS & Twin-Graph execution slice.',
+          permissionTier: chgTier,
+        });
+        await reloadBootstrap();
+        setActiveChangeId(created.id);
+        setRoute('workstation');
+      }
+      setChgTitle('');
+      setChgSummary('');
+      setShowCreateChange(false);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreatingChg(false);
+    }
+  };
 
   if (!snapshot) {
     return (
       <div
         style={{
           height: '100vh',
-          display: 'grid',
-          placeItems: 'center',
-          color: 'var(--text-secondary)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#f8fafc',
+          color: '#475569',
+          fontWeight: 500,
         }}
       >
         Initializing ForgeOps Control Plane...
@@ -78,226 +214,716 @@ export function App(): React.ReactElement {
     );
   }
 
-  const effectiveHubId = activeHubId || snapshot.hubs[0]?.id || '';
-  const capsuleByHub = new Map(snapshot.capsules.map(c => [c.hubId, c]));
+  const hubRepos = snapshot.repositories.filter(r => r.hubId === activeHubId);
+  const inProjectGroup =
+    route === 'registry' ||
+    route === 'workstation' ||
+    route === 'change-dashboard';
+  const inFactoryGroup =
+    route === 'agents-market' ||
+    route === 'models-pool' ||
+    route === 'skills-bank' ||
+    route === 'mcp-protocol' ||
+    route === 'channels-gear';
+  const inControlGroup =
+    route === 'sessions' || route === 'cron-jobs' || route === 'heartbeat';
+  const inSettingsGroup = route === 'environments';
 
   return (
-    <div className="forge-shell">
-      {/* Top Global Federation Hub & Cognitive Retention Bar */}
-      <header className="forge-topbar">
-        <div className="forge-brand">
-          <div className="forge-brand-badge">FO</div>
-          <div>
-            <div>ForgeOps</div>
-            <div
-              className="muted"
-              style={{fontSize: 10, fontWeight: 500, letterSpacing: '0.04em'}}
+    <div className="app-shell">
+      {/* === 1:1 Collapsible Left Sidebar === */}
+      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+        <div className="sidebar-brand-row">
+          {!sidebarCollapsed && (
+            <div className="brand-lockup">
+              <span className="brand-wordmark">
+                ForgeOps
+                <span className="brand-spark-dot" />
+              </span>
+              <span className="brand-version">v2.1.0</span>
+            </div>
+          )}
+          <button
+            type="button"
+            className="sidebar-collapse-btn"
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            onClick={() => setSidebarCollapsed(c => !c)}
+          >
+            <PanelLeftCloseIcon size={14} />
+          </button>
+        </div>
+
+        <nav className="sidebar-nav">
+          {/* Standalone Item: Infra Center */}
+          <button
+            type="button"
+            className={`nav-item ${route === 'infra-center' ? 'active' : ''}`}
+            onClick={() => setRoute('infra-center')}
+            title="Infra Center"
+          >
+            <span className="nav-item-left">
+              <CpuIcon size={15} />
+              {!sidebarCollapsed && <span>Infra Center</span>}
+            </span>
+          </button>
+
+          {/* Group 1: Project Center */}
+          <div className="nav-group">
+            {!sidebarCollapsed && (
+              <button
+                type="button"
+                className={`nav-group-header ${
+                  inProjectGroup ? 'active-group' : ''
+                }`}
+                onClick={() => toggleGroup('project')}
+              >
+                <span className="nav-group-left">
+                  <BriefcaseIcon size={15} />
+                  <span>Project Center</span>
+                </span>
+                {openGroups['project'] ? (
+                  <ChevronUpIcon size={13} />
+                ) : (
+                  <ChevronDownIcon size={13} />
+                )}
+              </button>
+            )}
+            {(sidebarCollapsed || openGroups['project']) && (
+              <div className="nav-group-items">
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'registry' || route === 'change-dashboard'
+                      ? 'active'
+                      : ''
+                  }`}
+                  onClick={() => setRoute('registry')}
+                  title="Registry"
+                >
+                  <span className="nav-item-left">
+                    <BriefcaseIcon size={15} />
+                    {!sidebarCollapsed && <span>Registry</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'workstation' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('workstation')}
+                  title="Workstation"
+                >
+                  <span className="nav-item-left">
+                    <GridIcon size={15} />
+                    {!sidebarCollapsed && <span>Workstation</span>}
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Group 2: Agent Factory */}
+          <div className="nav-group">
+            {!sidebarCollapsed && (
+              <button
+                type="button"
+                className={`nav-group-header ${
+                  inFactoryGroup ? 'active-group' : ''
+                }`}
+                onClick={() => toggleGroup('factory')}
+              >
+                <span className="nav-group-left">
+                  <ZapIcon size={15} />
+                  <span>Agent Factory</span>
+                </span>
+                {openGroups['factory'] ? (
+                  <ChevronUpIcon size={13} />
+                ) : (
+                  <ChevronDownIcon size={13} />
+                )}
+              </button>
+            )}
+            {(sidebarCollapsed || openGroups['factory']) && (
+              <div className="nav-group-items">
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'agents-market' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('agents-market')}
+                  title="Agents Market"
+                >
+                  <span className="nav-item-left">
+                    <SparklesIcon size={15} />
+                    {!sidebarCollapsed && <span>Agents Market</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'models-pool' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('models-pool')}
+                  title="Models Pool"
+                >
+                  <span className="nav-item-left">
+                    <BoxIcon size={15} />
+                    {!sidebarCollapsed && <span>Models Pool</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'skills-bank' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('skills-bank')}
+                  title="Skills Bank"
+                >
+                  <span className="nav-item-left">
+                    <ZapIcon size={15} />
+                    {!sidebarCollapsed && <span>Skills Bank</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'mcp-protocol' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('mcp-protocol')}
+                  title="MCP Protocol"
+                >
+                  <span className="nav-item-left">
+                    <PlugIcon size={15} />
+                    {!sidebarCollapsed && <span>MCP Protocol</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'channels-gear' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('channels-gear')}
+                  title="Channels Gear"
+                >
+                  <span className="nav-item-left">
+                    <WifiIcon size={15} />
+                    {!sidebarCollapsed && <span>Channels Gear</span>}
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Group 3: Control & Task */}
+          <div className="nav-group">
+            {!sidebarCollapsed && (
+              <button
+                type="button"
+                className={`nav-group-header ${
+                  inControlGroup ? 'active-group' : ''
+                }`}
+                onClick={() => toggleGroup('control')}
+              >
+                <span className="nav-group-left">
+                  <RadioIcon size={15} />
+                  <span>Control &amp; Task</span>
+                </span>
+                {openGroups['control'] ? (
+                  <ChevronUpIcon size={13} />
+                ) : (
+                  <ChevronDownIcon size={13} />
+                )}
+              </button>
+            )}
+            {(sidebarCollapsed || openGroups['control']) && (
+              <div className="nav-group-items">
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'sessions' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('sessions')}
+                  title="Sessions"
+                >
+                  <span className="nav-item-left">
+                    <UsersIcon size={15} />
+                    {!sidebarCollapsed && <span>Sessions</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'cron-jobs' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('cron-jobs')}
+                  title="Cron Jobs"
+                >
+                  <span className="nav-item-left">
+                    <CalendarIcon size={15} />
+                    {!sidebarCollapsed && <span>Cron Jobs</span>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'heartbeat' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('heartbeat')}
+                  title="Heartbeat"
+                >
+                  <span className="nav-item-left">
+                    <ActivityIcon size={15} />
+                    {!sidebarCollapsed && <span>Heartbeat</span>}
+                  </span>
+                  {!sidebarCollapsed && snapshot.attentionQueue.length > 0 && (
+                    <span className="nav-badge-count">
+                      {snapshot.attentionQueue.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Group 4: Settings */}
+          <div className="nav-group">
+            {!sidebarCollapsed && (
+              <button
+                type="button"
+                className={`nav-group-header ${
+                  inSettingsGroup ? 'active-group' : ''
+                }`}
+                onClick={() => toggleGroup('settings')}
+              >
+                <span className="nav-group-left">
+                  <SettingsIcon size={15} />
+                  <span>Settings</span>
+                </span>
+                {openGroups['settings'] ? (
+                  <ChevronUpIcon size={13} />
+                ) : (
+                  <ChevronDownIcon size={13} />
+                )}
+              </button>
+            )}
+            {(sidebarCollapsed || openGroups['settings']) && (
+              <div className="nav-group-items">
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'environments' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('environments')}
+                  title="Environments"
+                >
+                  <span className="nav-item-left">
+                    <GlobeIcon size={15} />
+                    {!sidebarCollapsed && <span>Environments</span>}
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
+        </nav>
+      </aside>
+
+      {/* === Main Content Column === */}
+      <div className="main-column">
+        {/* Top Utility & Breadcrumb Bar (1:1 Reference Match) */}
+        <header className="topbar">
+          <div className="topbar-title">{ROUTE_TITLES[route]}</div>
+
+          <div className="topbar-utilities">
+            {snapshot.hubs.length > 0 && (
+              <select
+                className="hub-switcher-select"
+                title="Active Multi-Repo Federation Hub"
+                value={activeHubId}
+                onChange={e => {
+                  const nextHub = e.target.value;
+                  setActiveHubId(nextHub);
+                  const firstChg = snapshot.changes.find(
+                    c => c.hubId === nextHub,
+                  );
+                  setActiveChangeId(firstChg?.id ?? null);
+                }}
+              >
+                {snapshot.hubs.map(h => (
+                  <option key={h.id} value={h.id}>
+                    Hub: {h.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <button
+              type="button"
+              className="topbar-util-btn"
+              onClick={() => setInfoModal('changelog')}
             >
-              META-HARNESS v2.1
+              <FileTextIcon size={13} /> Changelog
+            </button>
+            <button
+              type="button"
+              className="topbar-util-btn muted"
+              onClick={() => setInfoModal('doc')}
+            >
+              <BookOpenIcon size={13} /> Doc
+            </button>
+            <button
+              type="button"
+              className="topbar-util-btn muted"
+              onClick={() => setInfoModal('faq')}
+            >
+              <HelpCircleIcon size={13} /> FAQ
+            </button>
+            <button
+              type="button"
+              className="topbar-util-btn"
+              onClick={() => setRoute('environments')}
+            >
+              <GithubIcon size={13} /> GitHub
+            </button>
+            <button
+              type="button"
+              className="topbar-util-btn"
+              onClick={() => setLang(l => (l === 'EN' ? 'ZH' : 'EN'))}
+            >
+              <GlobeIcon size={13} /> {lang === 'EN' ? 'English' : '中文'}
+            </button>
+          </div>
+        </header>
+
+        {errorBanner && (
+          <div className="error-banner">
+            <span>{errorBanner}</span>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setErrorBanner(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Active View Body */}
+        {route === 'workstation' && (
+          <WorkstationView
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            activeChangeId={activeChangeId}
+            onSelectChange={id => setActiveChangeId(id)}
+            onOpenChangeDashboard={openChangeDashboard}
+            onOpenCreateChangeModal={openCreateChangeModal}
+            liveChunks={liveChunks}
+            refreshTick={refreshTick}
+            onRefresh={() => {
+              void reloadBootstrap();
+              setRefreshTick(t => t + 1);
+            }}
+          />
+        )}
+
+        {route === 'registry' && (
+          <RegistryView
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            onOpenWorkstation={openWorkstationForChange}
+            onOpenChangeDashboard={openChangeDashboard}
+            onOpenCreateChangeModal={openCreateChangeModal}
+            onRefresh={reloadBootstrap}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
+        {route === 'change-dashboard' && activeChangeId && (
+          <ChangeDashboardView
+            snapshot={snapshot}
+            changeId={activeChangeId}
+            onBack={() => setRoute(prevRouteBeforeDash)}
+            onOpenWorkstation={openWorkstationForChange}
+            onRefresh={() => void reloadBootstrap()}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
+        {route === 'infra-center' && (
+          <InfraCenterView
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            onOpenWorkstation={openWorkstationForChange}
+            onRefresh={() => void reloadBootstrap()}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
+        {(route === 'agents-market' ||
+          route === 'models-pool' ||
+          route === 'skills-bank' ||
+          route === 'mcp-protocol') && (
+          <AgentFactoryView
+            section={
+              route === 'agents-market'
+                ? 'market'
+                : route === 'models-pool'
+                  ? 'models'
+                  : route === 'skills-bank'
+                    ? 'skills'
+                    : 'mcp'
+            }
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            onRefresh={() => void reloadBootstrap()}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
+        {route === 'channels-gear' && (
+          <RoomsView
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            refreshTick={refreshTick}
+            onPromotedChange={changeId => {
+              void reloadBootstrap();
+              openWorkstationForChange(changeId);
+            }}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
+        {(route === 'sessions' ||
+          route === 'cron-jobs' ||
+          route === 'heartbeat' ||
+          route === 'environments') && (
+          <ControlTaskView
+            section={
+              route === 'sessions'
+                ? 'sessions'
+                : route === 'cron-jobs'
+                  ? 'cron'
+                  : route === 'heartbeat'
+                    ? 'heartbeat'
+                    : 'environments'
+            }
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            onSelectHub={id => setActiveHubId(id)}
+            onOpenWorkstation={openWorkstationForChange}
+            refreshTick={refreshTick}
+            onRefresh={() => void reloadBootstrap()}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+      </div>
+
+      {/* Global Create Change / Cross-Repo Epic Modal */}
+      {showCreateChange && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setShowCreateChange(false)}
+        >
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>Create Governed Change / Cross-Repo Epic</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setShowCreateChange(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div
+              className="modal-body"
+              style={{display: 'flex', flexDirection: 'column', gap: 12}}
+            >
+              <div style={{display: 'flex', gap: 8}}>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${!isEpicMode ? 'btn-primary' : ''}`}
+                  onClick={() => setIsEpicMode(false)}
+                >
+                  Single Repository Change
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${isEpicMode ? 'btn-primary' : ''}`}
+                  onClick={() => setIsEpicMode(true)}
+                >
+                  Cross-Repo Coordinated Epic
+                </button>
+              </div>
+
+              {!isEpicMode ? (
+                <div>
+                  <label className="field-label">Target Repository</label>
+                  <select
+                    value={chgRepoId}
+                    onChange={e => setChgRepoId(e.target.value)}
+                  >
+                    {hubRepos.map(r => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} ({r.boundedContext})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="field-label">
+                    Participating Repositories ({epicRepoIds.length} selected)
+                  </label>
+                  <div style={{display: 'flex', gap: 8, flexWrap: 'wrap'}}>
+                    {hubRepos.map(r => {
+                      const checked = epicRepoIds.includes(r.id);
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          className={`btn btn-sm ${checked ? 'btn-soft' : ''}`}
+                          onClick={() =>
+                            setEpicRepoIds(prev =>
+                              checked
+                                ? prev.filter(x => x !== r.id)
+                                : [...prev, r.id],
+                            )
+                          }
+                        >
+                          {checked ? '✓' : '+'} {r.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="field-label">Change / Epic Title</label>
+                <input
+                  placeholder="e.g. Enforce Idempotent SettlementVoucher Reconciliation"
+                  value={chgTitle}
+                  onChange={e => setChgTitle(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="field-label">Specification Summary</label>
+                <textarea
+                  rows={3}
+                  placeholder="Describe scope, DDD boundaries, and verification expectations..."
+                  value={chgSummary}
+                  onChange={e => setChgSummary(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="field-label">Permission Tier</label>
+                <select
+                  value={chgTier}
+                  onChange={e => setChgTier(e.target.value as PermissionTier)}
+                >
+                  <option value="turbo">Turbo Auto (P5 Dual TQLA)</option>
+                  <option value="supervised">Supervised</option>
+                  <option value="strict">Strict Human Gate</option>
+                </select>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setShowCreateChange(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={creatingChg || !chgTitle.trim()}
+                onClick={() => void handleSubmitCreateChange()}
+              >
+                Compile Spec &amp; Twin Graph
+              </button>
             </div>
           </div>
         </div>
+      )}
 
-        <div className="forge-hub-switcher">
-          {snapshot.hubs.map(hub => {
-            const cap = capsuleByHub.get(hub.id);
-            const retPct = cap ? Math.round(cap.retentionScore * 100) : 100;
-            const hubAttn = snapshot.attentionQueue.filter(
-              a => a.hubId === hub.id,
-            ).length;
-            const badgeCls =
-              retPct >= 75
-                ? 'badge badge-emerald'
-                : retPct >= 35
-                  ? 'badge badge-amber'
-                  : 'badge badge-rose';
-
-            return (
+      {/* Clean Info Modal for Changelog / Doc / FAQ */}
+      {infoModal && (
+        <div className="modal-backdrop" onClick={() => setInfoModal(null)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>
+                {infoModal === 'changelog'
+                  ? 'ForgeOps Release Changelog'
+                  : infoModal === 'doc'
+                    ? 'ForgeOps Architecture Guide'
+                    : 'Frequently Asked Questions'}
+              </span>
               <button
-                key={hub.id}
                 type="button"
-                className={`hub-pill ${hub.id === effectiveHubId ? 'active' : ''}`}
-                onClick={() => setActiveHubId(hub.id)}
+                className="btn btn-sm"
+                onClick={() => setInfoModal(null)}
               >
-                <span>{hub.name}</span>
-                <span className={badgeCls}>R:{retPct}%</span>
-                {hubAttn > 0 && (
-                  <span className="badge badge-amber">{hubAttn} Needs You</span>
-                )}
+                ✕
               </button>
-            );
-          })}
-        </div>
-
-        <div style={{display: 'flex', alignItems: 'center', gap: 10}}>
-          <span className="badge badge-cyan">
-            Workers {snapshot.slotLoad.activeWorkerSlots}/
-            {snapshot.slotLoad.maxWorkerSlots}
-          </span>
-          <span className="badge badge-indigo">
-            Constitution v{snapshot.constitution.version}
-          </span>
-        </div>
-      </header>
-
-      {/* Main Navigation Rail + Active Workspace View */}
-      <div className="forge-body">
-        <nav className="forge-sidebar">
-          <div className="nav-list">
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'overview' ? 'active' : ''}`}
-              onClick={() => setActiveTab('overview')}
+            </div>
+            <div
+              className="modal-body"
+              style={{display: 'flex', flexDirection: 'column', gap: 10}}
             >
-              <span>1. Overview & Attention</span>
-              {snapshot.attentionQueue.length > 0 && (
-                <span className="badge badge-amber">
-                  {snapshot.attentionQueue.length}
-                </span>
+              {infoModal === 'changelog' && (
+                <>
+                  <div>
+                    <strong>
+                      v2.1.0 — Clean Light Console &amp; Stepped Twin Graph
+                    </strong>
+                    <div style={{color: '#475569', marginTop: 4}}>
+                      Crisp light-mode enterprise console, 2-column Workstation,
+                      collapsible Phase containers with nested Task grids,
+                      horizontal non-overlapping TQLA QA pipeline, Change Team
+                      Dashboard, and Agents Market Sovereign Profiles.
+                    </div>
+                  </div>
+                  <div>
+                    <strong>
+                      v2.0.0 — Multi-Repo Federation &amp; 8h Continuity
+                    </strong>
+                    <div style={{color: '#475569', marginTop: 4}}>
+                      SQLite WAL + FTS5 single-writer control plane, isolated
+                      Git worktree checkpoints with rescue refs, DDD Ubiquitous
+                      Language drift guard, and Dual Ebbinghaus memory.
+                    </div>
+                  </div>
+                </>
               )}
-            </button>
-
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'hub_ddd' ? 'active' : ''}`}
-              onClick={() => setActiveTab('hub_ddd')}
-            >
-              <span>2. Federation Hub & DDD</span>
-              <span className="badge badge-slate">
-                {snapshot.repositories.length}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'workstation' ? 'active' : ''}`}
-              onClick={() => setActiveTab('workstation')}
-            >
-              <span>3. Twin-Graph Workstation</span>
-              <span className="badge badge-indigo">DAG</span>
-            </button>
-
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'rooms' ? 'active' : ''}`}
-              onClick={() => setActiveTab('rooms')}
-            >
-              <span>4. Engineering Rooms</span>
-              <span className="badge badge-cyan">5</span>
-            </button>
-
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'memory' ? 'active' : ''}`}
-              onClick={() => setActiveTab('memory')}
-            >
-              <span>5. Memory Observatory</span>
-            </button>
-
-            <button
-              type="button"
-              className={`nav-btn ${activeTab === 'infra' ? 'active' : ''}`}
-              onClick={() => setActiveTab('infra')}
-            >
-              <span>6. Infra & Agent Factory</span>
-              <span className="badge badge-emerald">
-                {snapshot.adapters.filter(a => a.health === 'healthy').length}/
-                {snapshot.adapters.length}
-              </span>
-            </button>
+              {infoModal === 'doc' && (
+                <div style={{color: '#334155', lineHeight: 1.6}}>
+                  <strong>Core Workflow:</strong> Register repositories in{' '}
+                  <em>Project Registry</em>, configure DEV + Junior-QA +
+                  Senior-QA models in <em>Change Dashboard</em>, and monitor or
+                  amend live execution in <em>Workstation → Twin Graph</em>.
+                  Every checkpoint anchors a physical Git commit with
+                  non-destructive rescue refs before any rollback.
+                </div>
+              )}
+              {infoModal === 'faq' && (
+                <div style={{color: '#334155', lineHeight: 1.6}}>
+                  <strong>
+                    Q: Does archiving a Change delete my Hub or Repo?
+                  </strong>
+                  <br />
+                  No — <em>Archive</em> is strictly scoped to the individual
+                  Change record and never archives the parent Federation Hub or
+                  Repository.
+                </div>
+              )}
+            </div>
           </div>
-
-          <div
-            className="card"
-            style={{padding: '10px 11px', background: 'var(--bg-card)'}}
-          >
-            <div className="form-label">Infra Daemons</div>
-            {snapshot.daemons.map(d => (
-              <div
-                key={d.id}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: 11,
-                  marginTop: 5,
-                }}
-              >
-                <span className="muted">{d.label}</span>
-                <span
-                  style={{
-                    color: d.enabled ? '#34d399' : '#64748b',
-                    fontWeight: 600,
-                  }}
-                >
-                  {d.runningPass ? 'RUN' : d.enabled ? 'ON' : 'OFF'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </nav>
-
-        <main
-          className={`forge-main ${activeTab === 'workstation' ? 'full-bleed' : ''}`}
-        >
-          {activeTab === 'overview' && (
-            <OverviewView
-              snapshot={snapshot}
-              activeHubId={effectiveHubId}
-              onSelectHub={setActiveHubId}
-              onOpenWorkstation={handleOpenWorkstation}
-              onRefresh={refreshBootstrap}
-            />
-          )}
-
-          {activeTab === 'hub_ddd' && (
-            <HubDddView
-              snapshot={snapshot}
-              activeHubId={effectiveHubId}
-              onSelectHub={setActiveHubId}
-              onOpenWorkstation={handleOpenWorkstation}
-              onRefresh={refreshBootstrap}
-            />
-          )}
-
-          {activeTab === 'workstation' && (
-            <WorkstationView
-              snapshot={snapshot}
-              selectedChangeId={selectedChangeId}
-              onSelectChange={setSelectedChangeId}
-              sseTick={sseTick}
-              onRefreshBootstrap={refreshBootstrap}
-            />
-          )}
-
-          {activeTab === 'rooms' && (
-            <RoomsView
-              snapshot={snapshot}
-              activeHubId={effectiveHubId}
-              sseTick={sseTick}
-              onOpenWorkstation={handleOpenWorkstation}
-              onRefreshBootstrap={refreshBootstrap}
-            />
-          )}
-
-          {activeTab === 'memory' && (
-            <MemoryObservatoryView
-              snapshot={snapshot}
-              activeHubId={effectiveHubId}
-              sseTick={sseTick}
-              onRefreshBootstrap={refreshBootstrap}
-            />
-          )}
-
-          {activeTab === 'infra' && (
-            <InfraFactoryView
-              snapshot={snapshot}
-              activeHubId={effectiveHubId}
-              onOpenWorkstation={handleOpenWorkstation}
-              onRefreshBootstrap={refreshBootstrap}
-            />
-          )}
-        </main>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1726,6 +1726,30 @@ export class ForgeStore {
       .run(manifest.id, JSON.stringify(manifest), now);
   }
 
+  deleteAdapter(adapterId: string): void {
+    const row = this.db
+      .prepare('SELECT manifest_json FROM adapters WHERE id = ?')
+      .get(adapterId) as SqlRow | undefined;
+    if (!row) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Adapter "${adapterId}" not found`,
+        404,
+      );
+    }
+    const manifest = parseJson<AgentAdapterManifest | null>(
+      str(row, 'manifest_json'),
+      null,
+    );
+    if (manifest?.builtIn) {
+      throw new ForgeError(
+        'VALIDATION_ERROR',
+        `Built-in adapter "${adapterId}" cannot be deleted`,
+      );
+    }
+    this.db.prepare('DELETE FROM adapters WHERE id = ?').run(adapterId);
+  }
+
   updateAdapterProbe(adapterId: string, ok: boolean, message: string): void {
     const now = new Date().toISOString();
     this.db

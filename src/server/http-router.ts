@@ -391,6 +391,81 @@ export class ForgeHttpServer {
         return;
       }
 
+      const changeTeamMatch = /^\/api\/changes\/([^/]+)\/team$/.exec(path);
+      if (method === 'POST' && changeTeamMatch) {
+        const changeId = changeTeamMatch[1]!;
+        const cur = this.store.getChange(changeId);
+        if (!cur) {
+          throw new ForgeError('NOT_FOUND', 'Change not found', 404);
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const teamPatch = asRecord(body['team'] ?? {});
+        const nextTeam = {
+          leadAdapterId: optString(
+            teamPatch,
+            'leadAdapterId',
+            cur.team.leadAdapterId,
+            80,
+          ),
+          leadModel: optString(teamPatch, 'leadModel', cur.team.leadModel, 120),
+          workerAdapterId: optString(
+            teamPatch,
+            'workerAdapterId',
+            cur.team.workerAdapterId,
+            80,
+          ),
+          workerModel: optString(
+            teamPatch,
+            'workerModel',
+            cur.team.workerModel,
+            120,
+          ),
+          juniorAuditModel: optString(
+            teamPatch,
+            'juniorAuditModel',
+            cur.team.juniorAuditModel,
+            120,
+          ),
+          seniorAuditModel: optString(
+            teamPatch,
+            'seniorAuditModel',
+            cur.team.seniorAuditModel,
+            120,
+          ),
+          maxRetryLoops: optNumber(
+            teamPatch,
+            'maxRetryLoops',
+            cur.team.maxRetryLoops,
+            1,
+            20,
+          ),
+        };
+        const nextTier =
+          body['permissionTier'] !== undefined
+            ? reqEnum(body, 'permissionTier', PERMISSION_TIERS)
+            : cur.permissionTier;
+        const updated = this.store.updateChange(changeId, {
+          team: nextTeam,
+          permissionTier: nextTier,
+        });
+        const audit = this.store.appendAudit({
+          hubId: updated.hubId,
+          changeId: updated.id,
+          category: 'gate_decision',
+          actor: 'human_operator',
+          title: `Updated ${updated.code} Team & TQLA Configuration`,
+          detail: `DEV=${nextTeam.workerAdapterId}:${nextTeam.workerModel} | JQA=${nextTeam.juniorAuditModel} | SQA=${nextTeam.seniorAuditModel}`,
+        });
+        this.broadcast({type: 'audit.logged', entry: audit});
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'changes',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, updated);
+        return;
+      }
+
       const changeRestoreMatch = /^\/api\/changes\/([^/]+)\/restore$/.exec(
         path,
       );
@@ -666,6 +741,19 @@ export class ForgeHttpServer {
           at: new Date().toISOString(),
         });
         this.sendJson(res, 201, {manifest, probe});
+        return;
+      }
+
+      const deleteAdapterMatch =
+        /^\/api\/infra\/adapters\/([^/]+)\/delete$/.exec(path);
+      if (method === 'POST' && deleteAdapterMatch) {
+        this.store.deleteAdapter(deleteAdapterMatch[1]!);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, {ok: true});
         return;
       }
 

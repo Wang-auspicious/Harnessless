@@ -60,3 +60,9 @@
 - [x] **8.1** Implement compact E2E verification gates (`verify/*.verify.ts` `< 12%` of total LoC)
 - [x] **8.2** Pass `npm run verify` (`gts lint` + dual `tsc` + Vite build + all verification gates = `0` errors)
 - [x] **8.3** Verify live Electron desktop startup, seed realistic multi-repo + DDD workspace, and tag `v2.1.0`
+
+## Phase 9 (M9): Light Console Overhaul & Stepped Twin-Graph Visual Parity
+- [x] **9.1** Overhaul renderer design system to crisp Light Mode (`#f8fafc` / `#ffffff`) with collapsible 4-group sidebar, underline tabs, and flat geometric vector icons (`Icons.tsx` + `RobotAvatar`)
+- [x] **9.2** Refactor `compileTwinGraph` and `WorkstationView` to stepped zero-overlap TQLA topology (`PhaseContainer` nested grid, `Decision -> FAIL -> Restore` rows, right-hand checkpoint return bus, bottom `Checkpoints` & `Legend` bars)
+- [x] **9.3** Deliver `Project Registry`, `Change Dashboard` (`POST /api/changes/:id/team` + `TQLA Configuration`), `Infra Center` (`Operational State` + `Evolution Logs`), `Agents Market` + `Agent Profile` (`POST /api/infra/adapters/:id/delete`), `Models Pool`, `Skills Bank` (+ DDD), `MCP Protocol`, `Channels Gear`, `Sessions`, `Cron Jobs`, `Heartbeat`, and `Environments`
+- [x] **9.4** Visually inspect live Electron Chromium screenshots across all primary views and pass `lint`, `typecheck`, `build`, `verify:gates`, and Electron smoke check

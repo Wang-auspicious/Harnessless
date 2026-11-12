@@ -98,7 +98,7 @@ export function compileTwinGraph(
 
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
-  let cursorY = 40;
+  let cursorY = 36;
 
   const startNode = makeNode({
     id: `node-${changeId}-start`,
@@ -107,21 +107,21 @@ export function compileTwinGraph(
     parentWbsId: null,
     containerNodeId: null,
     kind: 'start',
-    title: 'Start Change',
+    title: 'Start',
     description: 'Initialize isolated git worktree and baseline mandate.',
     assignedRole: 'lead',
     assignedAdapterId: team.leadAdapterId,
     assignedModel: team.leadModel,
     status: 'certified',
     maxAttempts: 1,
-    positionX: 340,
+    positionX: 280,
     positionY: cursorY,
-    width: 220,
-    height: 68,
+    width: 196,
+    height: 66,
     updatedAt: nowIso,
   });
   nodes.push(startNode);
-  cursorY += 115;
+  cursorY += 104;
 
   const specVerifyNode = makeNode({
     id: `node-${changeId}-spec-guard`,
@@ -130,7 +130,7 @@ export function compileTwinGraph(
     parentWbsId: null,
     containerNodeId: null,
     kind: 'verify',
-    title: 'Spec & DDD Integrity Guard',
+    title: 'Spec Integrity Guard',
     description:
       'Validate specification completeness and Ubiquitous Language alignment.',
     assignedRole: 'evaluator',
@@ -138,15 +138,17 @@ export function compileTwinGraph(
     assignedModel: team.juniorAuditModel,
     status: 'ready',
     maxAttempts: 3,
-    positionX: 310,
+    positionX: 266,
     positionY: cursorY,
-    width: 280,
-    height: 78,
+    width: 224,
+    height: 68,
     updatedAt: nowIso,
   });
   nodes.push(specVerifyNode);
-  edges.push(makeEdge(changeId, startNode.id, specVerifyNode.id, 'logic'));
-  cursorY += 120;
+  edges.push(
+    makeEdge(changeId, startNode.id, specVerifyNode.id, 'logic', 'logic'),
+  );
+  cursorY += 106;
 
   const baseCheckpoint = makeNode({
     id: `node-${changeId}-cp-0`,
@@ -155,31 +157,33 @@ export function compileTwinGraph(
     parentWbsId: null,
     containerNodeId: null,
     kind: 'checkpoint',
-    title: 'Baseline Checkpoint',
+    title: 'Preparation (Baseline)',
     description: 'Clean worktree baseline commit & tag.',
     assignedRole: 'lead',
     assignedAdapterId: null,
     assignedModel: null,
     status: 'pending',
     maxAttempts: 1,
-    positionX: 320,
+    positionX: 266,
     positionY: cursorY,
-    width: 260,
-    height: 74,
+    width: 224,
+    height: 68,
     updatedAt: nowIso,
   });
   nodes.push(baseCheckpoint);
-  edges.push(makeEdge(changeId, specVerifyNode.id, baseCheckpoint.id, 'pass'));
-  cursorY += 130;
+  edges.push(
+    makeEdge(changeId, specVerifyNode.id, baseCheckpoint.id, 'pass', 'logic'),
+  );
+  cursorY += 112;
 
   let upstreamCheckpointId = baseCheckpoint.id;
   let flowTailId = baseCheckpoint.id;
 
   phases.forEach((phase, pIdx) => {
-    const cols = Math.min(3, Math.max(1, phase.tasks.length));
+    const cols = Math.min(4, Math.max(1, phase.tasks.length));
     const rows = Math.max(1, Math.ceil(phase.tasks.length / cols));
-    const containerWidth = Math.max(360, cols * 230 + 48);
-    const containerHeight = 76 + rows * 102 + 24;
+    const containerWidth = Math.max(388, cols * 188 + 36);
+    const containerHeight = 52 + rows * 68 + 20;
     const containerId = `node-${changeId}-phase-${pIdx + 1}`;
 
     const containerNode = makeNode({
@@ -196,14 +200,14 @@ export function compileTwinGraph(
       assignedModel: team.leadModel,
       status: 'pending',
       maxAttempts: Math.max(2, team.maxRetryLoops),
-      positionX: 450 - Math.round(containerWidth / 2),
+      positionX: 80,
       positionY: cursorY,
       width: containerWidth,
       height: containerHeight,
       updatedAt: nowIso,
     });
     nodes.push(containerNode);
-    edges.push(makeEdge(changeId, flowTailId, containerId, 'logic'));
+    edges.push(makeEdge(changeId, flowTailId, containerId, 'logic', 'logic'));
 
     const codeToTaskId = new Map<string, string>();
     phase.tasks.forEach((task, tIdx) => {
@@ -228,10 +232,10 @@ export function compileTwinGraph(
           assignedModel: team.workerModel,
           status: 'pending',
           maxAttempts: Math.max(2, team.maxRetryLoops),
-          positionX: 24 + col * 224,
-          positionY: 64 + row * 98,
-          width: 208,
-          height: 82,
+          positionX: 18 + col * 188,
+          positionY: 48 + row * 68,
+          width: 174,
+          height: 56,
           updatedAt: nowIso,
         }),
       );
@@ -255,7 +259,9 @@ export function compileTwinGraph(
       }
     });
 
-    cursorY += containerHeight + 56;
+    const gateX = 80 + containerWidth + 76;
+    const gateY =
+      cursorY + Math.max(0, Math.round((containerHeight - 168) / 2));
 
     const gatesNode = makeNode({
       id: `node-${changeId}-gates-${pIdx + 1}`,
@@ -264,7 +270,7 @@ export function compileTwinGraph(
       parentWbsId: containerId,
       containerNodeId: null,
       kind: 'gates',
-      title: `Hard Gates (${phase.code})`,
+      title: 'Gates (Lint/Test)',
       description: 'Deterministic lint, typecheck, build, and DDD drift gate.',
       gateCommand: phase.gateCommand ?? defaultVerifyCommand,
       assignedRole: 'evaluator',
@@ -272,16 +278,47 @@ export function compileTwinGraph(
       assignedModel: null,
       status: 'pending',
       maxAttempts: Math.max(2, team.maxRetryLoops),
-      positionX: 310,
-      positionY: cursorY,
-      width: 280,
-      height: 74,
+      positionX: gateX,
+      positionY: gateY,
+      width: 210,
+      height: 68,
       updatedAt: nowIso,
     });
     nodes.push(gatesNode);
-    edges.push(makeEdge(changeId, containerId, gatesNode.id, 'logic'));
-    cursorY += 112;
+    edges.push(makeEdge(changeId, containerId, gatesNode.id, 'logic', 'logic'));
 
+    const gatesDecision = makeNode({
+      id: `node-${changeId}-decision-gates-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-DECISION-GATES`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'decision',
+      title: 'DecisionNode',
+      description: 'Route passed hard gates to Pre-QA Selfcheck.',
+      assignedRole: 'evaluator',
+      assignedAdapterId: null,
+      assignedModel: null,
+      status: 'pending',
+      maxAttempts: 1,
+      positionX: gateX,
+      positionY: gateY + 98,
+      width: 210,
+      height: 68,
+      updatedAt: nowIso,
+    });
+    nodes.push(gatesDecision);
+    edges.push(
+      makeEdge(changeId, gatesNode.id, gatesDecision.id, 'logic', 'logic'),
+    );
+
+    cursorY += Math.max(containerHeight, 176) + 64;
+
+    const colAuditX = 80;
+    const colDecisionX = 368;
+    const colRestoreX = 672;
+
+    // QA Row 1: Pre-QA Selfcheck -> DecisionNode -> FAIL -> Restore (DEV)
     const selfCheckNode = makeNode({
       id: `node-${changeId}-selfcheck-${pIdx + 1}`,
       changeId,
@@ -289,102 +326,47 @@ export function compileTwinGraph(
       parentWbsId: containerId,
       containerNodeId: null,
       kind: 'selfcheck',
-      title: `Pre-QA Selfcheck (${phase.code})`,
+      title: 'Pre-QA Selfcheck',
       description: 'Verify deliverable artifacts and file scope boundaries.',
       assignedRole: 'evaluator',
       assignedAdapterId: null,
       assignedModel: null,
       status: 'pending',
       maxAttempts: 2,
-      positionX: 310,
+      positionX: colAuditX,
       positionY: cursorY,
-      width: 280,
-      height: 72,
+      width: 212,
+      height: 68,
       updatedAt: nowIso,
     });
-    nodes.push(selfCheckNode);
-    edges.push(makeEdge(changeId, gatesNode.id, selfCheckNode.id, 'pass'));
-    cursorY += 112;
-
-    const jqaNode = makeNode({
-      id: `node-${changeId}-jqa-${pIdx + 1}`,
+    const scDecision = makeNode({
+      id: `node-${changeId}-decision-sc-${pIdx + 1}`,
       changeId,
-      code: `${phase.code}-JQA`,
-      parentWbsId: containerId,
-      containerNodeId: null,
-      kind: 'audit_jqa',
-      title: 'Level 1 Consistency Audit (JQA)',
-      description: 'Independent check of task completion & DDD naming rules.',
-      assignedRole: 'evaluator',
-      assignedAdapterId: team.leadAdapterId,
-      assignedModel: team.juniorAuditModel,
-      status: 'pending',
-      maxAttempts: 3,
-      positionX: 300,
-      positionY: cursorY,
-      width: 300,
-      height: 76,
-      updatedAt: nowIso,
-    });
-    nodes.push(jqaNode);
-    edges.push(makeEdge(changeId, selfCheckNode.id, jqaNode.id, 'pass'));
-    cursorY += 112;
-
-    const sqaNode = makeNode({
-      id: `node-${changeId}-sqa-${pIdx + 1}`,
-      changeId,
-      code: `${phase.code}-SQA`,
-      parentWbsId: containerId,
-      containerNodeId: null,
-      kind: 'audit_sqa',
-      title: 'Level 2 Architecture & Logic Review (SQA)',
-      description: 'Independent senior review of acceptance criteria & safety.',
-      assignedRole: 'evaluator',
-      assignedAdapterId: team.leadAdapterId,
-      assignedModel: team.seniorAuditModel,
-      status: 'pending',
-      maxAttempts: 3,
-      positionX: 295,
-      positionY: cursorY,
-      width: 310,
-      height: 76,
-      updatedAt: nowIso,
-    });
-    nodes.push(sqaNode);
-    edges.push(makeEdge(changeId, jqaNode.id, sqaNode.id, 'pass'));
-    cursorY += 115;
-
-    const decisionNode = makeNode({
-      id: `node-${changeId}-decision-${pIdx + 1}`,
-      changeId,
-      code: `${phase.code}-DECISION`,
+      code: `${phase.code}-DECISION-SC`,
       parentWbsId: containerId,
       containerNodeId: null,
       kind: 'decision',
-      title: `QA Gate Decision (${phase.code})`,
-      description: 'Advance to checkpoint on PASS or trigger scoped Restore.',
+      title: 'DecisionNode',
+      description: 'Advance to JQA Audit on PASS or trigger Restore (DEV).',
       assignedRole: 'evaluator',
       assignedAdapterId: null,
       assignedModel: null,
       status: 'pending',
       maxAttempts: 1,
-      positionX: 320,
+      positionX: colDecisionX,
       positionY: cursorY,
-      width: 260,
-      height: 72,
+      width: 216,
+      height: 68,
       updatedAt: nowIso,
     });
-    nodes.push(decisionNode);
-    edges.push(makeEdge(changeId, sqaNode.id, decisionNode.id, 'logic'));
-
-    const restoreNode = makeNode({
-      id: `node-${changeId}-restore-${pIdx + 1}`,
+    const restoreDev = makeNode({
+      id: `node-${changeId}-restore-dev-${pIdx + 1}`,
       changeId,
-      code: `${phase.code}-RESTORE`,
+      code: `${phase.code}-RESTORE-DEV`,
       parentWbsId: containerId,
       containerNodeId: null,
       kind: 'restore',
-      title: `Restore (${phase.code})`,
+      title: 'Restore (DEV)',
       description:
         'Create backup ref, rewind worktree to checkpoint, attach forensics.',
       assignedRole: 'lead',
@@ -392,30 +374,163 @@ export function compileTwinGraph(
       assignedModel: null,
       status: 'pending',
       maxAttempts: 1,
-      positionX: 680,
-      positionY: cursorY - 60,
-      width: 235,
-      height: 74,
+      positionX: colRestoreX,
+      positionY: cursorY,
+      width: 204,
+      height: 68,
       restoreTargetCheckpointId: upstreamCheckpointId,
       updatedAt: nowIso,
     });
-    nodes.push(restoreNode);
-
+    nodes.push(selfCheckNode, scDecision, restoreDev);
     edges.push(
-      makeEdge(changeId, gatesNode.id, restoreNode.id, 'fail', 'FAIL'),
-      makeEdge(changeId, jqaNode.id, restoreNode.id, 'fail', 'FAIL'),
-      makeEdge(changeId, sqaNode.id, restoreNode.id, 'fail', 'FAIL'),
-      makeEdge(changeId, decisionNode.id, restoreNode.id, 'fail', 'FAIL'),
-      makeEdge(
-        changeId,
-        restoreNode.id,
-        upstreamCheckpointId,
-        'fail',
-        'RESTORE',
-      ),
+      makeEdge(changeId, gatesDecision.id, selfCheckNode.id, 'pass', 'logic'),
+      makeEdge(changeId, selfCheckNode.id, scDecision.id, 'logic', 'logic'),
+      makeEdge(changeId, scDecision.id, restoreDev.id, 'fail', 'FAIL'),
+      makeEdge(changeId, restoreDev.id, upstreamCheckpointId, 'fail', 'logic'),
     );
+    cursorY += 124;
 
-    cursorY += 122;
+    // QA Row 2: JQA Audit -> Decision JQA Audit -> FAIL -> Restore
+    const jqaNode = makeNode({
+      id: `node-${changeId}-jqa-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-JQA`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'audit_jqa',
+      title: 'JQA Audit',
+      description: 'Independent check of task completion & DDD naming rules.',
+      assignedRole: 'evaluator',
+      assignedAdapterId: team.leadAdapterId,
+      assignedModel: team.juniorAuditModel,
+      status: 'pending',
+      maxAttempts: 3,
+      positionX: colAuditX,
+      positionY: cursorY,
+      width: 212,
+      height: 68,
+      updatedAt: nowIso,
+    });
+    const jqaDecision = makeNode({
+      id: `node-${changeId}-decision-jqa-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-DECISION-JQA`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'decision',
+      title: 'Decision JQA Audit',
+      description: 'Advance to SQA Review on PASS or trigger Restore.',
+      assignedRole: 'evaluator',
+      assignedAdapterId: null,
+      assignedModel: null,
+      status: 'pending',
+      maxAttempts: 1,
+      positionX: colDecisionX,
+      positionY: cursorY,
+      width: 216,
+      height: 68,
+      updatedAt: nowIso,
+    });
+    const restoreJqa = makeNode({
+      id: `node-${changeId}-restore-jqa-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-RESTORE-JQA`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'restore',
+      title: 'Restore',
+      description: 'Rewind worktree to checkpoint after JQA rejection.',
+      assignedRole: 'lead',
+      assignedAdapterId: null,
+      assignedModel: null,
+      status: 'pending',
+      maxAttempts: 1,
+      positionX: colRestoreX,
+      positionY: cursorY,
+      width: 204,
+      height: 68,
+      restoreTargetCheckpointId: upstreamCheckpointId,
+      updatedAt: nowIso,
+    });
+    nodes.push(jqaNode, jqaDecision, restoreJqa);
+    edges.push(
+      makeEdge(changeId, scDecision.id, jqaNode.id, 'pass', 'PASS'),
+      makeEdge(changeId, jqaNode.id, jqaDecision.id, 'logic', 'logic'),
+      makeEdge(changeId, jqaDecision.id, restoreJqa.id, 'fail', 'FAIL'),
+      makeEdge(changeId, restoreJqa.id, upstreamCheckpointId, 'fail', 'logic'),
+    );
+    cursorY += 124;
+
+    // QA Row 3: SQA Review -> Decision SQA Review -> FAIL -> Restore
+    const sqaNode = makeNode({
+      id: `node-${changeId}-sqa-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-SQA`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'audit_sqa',
+      title: 'SQA Review',
+      description: 'Independent senior review of acceptance criteria & safety.',
+      assignedRole: 'evaluator',
+      assignedAdapterId: team.leadAdapterId,
+      assignedModel: team.seniorAuditModel,
+      status: 'pending',
+      maxAttempts: 3,
+      positionX: colAuditX,
+      positionY: cursorY,
+      width: 212,
+      height: 68,
+      updatedAt: nowIso,
+    });
+    const decisionNode = makeNode({
+      id: `node-${changeId}-decision-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-DECISION`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'decision',
+      title: 'Decision SQA Review',
+      description: 'Advance to QA Checkpoint on PASS or trigger Restore.',
+      assignedRole: 'evaluator',
+      assignedAdapterId: null,
+      assignedModel: null,
+      status: 'pending',
+      maxAttempts: 1,
+      positionX: colDecisionX,
+      positionY: cursorY,
+      width: 216,
+      height: 68,
+      updatedAt: nowIso,
+    });
+    const restoreNode = makeNode({
+      id: `node-${changeId}-restore-${pIdx + 1}`,
+      changeId,
+      code: `${phase.code}-RESTORE`,
+      parentWbsId: containerId,
+      containerNodeId: null,
+      kind: 'restore',
+      title: 'Restore',
+      description: 'Rewind worktree to checkpoint after SQA rejection.',
+      assignedRole: 'lead',
+      assignedAdapterId: null,
+      assignedModel: null,
+      status: 'pending',
+      maxAttempts: 1,
+      positionX: colRestoreX,
+      positionY: cursorY,
+      width: 204,
+      height: 68,
+      restoreTargetCheckpointId: upstreamCheckpointId,
+      updatedAt: nowIso,
+    });
+    nodes.push(sqaNode, decisionNode, restoreNode);
+    edges.push(
+      makeEdge(changeId, jqaDecision.id, sqaNode.id, 'pass', 'PASS'),
+      makeEdge(changeId, sqaNode.id, decisionNode.id, 'logic', 'logic'),
+      makeEdge(changeId, decisionNode.id, restoreNode.id, 'fail', 'FAIL'),
+      makeEdge(changeId, restoreNode.id, upstreamCheckpointId, 'fail', 'logic'),
+    );
+    cursorY += 126;
 
     const phaseCheckpoint = makeNode({
       id: `node-${changeId}-cp-${pIdx + 1}`,
@@ -424,17 +539,17 @@ export function compileTwinGraph(
       parentWbsId: null,
       containerNodeId: null,
       kind: 'checkpoint',
-      title: `QA Checkpoint (${phase.code})`,
-      description: 'Physical Git commit + state snapshot.',
+      title: 'QA Checkpoint',
+      description: `Physical Git commit + state snapshot (${phase.code}).`,
       assignedRole: 'lead',
       assignedAdapterId: null,
       assignedModel: null,
       status: 'pending',
       maxAttempts: 1,
-      positionX: 315,
+      positionX: colDecisionX,
       positionY: cursorY,
-      width: 270,
-      height: 76,
+      width: 216,
+      height: 68,
       updatedAt: nowIso,
     });
     nodes.push(phaseCheckpoint);
@@ -444,7 +559,7 @@ export function compileTwinGraph(
 
     upstreamCheckpointId = phaseCheckpoint.id;
     flowTailId = phaseCheckpoint.id;
-    cursorY += 135;
+    cursorY += 118;
   });
 
   const endNode = makeNode({
@@ -454,21 +569,21 @@ export function compileTwinGraph(
     parentWbsId: null,
     containerNodeId: null,
     kind: 'end',
-    title: 'Certified & Ready to Ship',
+    title: 'End',
     description: 'All WBS tasks, hard gates, and dual QA audits certified.',
     assignedRole: 'lead',
     assignedAdapterId: null,
     assignedModel: null,
     status: 'pending',
     maxAttempts: 1,
-    positionX: 325,
+    positionX: 368,
     positionY: cursorY,
-    width: 250,
-    height: 72,
+    width: 216,
+    height: 68,
     updatedAt: nowIso,
   });
   nodes.push(endNode);
-  edges.push(makeEdge(changeId, flowTailId, endNode.id, 'pass', 'SHIP'));
+  edges.push(makeEdge(changeId, flowTailId, endNode.id, 'pass', 'logic'));
 
   return {nodes, edges};
 }

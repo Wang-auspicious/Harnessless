@@ -442,11 +442,10 @@ export class ContinuityEngine {
 
     // 2. QA Decision Diamond node
     if (node.kind === 'decision') {
-      const autoAdvance = canAutoAdvanceGate(
-        change.permissionTier,
-        'G2',
-        change.qualityScore,
-      );
+      const isFinalPhaseGate = node.code.endsWith('-DECISION');
+      const autoAdvance =
+        !isFinalPhaseGate ||
+        canAutoAdvanceGate(change.permissionTier, 'G2', change.qualityScore);
       if (!autoAdvance) {
         this.store.updateGraphNode(node.id, {
           status: 'blocked_human',
@@ -462,7 +461,7 @@ export class ContinuityEngine {
       }
       this.store.updateGraphNode(node.id, {
         status: 'certified',
-        outputSummary: 'PASS — advancing to phase checkpoint.',
+        outputSummary: 'PASS — advancing to next stage.',
       });
       this.emitProgress(change.id, node.id, 'certified', 'PASS');
       return {handoff, haltLoop: false};
@@ -891,13 +890,32 @@ export class ContinuityEngine {
     const nodes = this.store.listGraphNodes(change.id);
     const edges = this.store.listGraphEdges(change.id);
 
-    // Locate matching Restore node connected from this failed gate/audit node.
-    const failEdge = edges.find(
+    // Locate matching Restore node connected directly or via paired Decision node.
+    const directFailEdge = edges.find(
       e => e.kind === 'fail' && e.sourceNodeId === failedNode.id,
     );
-    const restoreNode = failEdge
-      ? nodes.find(n => n.id === failEdge.targetNodeId && n.kind === 'restore')
-      : undefined;
+    const pairedDecisionIds = new Set(
+      edges
+        .filter(e => e.sourceNodeId === failedNode.id && e.kind !== 'fail')
+        .map(e => e.targetNodeId),
+    );
+    const failEdge =
+      directFailEdge ??
+      edges.find(
+        e => e.kind === 'fail' && pairedDecisionIds.has(e.sourceNodeId),
+      );
+    const restoreNode =
+      (failEdge
+        ? nodes.find(
+            n => n.id === failEdge.targetNodeId && n.kind === 'restore',
+          )
+        : undefined) ??
+      nodes.find(
+        n =>
+          n.kind === 'restore' &&
+          failedNode.parentWbsId !== null &&
+          n.parentWbsId === failedNode.parentWbsId,
+      );
     const targetCpNodeId = restoreNode?.restoreTargetCheckpointId ?? null;
     const checkpoints = this.store.listCheckpoints(change.id);
     const targetCp = targetCpNodeId

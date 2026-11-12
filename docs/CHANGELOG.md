@@ -4,6 +4,24 @@ All specification evolutions, scope refinements, and architectural decisions are
 
 ---
 
+## [2026-11-12] Entry 004 — 1:1 Enterprise Light Console Overhaul & Stepped Zero-Overlap Twin-Graph Layout
+
+### Context & Rationale
+Replaced the dark cyber-style console with a crisp, light-first enterprise engineering workspace (`#f8fafc` / `#ffffff`, hairline slate borders `#e2e8f0`, indigo primary `#4f46e5`, flat geometric vector iconography) and refactored the Twin-Graph compiler and React Flow canvas to eliminate node/control overlaps while preserving 100% of ForgeOps's multi-repo, DDD, TQLA, ACP/CLI/API, and cognitive continuity capabilities.
+
+### Delivered Changes
+1. **Light Console Navigation Shell (`renderer/src/App.tsx`, `renderer/src/styles/theme.css`, `renderer/src/components/Icons.tsx`):**
+   - Implemented collapsible left navigation sidebar with 4 structured domain groups (`Infra Center`, `Project Center -> Registry / Workstation`, `Agent Factory -> Agents Market / Models Pool / Skills Bank / MCP Protocol / Channels Gear`, `Control & Task -> Sessions / Cron Jobs / Heartbeat`, `Settings -> Environments`) and top breadcrumb + Hub switcher + utility bar (`Changelog`, `Doc`, `FAQ`, `GitHub`, `English / 中文`).
+2. **2-Column Workstation & Stepped Horizontal Twin-Graph (`src/core/twin-graph.ts`, `src/engines/continuity.ts`, `renderer/src/views/WorkstationView.tsx`):**
+   - Refactored `WorkstationView` to a clean 2-column layout: left WBS progress bar + collapsible `Phase` white task cards, and right underlined workspace tabs (`Task Details`, `Flow Monitor`, `Activity`, `Twin Graph`) with top-bar action strip (`Run / Resume`, `+ Amendment`, `Refresh`, `T3 · P2 / T5 · P1` team badge) and zero floating canvas buttons overlapping graph nodes.
+   - Upgraded `compileTwinGraph` to a stepped, non-overlapping TQLA pipeline: `Start -> Spec Integrity Guard -> Preparation (Baseline) -> PhaseContainer` (up to 4-column nested task mini-cards with dynamic Y-shift collapse/expand) `-> Gates (Lint/Test) -> DecisionNode -> Pre-QA Selfcheck / JQA Audit / SQA Review -> DecisionNodes --[FAIL]--> Restore --[right-bus]--> Checkpoint -> QA Checkpoint -> End`.
+   - Added bottom-left clickable physical Git SHA `Checkpoints` rollback pills (`refs/forgeops-backup/...` protected), bottom-right status `Legend`, and light `MiniMap`.
+3. **1:1 Surface Suite & Backend Team/Adapter Endpoints (`src/server/http-router.ts`, `src/store/database.ts`, `renderer/src/views/*`):**
+   - Added `RegistryView` (`INFRA Projects (T5)` vs `Regular Projects` cards with `Configure Team | Live View →`), `ChangeDashboardView` (`Change Team Configuration` + `TQLA Configuration` backed by `POST /api/changes/:id/team`), `InfraCenterView` (`Operational State`, date-grouped `Evolution Logs`, `Soul Constitution`, `Daemon Agents`, `Neural Link`), `AgentFactoryView` (periwinkle `Agents Market` hero, flat-vector `RobotAvatar` cards, `Agent Profile` sub-view, `POST /api/infra/adapters/:id/delete`, `Models Pool` provider grid, `Skills Bank` + DDD `Ubiquitous Language`, `MCP Protocol`), `RoomsView` (`Channels Gear`), and `ControlTaskView` (`Sessions`, `Cron Jobs`, `Heartbeat` Ebbinghaus curves, `Environments`).
+   - Updated Electron `BrowserWindow` background to `#f8fafc` and bumped default store namespace (`forgeops-v2.2`) so fresh workspaces compile stepped Twin-Graph coordinates out of the box.
+
+---
+
 ## [2026-11-11] Entry 003 — Completed M1–M8 Implementation, E2E Verification & `v2.1.0` Desktop Release
 
 ### Delivered Capabilities

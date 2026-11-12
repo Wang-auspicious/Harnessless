@@ -8,6 +8,7 @@ import type {
   AttentionItem,
   AuditLedgerEntry,
   ChangeRecord,
+  ChangeTeamConfig,
   CheckpointRecord,
   DaemonStatus,
   DomainTermEntry,
@@ -151,6 +152,11 @@ export interface UpdateProviderSecretRequest {
   readonly providerId: string;
   readonly baseUrl?: string;
   readonly apiKey?: string;
+}
+
+export interface UpdateChangeTeamRequest {
+  readonly team: Partial<ChangeTeamConfig>;
+  readonly permissionTier?: PermissionTier;
 }
 
 export type RegisterAdapterRequest = Omit<AgentAdapterManifest, 'builtIn'>;

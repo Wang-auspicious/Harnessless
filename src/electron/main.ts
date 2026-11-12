@@ -16,7 +16,7 @@ let mainWindow: BrowserWindow | null = null;
 async function bootstrapDesktop(): Promise<void> {
   const dataDir =
     process.env['FORGEOPS_DATA_DIR'] ??
-    join(app.getPath('userData'), 'forgeops-v2');
+    join(app.getPath('userData'), 'forgeops-v2.2');
   runtime = new ForgeRuntime({dataDir});
   await runtime.start();
 
@@ -45,8 +45,8 @@ async function bootstrapDesktop(): Promise<void> {
     minWidth: 1180,
     minHeight: 720,
     show: !isSmoke,
-    title: 'ForgeOps — Enterprise Software Engineering Meta-Harness',
-    backgroundColor: '#07090e',
+    title: 'ForgeOps Console',
+    backgroundColor: '#f8fafc',
     autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath,
