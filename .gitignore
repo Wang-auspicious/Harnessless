@@ -1,0 +1,28 @@
+# Isolated reference materials, legacy prototypes, and ad-hoc scratch/bench sandboxes
+/.isolated/
+
+# Dependencies & build artifacts
+/node_modules/
+/dist/
+/dist-renderer/
+/release/
+*.tsbuildinfo
+
+# Runtime state & local databases
+/.sef-data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS & editor noise
+.DS_Store
+Thumbs.db
+*.log
