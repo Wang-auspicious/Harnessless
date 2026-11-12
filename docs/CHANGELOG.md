@@ -4,6 +4,25 @@ All specification evolutions, scope refinements, and architectural decisions are
 
 ---
 
+## [2026-11-12] Entry 005 — v2.2.0 DirectUI Native Shell, `Anthropic Serif` + `思源宋体` Typography, Full Bilingual i18n & SDD Spec Studio
+
+### Context & Rationale
+Hardened the desktop experience to eliminate webpage-like artifacts (accidental blue drag-selection, dead top-right ornament buttons, browser reload shortcuts), established an editorial serif typography system (`Anthropic Serif` + `思源宋体` / `Noto Serif SC`), delivered exhaustive live `简体中文 <-> English` switching across every surface, and integrated ForgeOps's signature SDD specification capabilities on top of the 1:1 light engineering console.
+
+### Delivered Changes
+1. **Editorial Serif Typography (`renderer/src/styles/theme.css`):**
+   - Configured `@font-face` and `--font-sans` with `'Anthropic Serif'` (`AnthropicSerif-Regular` / `AnthropicSerif-Bold`) for Latin/numerals and `'ForgeOps Han Serif'` (`Source Han Serif SC` / `Noto Serif SC` / `思源宋体`) for Simplified Chinese across all controls, tables, drawers, modals, and React Flow Twin-Graph nodes.
+2. **DirectUI Native Desktop Hardening (`src/electron/main.ts`, `src/electron/preload.ts`, `src/shared/api.ts`, `renderer/src/styles/theme.css`):**
+   - Enforced `user-select: none` and `-webkit-user-drag: none` across all UI chrome, cards, headers, badges, and DAG nodes while preserving crisp selection (`.selectable`) and 1-click copy strictly inside code diffs, transcripts, terminal commands, and repository paths.
+   - Added Windows native frameless `titleBarStyle: 'hidden'` + `titleBarOverlay`, single-instance lock (`requestSingleInstanceLock`), `window-bounds.json` geometry persistence, `forgeops:open-external` `http/https` allowlist IPC, external navigation quarantine (`setWindowOpenHandler` + `will-navigate`), and production reload shortcut blocking (`F5` / `Ctrl+R`).
+3. **Interactive Top-Right Drawers & Exhaustive `简体中文 <-> English` Localization (`renderer/src/i18n.ts`, `renderer/src/App.tsx`, `renderer/src/views/*.tsx`):**
+   - Turned every top-right utility control (`记忆保持 R%`, `Changelog / 更新日志`, `Doc / 架构规范`, `FAQ / 常见问题`, `GitHub / 代码仓库`, and `简体中文 · EN` toggle) into live interactive drawers/actions backed by persisted `localStorage('forgeops.lang')`.
+   - Localized all 8 surface views (`WorkstationView`, `RegistryView`, `ChangeDashboardView`, `InfraCenterView`, `AgentFactoryView`, `RoomsView`, `ControlTaskView`, and `App` modals/drawers), including dynamic Twin-Graph stage headings, status tags, daemon names, room scenarios, and permission tiers.
+4. **SDD Spec Capabilities Integrated into the 1:1 Light Console:**
+   - Added global `Ctrl+K` / `Cmd+K` Command Palette (`App.tsx`), live Ebbinghaus $R_{\text{human}}$ Retention & 1-Question Attention Capsule drawer (`App.tsx`), Twin-Graph 4-Section `Epistemic Rollover` Node Inspector (`WorkstationView.tsx`), `G1 -> DDD -> G2 -> G3` SDD Spec Closure Ribbon + Live `DDD Ubiquitous Language` Forbidden-Alias Drift Scanner (`ChangeDashboardView.tsx`), and 1-click `@lead` / `@ddd` / `@qa` / `@steward` role invocation pills (`RoomsView.tsx`).
+
+---
+
 ## [2026-11-12] Entry 004 — 1:1 Enterprise Light Console Overhaul & Stepped Zero-Overlap Twin-Graph Layout
 
 ### Context & Rationale

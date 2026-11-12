@@ -22,6 +22,13 @@ import {
   SearchIcon,
   UsersIcon,
 } from '../components/Icons.tsx';
+import {
+  formatDaemonLabel,
+  formatPermissionTier,
+  formatStatusLabel,
+  tr,
+  type UiLang,
+} from '../i18n.ts';
 
 export type ControlSection = 'sessions' | 'cron' | 'heartbeat' | 'environments';
 
@@ -85,6 +92,7 @@ function RetentionCurveSvg({
 }
 
 export function ControlTaskView(props: {
+  readonly lang: UiLang;
   readonly section: ControlSection;
   readonly snapshot: BootstrapSnapshot;
   readonly activeHubId: string;
@@ -95,6 +103,7 @@ export function ControlTaskView(props: {
   readonly onError: (msg: string) => void;
 }): ReactElement {
   const {
+    lang,
     section,
     snapshot,
     activeHubId,
@@ -153,22 +162,40 @@ export function ControlTaskView(props: {
       <div className="page-scroll">
         <div className="page-header">
           <h1 className="page-h1">
-            <UsersIcon size={20} /> Sessions & Cognitive Evidence
+            <UsersIcon size={20} />{' '}
+            {tr(
+              lang,
+              '会话轨迹与认知证据库 (Sessions & Evidence)',
+              'Sessions & Cognitive Evidence',
+            )}
           </h1>
           <p className="page-subtitle">
-            Append-only execution transcripts, SQLite FTS5 keyword evidence
-            search, and bi-temporal semantic memories.
+            {tr(
+              lang,
+              '追加式不可变会话日志、SQLite FTS5 全文精确取证检索，以及支持 valid_from / valid_until 的双时态语义经验库。',
+              'Append-only execution transcripts, SQLite FTS5 keyword evidence search, and bi-temporal semantic memories.',
+            )}
           </p>
         </div>
 
         <div className="surface-card" style={{marginBottom: 18}}>
           <div className="surface-card-header">
-            <span>SQLite FTS5 Transcript Evidence Search</span>
+            <span>
+              {tr(
+                lang,
+                'SQLite FTS5 跨会话全文证据检索',
+                'SQLite FTS5 Transcript Evidence Search',
+              )}
+            </span>
           </div>
           <div className="surface-card-body">
             <div style={{display: 'flex', gap: 8}}>
               <input
-                placeholder="Search exact domain identifiers across sessions (e.g. SettlementVoucher)..."
+                placeholder={tr(
+                  lang,
+                  '搜索跨会话精确领域标识符或报错特征（如 SettlementVoucher）...',
+                  'Search exact domain identifiers across sessions (e.g. SettlementVoucher)...',
+                )}
                 value={query}
                 onChange={e => setQuery(e.target.value)}
                 onKeyDown={e => {
@@ -189,7 +216,7 @@ export function ControlTaskView(props: {
                     .then(r => setHits(r));
                 }}
               >
-                <SearchIcon size={14} /> Search
+                <SearchIcon size={14} /> {tr(lang, '全文检索', 'Search')}
               </button>
             </div>
 
@@ -218,7 +245,10 @@ export function ControlTaskView(props: {
                       {h.adapterId} · {h.role} ·{' '}
                       {new Date(h.createdAt).toLocaleTimeString()}
                     </div>
-                    <div style={{fontSize: 12.5, marginTop: 2}}>
+                    <div
+                      className="selectable"
+                      style={{fontSize: 12.5, marginTop: 2}}
+                    >
                       {h.snippet}
                     </div>
                   </div>
@@ -234,7 +264,11 @@ export function ControlTaskView(props: {
           <div className="surface-card">
             <div className="surface-card-header">
               <span>
-                Recorded Sessions ({memSnap?.recentSessions.length ?? 0})
+                {tr(
+                  lang,
+                  `已归档执行会话 (${memSnap?.recentSessions.length ?? 0})`,
+                  `Recorded Sessions (${memSnap?.recentSessions.length ?? 0})`,
+                )}
               </span>
             </div>
             <div
@@ -248,7 +282,11 @@ export function ControlTaskView(props: {
             >
               {(memSnap?.recentSessions ?? []).length === 0 ? (
                 <div style={{padding: 10, color: '#94a3b8'}}>
-                  Run a Change in Workstation to record execution sessions.
+                  {tr(
+                    lang,
+                    '在「双生图工作台」启动变更单后，全部 DEV / JQA / SQA 会话将自动归档于此。',
+                    'Run a Change in Workstation to record execution sessions.',
+                  )}
                 </div>
               ) : (
                 memSnap?.recentSessions.map(s => (
@@ -273,7 +311,7 @@ export function ControlTaskView(props: {
                         s.status === 'completed' ? 'tag-green' : ''
                       }`}
                     >
-                      {s.status}
+                      {formatStatusLabel(lang, s.status)}
                     </span>
                   </button>
                 ))
@@ -283,9 +321,19 @@ export function ControlTaskView(props: {
 
           <div className="surface-card">
             <div className="surface-card-header">
-              <span>Session Transcript & Active Semantic Memories</span>
+              <span>
+                {tr(
+                  lang,
+                  '会话完整轨迹与活跃双时态语义记忆',
+                  'Session Transcript & Active Semantic Memories',
+                )}
+              </span>
               <span className="tag tag-indigo">
-                {memSnap?.activeMemories.length ?? 0} Active Memories
+                {tr(
+                  lang,
+                  `${memSnap?.activeMemories.length ?? 0} 条有效记忆`,
+                  `${memSnap?.activeMemories.length ?? 0} Active Memories`,
+                )}
               </span>
             </div>
             <div
@@ -313,14 +361,20 @@ export function ControlTaskView(props: {
                     {m.role.toUpperCase()}
                     {m.toolName ? ` · ${m.toolName}` : ''}
                   </div>
-                  <div style={{whiteSpace: 'pre-wrap'}}>{m.content}</div>
+                  <div className="selectable" style={{whiteSpace: 'pre-wrap'}}>
+                    {m.content}
+                  </div>
                 </div>
               ))}
 
               {(memSnap?.activeMemories ?? []).length > 0 && (
                 <div style={{marginTop: 10}}>
                   <div className="field-label">
-                    Bi-Temporal Active Semantic Memories (`valid_until = NULL`)
+                    {tr(
+                      lang,
+                      '双时态有效语义经验记忆 (valid_until = NULL)',
+                      'Bi-Temporal Active Semantic Memories (valid_until = NULL)',
+                    )}
                   </div>
                   {memSnap?.activeMemories.map(mem => (
                     <div
@@ -336,7 +390,10 @@ export function ControlTaskView(props: {
                         {mem.title}{' '}
                         <span className="tag tag-indigo">{mem.kind}</span>
                       </div>
-                      <div style={{color: '#475569', marginTop: 3}}>
+                      <div
+                        className="selectable"
+                        style={{color: '#475569', marginTop: 3}}
+                      >
                         {mem.summary}
                       </div>
                     </div>
@@ -366,11 +423,19 @@ export function ControlTaskView(props: {
         >
           <div>
             <h1 className="page-h1">
-              <CalendarIcon size={20} /> Cron Jobs & Autonomous Schedules
+              <CalendarIcon size={20} />{' '}
+              {tr(
+                lang,
+                '自治定时任务与睡眠整合 (Cron & DreamingDaemon)',
+                'Cron Jobs & Autonomous Schedules',
+              )}
             </h1>
             <p className="page-subtitle">
-              Scheduled background engines for 8h continuity recovery,
-              sleep-time cognitive consolidation, and worktree hygiene.
+              {tr(
+                lang,
+                '管理 8 小时无人值守连续性恢复、夜间限流自动续跑、睡眠期认知整合与残留 Worktree 清理。',
+                'Scheduled background engines for 8h continuity recovery, sleep-time cognitive consolidation, and worktree hygiene.',
+              )}
             </p>
           </div>
           <button
@@ -383,7 +448,11 @@ export function ControlTaskView(props: {
               });
             }}
           >
-            Trigger Sleep Consolidation Pass
+            {tr(
+              lang,
+              '立即触发睡眠期认知整合',
+              'Trigger Sleep Consolidation Pass',
+            )}
           </button>
         </div>
 
@@ -397,10 +466,18 @@ export function ControlTaskView(props: {
             }}
           >
             <div className="surface-card-body">
-              <strong>Sleep Consolidation Complete:</strong> Extracted{' '}
-              {dreamReport.extractedPitfalls} pitfall lessons · Superseded{' '}
-              {dreamReport.supersededDriftedMemories} drifted memories ·
-              Refreshed {dreamReport.capsulesRefreshed} Hub capsules.
+              <strong>
+                {tr(
+                  lang,
+                  '睡眠期认知整合已完成：',
+                  'Sleep Consolidation Complete:',
+                )}
+              </strong>{' '}
+              {tr(
+                lang,
+                `提炼避坑经验卡 ${dreamReport.extractedPitfalls} 条 · 淘汰过期漂移记忆 ${dreamReport.supersededDriftedMemories} 条 · 刷新中枢重锚胶囊 ${dreamReport.capsulesRefreshed} 份。`,
+                `Extracted ${dreamReport.extractedPitfalls} pitfall lessons · Superseded ${dreamReport.supersededDriftedMemories} drifted memories · Refreshed ${dreamReport.capsulesRefreshed} Hub capsules.`,
+              )}
             </div>
           </div>
         )}
@@ -410,14 +487,20 @@ export function ControlTaskView(props: {
             <div key={d.id} className="surface-card">
               <div className="surface-card-header">
                 <div style={{display: 'flex', alignItems: 'center', gap: 10}}>
-                  <span>{d.label}</span>
+                  <span>{formatDaemonLabel(lang, d.id, d.label)}</span>
                   <span className="tag tag-blue">
-                    Every {d.intervalSeconds}s
+                    {tr(
+                      lang,
+                      `每 ${d.intervalSeconds} 秒执行`,
+                      `Every ${d.intervalSeconds}s`,
+                    )}
                   </span>
                 </div>
                 <div style={{display: 'flex', alignItems: 'center', gap: 10}}>
                   <span className={`tag ${d.enabled ? 'tag-green' : ''}`}>
-                    {d.enabled ? 'ACTIVE' : 'PAUSED'}
+                    {d.enabled
+                      ? tr(lang, '运行就绪', 'ACTIVE')
+                      : tr(lang, '已暂停', 'PAUSED')}
                   </span>
                   <button
                     type="button"
@@ -428,12 +511,19 @@ export function ControlTaskView(props: {
                         .then(() => onRefresh());
                     }}
                   >
-                    {d.enabled ? 'Disable' : 'Enable'}
+                    {d.enabled
+                      ? tr(lang, '停用', 'Disable')
+                      : tr(lang, '启用', 'Enable')}
                   </button>
                 </div>
               </div>
               <div className="surface-card-body" style={{color: '#475569'}}>
-                {d.lastSummary || 'Awaiting next scheduled execution window.'}
+                {d.lastSummary ||
+                  tr(
+                    lang,
+                    '等待下一轮定时调度窗口触发。',
+                    'Awaiting next scheduled execution window.',
+                  )}
               </div>
             </div>
           ))}
@@ -450,11 +540,19 @@ export function ControlTaskView(props: {
       <div className="page-scroll">
         <div className="page-header">
           <h1 className="page-h1">
-            <ActivityIcon size={20} /> Heartbeat & Cognitive Attention
+            <ActivityIcon size={20} />{' '}
+            {tr(
+              lang,
+              '心跳监控与双向艾宾浩斯注意力中枢',
+              'Heartbeat & Cognitive Attention',
+            )}
           </h1>
           <p className="page-subtitle">
-            1-Card-1-Decision human attention triage, Dual Ebbinghaus context
-            retention curves, and worker slot saturation.
+            {tr(
+              lang,
+              '践行 SDD「一卡一决策（推荐项置顶）」人类注意力守恒公理，实时绘制项目心智遗忘衰减曲线与并发槽位负载。',
+              '1-Card-1-Decision human attention triage, Dual Ebbinghaus context retention curves, and worker slot saturation.',
+            )}
           </p>
         </div>
 
@@ -468,7 +566,9 @@ export function ControlTaskView(props: {
         >
           <div className="surface-card">
             <div className="surface-card-body">
-              <div className="field-label">Active Worker Slots</div>
+              <div className="field-label">
+                {tr(lang, '活跃并发执行槽位', 'Active Worker Slots')}
+              </div>
               <div style={{fontSize: 22, fontWeight: 800, color: '#4f46e5'}}>
                 {snapshot.slotLoad.activeWorkerSlots} /{' '}
                 {snapshot.slotLoad.maxWorkerSlots}
@@ -477,7 +577,9 @@ export function ControlTaskView(props: {
           </div>
           <div className="surface-card">
             <div className="surface-card-body">
-              <div className="field-label">Open Attention Decisions</div>
+              <div className="field-label">
+                {tr(lang, '待人类拍板决策项', 'Open Attention Decisions')}
+              </div>
               <div style={{fontSize: 22, fontWeight: 800, color: '#d97706'}}>
                 {snapshot.attentionQueue.length}
               </div>
@@ -485,7 +587,9 @@ export function ControlTaskView(props: {
           </div>
           <div className="surface-card">
             <div className="surface-card-body">
-              <div className="field-label">Active Changes</div>
+              <div className="field-label">
+                {tr(lang, '受控推进变更单总数', 'Active Changes')}
+              </div>
               <div style={{fontSize: 22, fontWeight: 800, color: '#16a34a'}}>
                 {snapshot.changes.length}
               </div>
@@ -498,7 +602,13 @@ export function ControlTaskView(props: {
         >
           <div className="surface-card">
             <div className="surface-card-header">
-              <span>1-Card-1-Decision Attention Queue</span>
+              <span>
+                {tr(
+                  lang,
+                  '一卡一决策人类注意力队列 (1-Card-1-Decision)',
+                  '1-Card-1-Decision Attention Queue',
+                )}
+              </span>
             </div>
             <div
               className="surface-card-body"
@@ -506,7 +616,11 @@ export function ControlTaskView(props: {
             >
               {snapshot.attentionQueue.length === 0 ? (
                 <div style={{color: '#16a34a', fontWeight: 600}}>
-                  ✓ Zero human blockers — autonomous pipelines are clear.
+                  {tr(
+                    lang,
+                    '✓ 当前零人工阻塞项 — 各仓库自治流水线健康推进中。',
+                    '✓ Zero human blockers — autonomous pipelines are clear.',
+                  )}
                 </div>
               ) : (
                 snapshot.attentionQueue.map(item => (
@@ -528,13 +642,18 @@ export function ControlTaskView(props: {
                     >
                       <span className="tag tag-amber">{item.kind}</span>
                       <span style={{fontSize: 11.5, color: '#64748b'}}>
-                        ~{item.estimatedReadSeconds}s read
+                        {tr(
+                          lang,
+                          `预计阅读 ~${item.estimatedReadSeconds} 秒`,
+                          `~${item.estimatedReadSeconds}s read`,
+                        )}
                       </span>
                     </div>
                     <div style={{fontWeight: 700, marginBottom: 6}}>
                       {item.question}
                     </div>
                     <div
+                      className="selectable"
                       style={{
                         fontSize: 12.5,
                         color: '#475569',
@@ -574,7 +693,13 @@ export function ControlTaskView(props: {
 
           <div className="surface-card">
             <div className="surface-card-header">
-              <span>Human Context Retention Curves</span>
+              <span>
+                {tr(
+                  lang,
+                  '人脑项目心智艾宾浩斯保持曲线 (R_human)',
+                  'Human Context Retention Curves',
+                )}
+              </span>
             </div>
             <div
               className="surface-card-body"
@@ -605,7 +730,11 @@ export function ControlTaskView(props: {
                     }}
                   >
                     <span style={{fontSize: 11.5, color: '#64748b'}}>
-                      Stability S = {cap.stabilityHours.toFixed(1)}h
+                      {tr(
+                        lang,
+                        `记忆稳定度 S = ${cap.stabilityHours.toFixed(1)}h`,
+                        `Stability S = ${cap.stabilityHours.toFixed(1)}h`,
+                      )}
                     </span>
                     <button
                       type="button"
@@ -616,7 +745,7 @@ export function ControlTaskView(props: {
                           .then(() => onRefresh());
                       }}
                     >
-                      Re-Anchor Context
+                      {tr(lang, '确认检阅并重锚记忆', 'Re-Anchor Context')}
                     </button>
                   </div>
                 </div>
@@ -635,18 +764,32 @@ export function ControlTaskView(props: {
     <div className="page-scroll">
       <div className="page-header">
         <h1 className="page-h1">
-          <GlobeIcon size={20} /> Environments & Federation Hubs
+          <GlobeIcon size={20} />{' '}
+          {tr(
+            lang,
+            '运行环境与多仓联邦中枢 (Environments & Hubs)',
+            'Environments & Federation Hubs',
+          )}
         </h1>
         <p className="page-subtitle">
-          Manage Multi-Repo Federation Hubs, local Git worktree sandboxes, and
-          host toolchain readiness.
+          {tr(
+            lang,
+            '统一纳管多仓库联邦主控中枢（Federation Hub）、本机 Git Worktree 隔离沙箱目录与宿主工具链健康度。',
+            'Manage Multi-Repo Federation Hubs, local Git worktree sandboxes, and host toolchain readiness.',
+          )}
         </p>
       </div>
 
       <div style={{display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 18}}>
         <div className="surface-card">
           <div className="surface-card-header">
-            <span>Registered Federation Hubs ({snapshot.hubs.length})</span>
+            <span>
+              {tr(
+                lang,
+                `已注册联邦中枢 (${snapshot.hubs.length})`,
+                `Registered Federation Hubs (${snapshot.hubs.length})`,
+              )}
+            </span>
             <button
               type="button"
               className="btn btn-sm"
@@ -654,7 +797,7 @@ export function ControlTaskView(props: {
                 void forgeApi.runEnvironmentDoctor().then(d => setDoctor(d));
               }}
             >
-              Verify Host Toolchain
+              {tr(lang, '校验宿主机工具链', 'Verify Host Toolchain')}
             </button>
           </div>
           <div
@@ -663,6 +806,7 @@ export function ControlTaskView(props: {
           >
             {doctor && (
               <div
+                className="selectable"
                 style={{
                   padding: '10px 12px',
                   borderRadius: 8,
@@ -698,12 +842,15 @@ export function ControlTaskView(props: {
                   }}
                 >
                   <strong>{h.name}</strong>
-                  <span className="tag tag-indigo">{h.permissionTier}</span>
+                  <span className="tag tag-indigo">
+                    {formatPermissionTier(lang, h.permissionTier)}
+                  </span>
                 </div>
                 <div style={{fontSize: 12, color: '#64748b', marginTop: 4}}>
                   {h.description}
                 </div>
                 <div
+                  className="selectable"
                   style={{
                     fontSize: 11.5,
                     color: '#94a3b8',
@@ -720,22 +867,32 @@ export function ControlTaskView(props: {
 
         <div className="surface-card">
           <div className="surface-card-header">
-            <span>Create New Federation Hub</span>
+            <span>
+              {tr(lang, '创建新多仓联邦中枢', 'Create New Federation Hub')}
+            </span>
           </div>
           <div
             className="surface-card-body"
             style={{display: 'flex', flexDirection: 'column', gap: 12}}
           >
             <div>
-              <label className="field-label">Federation Hub Name</label>
+              <label className="field-label">
+                {tr(lang, '联邦中枢名称', 'Federation Hub Name')}
+              </label>
               <input
-                placeholder="e.g. Risk & Clearing Platform"
+                placeholder={tr(
+                  lang,
+                  '例如：清结算与风控核心平台',
+                  'e.g. Risk & Clearing Platform',
+                )}
                 value={hubName}
                 onChange={e => setHubName(e.target.value)}
               />
             </div>
             <div>
-              <label className="field-label">Workspace Root Directory</label>
+              <label className="field-label">
+                {tr(lang, '工作空间根目录路径', 'Workspace Root Directory')}
+              </label>
               <div style={{display: 'flex', gap: 8}}>
                 <input
                   placeholder="D:/workspaces/risk-clearing"
@@ -751,26 +908,40 @@ export function ControlTaskView(props: {
                     });
                   }}
                 >
-                  Browse
+                  {tr(lang, '浏览目录', 'Browse')}
                 </button>
               </div>
             </div>
             <div>
-              <label className="field-label">Default Permission Tier</label>
+              <label className="field-label">
+                {tr(lang, '默认自治权限档位', 'Default Permission Tier')}
+              </label>
               <select
                 value={hubTier}
                 onChange={e => setHubTier(e.target.value as PermissionTier)}
               >
-                <option value="turbo">Turbo Auto</option>
-                <option value="supervised">Supervised</option>
-                <option value="strict">Strict Human Gate</option>
+                <option value="turbo">
+                  {tr(lang, '极速自治档 (Turbo Auto)', 'Turbo Auto')}
+                </option>
+                <option value="supervised">
+                  {tr(lang, '受控监督档 (Supervised)', 'Supervised')}
+                </option>
+                <option value="strict">
+                  {tr(lang, '严格人工门禁档 (Strict)', 'Strict Human Gate')}
+                </option>
               </select>
             </div>
             <div>
-              <label className="field-label">North-Star Charter</label>
+              <label className="field-label">
+                {tr(lang, '北极星架构宪章', 'North-Star Charter')}
+              </label>
               <textarea
                 rows={3}
-                placeholder="Domain boundaries and architectural objectives..."
+                placeholder={tr(
+                  lang,
+                  '描述该联邦中枢覆盖的业务边界、跨仓契约原则与核心架构目标...',
+                  'Domain boundaries and architectural objectives...',
+                )}
                 value={hubDesc}
                 onChange={e => setHubDesc(e.target.value)}
               />
@@ -799,7 +970,8 @@ export function ControlTaskView(props: {
                   );
               }}
             >
-              <PlusIcon size={14} /> Create Federation Hub
+              <PlusIcon size={14} />{' '}
+              {tr(lang, '创建联邦中枢', 'Create Federation Hub')}
             </button>
           </div>
         </div>

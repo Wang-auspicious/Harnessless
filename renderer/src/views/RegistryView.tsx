@@ -6,23 +6,33 @@ import type {
   RepositoryEntry,
 } from '../../../src/shared/types.ts';
 import {forgeApi} from '../api/client.ts';
-import {BriefcaseIcon, PlusIcon, ShieldIcon} from '../components/Icons.tsx';
+import {
+  BriefcaseIcon,
+  PlusIcon,
+  ShieldIcon,
+  ZapIcon,
+} from '../components/Icons.tsx';
+import {formatStatusLabel, tr, type UiLang} from '../i18n.ts';
 
 export function RegistryView(props: {
+  readonly lang: UiLang;
   readonly snapshot: BootstrapSnapshot;
   readonly activeHubId: string;
   readonly onOpenWorkstation: (changeId: string) => void;
   readonly onOpenChangeDashboard: (changeId: string) => void;
   readonly onOpenCreateChangeModal: (repoId?: string) => void;
+  readonly onOpenDddStudio: () => void;
   readonly onRefresh: () => Promise<void> | void;
   readonly onError: (msg: string) => void;
 }): ReactElement {
   const {
+    lang,
     snapshot,
     activeHubId,
     onOpenWorkstation,
     onOpenChangeDashboard,
     onOpenCreateChangeModal,
+    onOpenDddStudio,
     onRefresh,
     onError,
   } = props;
@@ -31,6 +41,7 @@ export function RegistryView(props: {
   const infraRepos = hubRepos.filter(r => r.tier === 'infra');
   const regularRepos = hubRepos.filter(r => r.tier !== 'infra');
   const hubChanges = snapshot.changes.filter(c => c.hubId === activeHubId);
+  const hubTerms = snapshot.domainTerms.filter(t => t.hubId === activeHubId);
 
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [repoName, setRepoName] = useState('');
@@ -121,148 +132,201 @@ export function RegistryView(props: {
         }}
       >
         <div>
-          <h1 className="page-h1">Project Registry</h1>
+          <h1 className="page-h1">
+            {tr(lang, '项目与联邦仓库注册表', 'Project Registry')}
+          </h1>
           <p className="page-subtitle">
-            Manage and monitor your autonomous agent teams.
+            {tr(
+              lang,
+              '统一治理多仓联邦成员仓库、自治智能体编组与隔离工作树流水线。',
+              'Manage and monitor your autonomous agent teams across federated repositories.',
+            )}
           </p>
         </div>
         <div style={{display: 'flex', gap: 8}}>
           <button
             type="button"
             className="btn"
+            onClick={() => onOpenDddStudio()}
+          >
+            <ZapIcon size={14} />{' '}
+            {tr(
+              lang,
+              `DDD 通用语言 (${hubTerms.length})`,
+              `DDD Glossary (${hubTerms.length})`,
+            )}
+          </button>
+          <button
+            type="button"
+            className="btn"
             onClick={() => setShowRegisterModal(true)}
           >
-            <PlusIcon size={14} /> Register Project
+            <PlusIcon size={14} /> {tr(lang, '注册新项目', 'Register Project')}
           </button>
           <button
             type="button"
             className="btn btn-primary"
             onClick={() => onOpenCreateChangeModal(hubRepos[0]?.id)}
           >
-            <PlusIcon size={14} /> New Change / Epic
+            <PlusIcon size={14} />{' '}
+            {tr(lang, '新建变更 / 跨仓 Epic', 'New Change / Epic')}
           </button>
         </div>
       </div>
 
-      <div className="registry-summary-row">
+      {/* Summary Bar */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          marginBottom: 24,
+          fontSize: 12.5,
+          color: '#64748b',
+        }}
+      >
         <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
           <span>
-            Showing {hubRepos.length} of {snapshot.repositories.length} projects
+            {tr(
+              lang,
+              `共纳管 ${hubRepos.length} 个代码仓库`,
+              `Showing ${hubRepos.length} of ${hubRepos.length} projects`,
+            )}
           </span>
           <span className="tag tag-indigo">{infraRepos.length} INFRA</span>
-          <span className="tag">{regularRepos.length} Regular</span>
+          <span className="tag">
+            {regularRepos.length} {tr(lang, '常规服务', 'Regular')}
+          </span>
           <span style={{color: '#94a3b8'}}>
-            ({hubChanges.length} active change
-            {hubChanges.length === 1 ? '' : 's'} in Hub)
+            (
+            {tr(
+              lang,
+              `${hubChanges.length} 个受控变更 · ${hubTerms.length} 条限界上下文标准术语`,
+              `${hubChanges.length} active change(s) · ${hubTerms.length} DDD terms`,
+            )}
+            )
           </span>
         </div>
+
         <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
-          <span style={{fontSize: 12}}>Default Autonomy:</span>
+          <span style={{fontSize: 12}}>
+            {tr(lang, '默认自治档位：', 'Default Autonomy:')}
+          </span>
           <select
-            style={{width: 128, height: 28, padding: '0 8px', fontSize: 12}}
+            style={{width: 158, height: 28, padding: '0 8px', fontSize: 12}}
             value={permissionTier}
             onChange={e => setPermissionTier(e.target.value as PermissionTier)}
           >
             <option value="turbo">Turbo (T5/P5)</option>
-            <option value="supervised">Supervised</option>
-            <option value="strict">Strict Gate</option>
+            <option value="supervised">Supervised (T3/P2)</option>
+            <option value="strict">Strict (Manual)</option>
           </select>
         </div>
       </div>
 
-      {/* INFRA Projects Section (T5) */}
-      <div className="registry-section-title">
+      {/* Section 1: INFRA Projects (T5) */}
+      <div className="registry-section-heading">
+        <span className="registry-section-bar" />
         <ShieldIcon size={16} />
-        <span>INFRA Projects (T5) ({infraRepos.length})</span>
+        <span>
+          {tr(
+            lang,
+            `INFRA 平台基建项目 (T5) (${infraRepos.length})`,
+            `INFRA Projects (T5) (${infraRepos.length})`,
+          )}
+        </span>
       </div>
 
-      <div className="registry-grid">
-        {infraRepos.map(repo => {
-          const activeChg = hubChanges.find(c => c.repoId === repo.id);
-          return (
-            <div key={repo.id} className="project-card infra-card">
-              <div className="project-card-main">
-                <div className="project-icon-box">
-                  <ShieldIcon size={19} />
-                </div>
-                <div style={{minWidth: 0, flex: 1}}>
-                  <div className="project-title-row">
-                    <span className="project-name">{repo.name}</span>
-                    <span className="tag tag-indigo">T5</span>
-                  </div>
-                  <div className="project-badges">
-                    <span className="tag">infra</span>
-                    <span className="tag">C6</span>
-                    <span className="tag">L5</span>
-                    <span className="tag tag-indigo">
-                      {repo.boundedContext}
-                    </span>
-                    {activeChg && (
-                      <span className="tag tag-green">{activeChg.code}</span>
-                    )}
-                  </div>
-                  <div className="project-path">
-                    Path: {repo.localPath.replace(/\\/g, '/')}
-                  </div>
-                </div>
+      <div className="registry-cards-grid" style={{marginBottom: 28}}>
+        {infraRepos.map(repo => (
+          <div key={repo.id} className="project-card infra-card">
+            <div className="project-card-body">
+              <div className="project-icon-box infra">
+                <ShieldIcon size={18} />
               </div>
-              <div className="project-card-footer">
-                <button
-                  type="button"
-                  className="project-footer-btn"
-                  onClick={() => void handleConfigureTeam(repo)}
-                >
-                  Configure Team
-                </button>
-                <button
-                  type="button"
-                  className="project-footer-btn"
-                  onClick={() => void handleLiveView(repo)}
-                >
-                  Live View →
-                </button>
+              <div style={{minWidth: 0, flex: 1}}>
+                <div className="project-title-row">
+                  <span>{repo.name}</span>
+                  <span className="tag tag-indigo">T5</span>
+                </div>
+                <div className="project-tags-row">
+                  <span className="tag">infra</span>
+                  <span className="tag">C6</span>
+                  <span className="tag">L5</span>
+                  <span className="tag tag-indigo">{repo.boundedContext}</span>
+                </div>
+                <div className="project-path selectable">
+                  {tr(lang, '路径', 'Path')}:{' '}
+                  {repo.localPath.replace(/\\/g, '/')}
+                </div>
               </div>
             </div>
-          );
-        })}
+            <div className="project-card-footer">
+              <button
+                type="button"
+                className="project-footer-btn"
+                onClick={() => void handleConfigureTeam(repo)}
+              >
+                {tr(lang, '配置团队与门禁', 'Configure Team')}
+              </button>
+              <button
+                type="button"
+                className="project-footer-btn"
+                onClick={() => void handleLiveView(repo)}
+              >
+                {tr(lang, '实时工作台 →', 'Live View →')}
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
 
-      {/* Regular Service Projects Section */}
-      <div className="registry-section-title regular" style={{marginTop: 28}}>
+      {/* Section 2: Regular Projects */}
+      <div className="registry-section-heading regular">
+        <span className="registry-section-bar regular" />
         <BriefcaseIcon size={16} />
-        <span>Regular Projects ({regularRepos.length})</span>
+        <span>
+          {tr(
+            lang,
+            `常规业务服务项目 (${regularRepos.length})`,
+            `Regular Projects (${regularRepos.length})`,
+          )}
+        </span>
       </div>
 
-      <div className="registry-grid">
+      <div className="registry-cards-grid">
         {regularRepos.map((repo, idx) => {
-          const activeChg = hubChanges.find(c => c.repoId === repo.id);
+          const repoChg = hubChanges.find(c => c.repoId === repo.id);
           return (
             <div key={repo.id} className="project-card">
-              <div className="project-card-main">
+              <div className="project-card-body">
                 <div className="project-icon-box">
                   <BriefcaseIcon size={18} />
                 </div>
                 <div style={{minWidth: 0, flex: 1}}>
                   <div className="project-title-row">
-                    <span className="project-name">{repo.name}</span>
+                    <span>{repo.name}</span>
                   </div>
-                  <div className="project-badges">
+                  <div className="project-tags-row">
                     <span className="tag tag-blue">{repo.boundedContext}</span>
-                    <span className="tag">L{Math.max(3, 4 - (idx % 2))}</span>
-                    {activeChg && (
+                    <span className="tag">{idx === 0 ? 'L4' : 'L3'}</span>
+                    {repoChg && (
                       <span
                         className={`tag ${
-                          activeChg.status === 'certified'
+                          repoChg.status === 'certified'
                             ? 'tag-green'
-                            : 'tag-indigo'
+                            : 'tag-amber'
                         }`}
                       >
-                        {activeChg.code} · {activeChg.status}
+                        {repoChg.code} ·{' '}
+                        {formatStatusLabel(lang, repoChg.status)}
                       </span>
                     )}
                   </div>
-                  <div className="project-path">
-                    Path: {repo.localPath.replace(/\\/g, '/')}
+                  <div className="project-path selectable">
+                    {tr(lang, '路径', 'Path')}:{' '}
+                    {repo.localPath.replace(/\\/g, '/')}
                   </div>
                 </div>
               </div>
@@ -272,14 +336,14 @@ export function RegistryView(props: {
                   className="project-footer-btn"
                   onClick={() => void handleConfigureTeam(repo)}
                 >
-                  Configure Team
+                  {tr(lang, '配置团队与门禁', 'Configure Team')}
                 </button>
                 <button
                   type="button"
                   className="project-footer-btn"
                   onClick={() => void handleLiveView(repo)}
                 >
-                  Live View →
+                  {tr(lang, '实时工作台 →', 'Live View →')}
                 </button>
               </div>
             </div>
@@ -287,6 +351,7 @@ export function RegistryView(props: {
         })}
       </div>
 
+      {/* Register Project Modal */}
       {showRegisterModal && (
         <div
           className="modal-backdrop"
@@ -294,7 +359,13 @@ export function RegistryView(props: {
         >
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span>Register Repository Project</span>
+              <span>
+                {tr(
+                  lang,
+                  '注册纳管成员 Git 仓库',
+                  'Register Repository in Federation Hub',
+                )}
+              </span>
               <button
                 type="button"
                 className="btn btn-sm"
@@ -310,50 +381,57 @@ export function RegistryView(props: {
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: '1.4fr 1fr',
+                  gridTemplateColumns: '1fr 150px',
                   gap: 12,
                 }}
               >
                 <div>
                   <label className="field-label">
-                    Project / Repository Name
+                    {tr(lang, '项目名称', 'Project Name')}
                   </label>
                   <input
-                    placeholder="e.g. billing-ledger-service"
+                    placeholder="e.g. billing-reconciler-svc"
                     value={repoName}
                     onChange={e => setRepoName(e.target.value)}
                   />
                 </div>
                 <div>
-                  <label className="field-label">Project Tier</label>
+                  <label className="field-label">
+                    {tr(lang, '仓库层级', 'Project Tier')}
+                  </label>
                   <select
                     value={repoTier}
                     onChange={e => setRepoTier(e.target.value as RepoTier)}
                   >
-                    <option value="service">Regular Project (Service)</option>
-                    <option value="infra">INFRA Project (T5)</option>
+                    <option value="service">
+                      {tr(lang, '常规服务 (Regular)', 'Regular (Service)')}
+                    </option>
+                    <option value="infra">INFRA (T5)</option>
                   </select>
                 </div>
               </div>
 
               <div>
-                <label className="field-label">Local Git Repository Path</label>
+                <label className="field-label">
+                  {tr(lang, '本地 Git 仓库路径', 'Local Git Directory Path')}
+                </label>
                 <div style={{display: 'flex', gap: 8}}>
                   <input
-                    placeholder="D:/repos/billing-ledger-service"
+                    placeholder="D:/Projects/my-service"
                     value={repoPath}
                     onChange={e => setRepoPath(e.target.value)}
                   />
                   <button
                     type="button"
                     className="btn"
+                    style={{flexShrink: 0}}
                     onClick={() => {
                       void forgeApi.pickDirectory().then(picked => {
                         if (picked) setRepoPath(picked);
                       });
                     }}
                   >
-                    Browse...
+                    {tr(lang, '浏览…', 'Browse')}
                   </button>
                 </div>
               </div>
@@ -366,7 +444,9 @@ export function RegistryView(props: {
                 }}
               >
                 <div>
-                  <label className="field-label">DDD Bounded Context</label>
+                  <label className="field-label">
+                    {tr(lang, 'DDD 限界上下文', 'DDD Bounded Context')}
+                  </label>
                   <input
                     placeholder="e.g. Settlement"
                     value={boundedContext}
@@ -374,9 +454,11 @@ export function RegistryView(props: {
                   />
                 </div>
                 <div>
-                  <label className="field-label">Verify Gate Command</label>
+                  <label className="field-label">
+                    {tr(lang, '确定性硬门禁命令', 'Verify Gate Command')}
+                  </label>
                   <input
-                    placeholder="e.g. npm test"
+                    placeholder="npm test"
                     value={verifyCmd}
                     onChange={e => setVerifyCmd(e.target.value)}
                   />
@@ -384,10 +466,20 @@ export function RegistryView(props: {
               </div>
 
               <div>
-                <label className="field-label">Contract Summary</label>
+                <label className="field-label">
+                  {tr(
+                    lang,
+                    '面向智能体的精炼契约摘要 (Agent-Wiki)',
+                    'Agent-Wiki Contract Summary',
+                  )}
+                </label>
                 <textarea
                   rows={2}
-                  placeholder="Core API boundaries and domain responsibilities..."
+                  placeholder={tr(
+                    lang,
+                    '概述核心对外 RPC/HTTP 接口与领域不变量…',
+                    'Public RPC/REST boundaries & domain invariants...',
+                  )}
                   value={contractSummary}
                   onChange={e => setContractSummary(e.target.value)}
                 />
@@ -399,7 +491,7 @@ export function RegistryView(props: {
                 className="btn"
                 onClick={() => setShowRegisterModal(false)}
               >
-                Cancel
+                {tr(lang, '取消', 'Cancel')}
               </button>
               <button
                 type="button"
@@ -412,7 +504,7 @@ export function RegistryView(props: {
                 }
                 onClick={() => void handleRegisterSubmit()}
               >
-                Register Project
+                {tr(lang, '确认注册', 'Register Project')}
               </button>
             </div>
           </div>

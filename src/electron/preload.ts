@@ -15,7 +15,10 @@ function readArgValue(prefix: string): string {
 const bridge: ForgePreloadBridge = {
   apiBaseUrl: readArgValue('--forgeops-api-url='),
   sessionToken: readArgValue('--forgeops-token='),
+  hasNativeTitlebarOverlay: readArgValue('--forgeops-win-overlay=') === '1',
   pickDirectory: () => ipcRenderer.invoke('forgeops:pick-directory'),
+  openExternal: (url: string) =>
+    ipcRenderer.invoke('forgeops:open-external', url),
 };
 
 contextBridge.exposeInMainWorld('forgeops', bridge);

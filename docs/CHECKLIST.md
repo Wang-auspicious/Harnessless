@@ -66,3 +66,9 @@
 - [x] **9.2** Refactor `compileTwinGraph` and `WorkstationView` to stepped zero-overlap TQLA topology (`PhaseContainer` nested grid, `Decision -> FAIL -> Restore` rows, right-hand checkpoint return bus, bottom `Checkpoints` & `Legend` bars)
 - [x] **9.3** Deliver `Project Registry`, `Change Dashboard` (`POST /api/changes/:id/team` + `TQLA Configuration`), `Infra Center` (`Operational State` + `Evolution Logs`), `Agents Market` + `Agent Profile` (`POST /api/infra/adapters/:id/delete`), `Models Pool`, `Skills Bank` (+ DDD), `MCP Protocol`, `Channels Gear`, `Sessions`, `Cron Jobs`, `Heartbeat`, and `Environments`
 - [x] **9.4** Visually inspect live Electron Chromium screenshots across all primary views and pass `lint`, `typecheck`, `build`, `verify:gates`, and Electron smoke check
+
+## Phase 10 (M10): v2.2.0 DirectUI Native Hardening, `Anthropic Serif` + `思源宋体` Typography, Full Bilingual i18n & SDD Spec Studio
+- [x] **10.1** Configure global `Anthropic Serif` + `Source Han Serif SC` / `Noto Serif SC` (`思源宋体`) typography across all UI controls and React Flow Twin-Graph nodes
+- [x] **10.2** Enforce DirectUI native desktop interaction (`user-select: none` on UI chrome with `.selectable` code/path opt-in, Windows frameless `titleBarOverlay`, `window-bounds.json` persistence, single-instance lock, and external URL quarantine)
+- [x] **10.3** Activate all top-right utility controls (`Changelog`, `Doc`, `FAQ`, `GitHub`, live Ebbinghaus `R_human` pill) and deliver exhaustive `简体中文 <-> English` switching across all 8 views
+- [x] **10.4** Integrate SDD Spec enhancers (`Ctrl+K` Command Palette, 4-Section `Epistemic Rollover` Twin-Graph Node Inspector, `G1 -> DDD -> G2 -> G3` Spec Closure Ribbon, and Live `DDD Ubiquitous Language` Drift Scanner) and verify via live Electron screenshots + E2E gates

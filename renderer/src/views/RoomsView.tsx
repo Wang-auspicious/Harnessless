@@ -6,15 +6,30 @@ import type {
 import type {PermissionTier} from '../../../src/shared/types.ts';
 import {forgeApi} from '../api/client.ts';
 import {PlusIcon, WifiIcon} from '../components/Icons.tsx';
+import {
+  formatRoomScenario,
+  formatStatusLabel,
+  tr,
+  type UiLang,
+} from '../i18n.ts';
+
+const QUICK_MENTIONS = [
+  {tag: '@lead', zh: '@lead 首席架构师', en: '@lead Architect'},
+  {tag: '@ddd', zh: '@ddd 领域术语守卫', en: '@ddd Domain Guard'},
+  {tag: '@qa', zh: '@qa 独立审计官', en: '@qa Certifier'},
+  {tag: '@steward', zh: '@steward 基建管家', en: '@steward Steward'},
+] as const;
 
 export function RoomsView(props: {
+  readonly lang: UiLang;
   readonly snapshot: BootstrapSnapshot;
   readonly activeHubId: string;
   readonly refreshTick: number;
   readonly onPromotedChange: (changeId: string) => void;
   readonly onError: (msg: string) => void;
 }): ReactElement {
-  const {snapshot, activeHubId, refreshTick, onPromotedChange, onError} = props;
+  const {lang, snapshot, activeHubId, refreshTick, onPromotedChange, onError} =
+    props;
 
   const [roomSnap, setRoomSnap] = useState<RoomDetailSnapshot | null>(null);
   const [selectedRoomId, setSelectedRoomId] = useState<string | undefined>(
@@ -97,18 +112,26 @@ export function RoomsView(props: {
     <div className="page-scroll">
       <div className="page-header">
         <h1 className="page-h1">
-          <WifiIcon size={20} /> Channels Gear — Engineering Rooms
+          <WifiIcon size={20} />{' '}
+          {tr(
+            lang,
+            '多场景人机工程协作室 (Engineering Rooms)',
+            'Channels Gear — Engineering Rooms',
+          )}
         </h1>
         <p className="page-subtitle">
-          Bounded human-agent collaboration channels (`@lead`, `@ddd`, `@qa`,
-          `@steward`) with 1-click thread-to-Change promotion.
+          {tr(
+            lang,
+            '支持需求拷问、架构与 DDD 评审、阻塞升级与联合作战，讨论共识可一键升格为受控双生图变更单。',
+            'Bounded human-agent collaboration channels (@lead, @ddd, @qa, @steward) with 1-click thread-to-Change promotion.',
+          )}
         </p>
       </div>
 
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '250px 1fr',
+          gridTemplateColumns: '268px 1fr',
           gap: 18,
           minHeight: 540,
         }}
@@ -117,7 +140,7 @@ export function RoomsView(props: {
         <div style={{display: 'flex', flexDirection: 'column', gap: 14}}>
           <div className="surface-card">
             <div className="surface-card-header">
-              <span>Channels</span>
+              <span>{tr(lang, '场景频道', 'Channels')}</span>
             </div>
             <div
               className="surface-card-body"
@@ -138,9 +161,9 @@ export function RoomsView(props: {
                     setSelectedThreadId(undefined);
                   }}
                 >
-                  <span>{r.name}</span>
+                  <span>#{r.name}</span>
                   <span className="tag" style={{fontSize: 10}}>
-                    {r.scenario}
+                    {formatRoomScenario(lang, r.scenario)}
                   </span>
                 </button>
               ))}
@@ -149,14 +172,20 @@ export function RoomsView(props: {
 
           <div className="surface-card">
             <div className="surface-card-header">
-              <span>Threads ({threads.length})</span>
+              <span>
+                {tr(
+                  lang,
+                  `议题线程 (${threads.length})`,
+                  `Threads (${threads.length})`,
+                )}
+              </span>
               {selectedThreadId && (
                 <button
                   type="button"
                   className="btn btn-sm"
                   onClick={() => setSelectedThreadId(undefined)}
                 >
-                  All
+                  {tr(lang, '全部消息', 'All')}
                 </button>
               )}
             </div>
@@ -171,7 +200,11 @@ export function RoomsView(props: {
             >
               {threads.length === 0 ? (
                 <div style={{padding: 8, color: '#94a3b8', fontSize: 12}}>
-                  Post with a thread title to open a mandate thread.
+                  {tr(
+                    lang,
+                    '发送消息时填写议题标题即可开启独立授权线程，并支持一键升格为变更单。',
+                    'Post with a thread title to open a mandate thread.',
+                  )}
                 </div>
               ) : (
                 threads.map(th => (
@@ -197,7 +230,7 @@ export function RoomsView(props: {
                         th.status === 'promoted' ? 'tag-green' : ''
                       }`}
                     >
-                      {th.status}
+                      {formatStatusLabel(lang, th.status)}
                     </span>
                   </button>
                 ))
@@ -214,14 +247,16 @@ export function RoomsView(props: {
           <div className="surface-card-header">
             <div>
               <span style={{fontWeight: 700}}>
-                {activeRoom?.name ?? '#room'}
+                #{activeRoom?.name ?? 'room'}
               </span>
               <span style={{marginLeft: 10, fontSize: 12, color: '#64748b'}}>
                 {activeRoom?.topic}
               </span>
             </div>
             <span className="tag tag-indigo">
-              {selectedThreadId ? 'Thread Scoped' : 'Channel Stream'}
+              {selectedThreadId
+                ? tr(lang, '已锁定议题线程', 'Thread Scoped')
+                : tr(lang, '频道全景流', 'Channel Stream')}
             </span>
           </div>
 
@@ -237,7 +272,7 @@ export function RoomsView(props: {
               }}
             >
               <select
-                style={{width: 170}}
+                style={{width: 175}}
                 value={promoteRepoId || hubRepos[0]?.id || ''}
                 onChange={e => setPromoteRepoId(e.target.value)}
               >
@@ -248,18 +283,28 @@ export function RoomsView(props: {
                 ))}
               </select>
               <input
-                placeholder="Promote thread into governed Change title..."
+                placeholder={tr(
+                  lang,
+                  '将该线程共识升格为受控变更单标题...',
+                  'Promote thread into governed Change title...',
+                )}
                 value={promoteTitle}
                 onChange={e => setPromoteTitle(e.target.value)}
               />
               <select
-                style={{width: 120}}
+                style={{width: 135}}
                 value={promoteTier}
                 onChange={e => setPromoteTier(e.target.value as PermissionTier)}
               >
-                <option value="turbo">Turbo</option>
-                <option value="supervised">Supervised</option>
-                <option value="strict">Strict</option>
+                <option value="turbo">
+                  {tr(lang, '极速自治 (Turbo)', 'Turbo')}
+                </option>
+                <option value="supervised">
+                  {tr(lang, '受控监督 (Supervised)', 'Supervised')}
+                </option>
+                <option value="strict">
+                  {tr(lang, '严格门禁 (Strict)', 'Strict')}
+                </option>
               </select>
               <button
                 type="button"
@@ -267,7 +312,7 @@ export function RoomsView(props: {
                 disabled={busy || !promoteTitle.trim()}
                 onClick={() => void handlePromote()}
               >
-                <PlusIcon size={13} /> Promote
+                <PlusIcon size={13} /> {tr(lang, '升格为变更单', 'Promote')}
               </button>
             </div>
           )}
@@ -284,10 +329,12 @@ export function RoomsView(props: {
             }}
           >
             {visibleMessages.length === 0 ? (
-              <div style={{color: '#64748b'}}>
-                Mention <code>@lead</code>, <code>@ddd</code>, <code>@qa</code>,
-                or <code>@steward</code> to convene an architecture or
-                requirement grilling session.
+              <div style={{color: '#64748b', lineHeight: 1.6}}>
+                {tr(
+                  lang,
+                  '点击下方角色标签或输入 @lead、@ddd、@qa、@steward，即可通过人类优先预留槽位（Priority Slot）召唤专家智能体开展需求压力测试或架构评审。',
+                  'Mention @lead, @ddd, @qa, or @steward to convene an architecture or requirement grilling session.',
+                )}
               </div>
             ) : (
               visibleMessages.map(m => (
@@ -316,14 +363,19 @@ export function RoomsView(props: {
                           m.authorKind === 'agent' ? 'tag-indigo' : ''
                         }`}
                       >
-                        {m.authorKind}
+                        {m.authorKind === 'agent'
+                          ? tr(lang, '智能体', 'agent')
+                          : tr(lang, '人类工程师', 'human')}
                       </span>
                     </strong>
                     <span style={{color: '#94a3b8'}}>
                       {new Date(m.createdAt).toLocaleTimeString()}
                     </span>
                   </div>
-                  <div style={{whiteSpace: 'pre-wrap', color: '#334155'}}>
+                  <div
+                    className="selectable"
+                    style={{whiteSpace: 'pre-wrap', color: '#334155'}}
+                  >
                     {m.bodyMarkdown}
                   </div>
                 </div>
@@ -341,16 +393,44 @@ export function RoomsView(props: {
               gap: 8,
             }}
           >
+            <div style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}>
+              {QUICK_MENTIONS.map(qm => (
+                <button
+                  key={qm.tag}
+                  type="button"
+                  className="btn btn-sm"
+                  style={{height: 24, fontSize: 11.5, padding: '0 8px'}}
+                  onClick={() =>
+                    setMsgBody(prev =>
+                      prev.includes(qm.tag)
+                        ? prev
+                        : `${qm.tag} ${prev}`.trimStart(),
+                    )
+                  }
+                >
+                  {tr(lang, qm.zh, qm.en)}
+                </button>
+              ))}
+            </div>
+
             {!selectedThreadId && (
               <input
-                placeholder="Optional new thread title (e.g. Grill Settlement Retry Spec)"
+                placeholder={tr(
+                  lang,
+                  '可选：新建议题线程标题（如：对账结算重试幂等边界拷问）',
+                  'Optional new thread title (e.g. Grill Settlement Retry Spec)',
+                )}
                 value={newThreadTitle}
                 onChange={e => setNewThreadTitle(e.target.value)}
               />
             )}
             <div style={{display: 'flex', gap: 8}}>
               <input
-                placeholder="Write message... mention @lead, @ddd, @qa, or @steward"
+                placeholder={tr(
+                  lang,
+                  '输入讨论内容，可 @lead / @ddd / @qa / @steward 协同推演...',
+                  'Write message... mention @lead, @ddd, @qa, or @steward',
+                )}
                 value={msgBody}
                 onChange={e => setMsgBody(e.target.value)}
                 onKeyDown={e => {
@@ -366,7 +446,7 @@ export function RoomsView(props: {
                 disabled={busy || !msgBody.trim()}
                 onClick={() => void handleSend()}
               >
-                Send
+                {tr(lang, '发送', 'Send')}
               </button>
             </div>
           </div>

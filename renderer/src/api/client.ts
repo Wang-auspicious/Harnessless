@@ -324,6 +324,14 @@ export const forgeApi = {
     return null;
   },
 
+  openExternal: async (url: string): Promise<boolean> => {
+    if (window.forgeops?.openExternal) {
+      return window.forgeops.openExternal(url);
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return true;
+  },
+
   subscribeEvents: (onEvent: (ev: ForgeSseEvent) => void): (() => void) => {
     const cfg = getBridgeConfig();
     const url = `${cfg.apiBaseUrl}/api/events?token=${encodeURIComponent(cfg.sessionToken)}`;

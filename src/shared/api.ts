@@ -198,5 +198,7 @@ export type ForgeSseEvent =
 export interface ForgePreloadBridge {
   readonly apiBaseUrl: string;
   readonly sessionToken: string;
+  readonly hasNativeTitlebarOverlay?: boolean;
   pickDirectory(): Promise<string | null>;
+  openExternal?(url: string): Promise<boolean>;
 }

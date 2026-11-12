@@ -18,6 +18,7 @@ import type {
   ChangeDetailSnapshot,
 } from '../../../src/shared/api.ts';
 import type {
+  DomainTermEntry,
   GraphNode,
   GraphNodeKind,
   GraphNodeStatus,
@@ -40,24 +41,64 @@ import {
   SearchIcon,
   ShieldIcon,
 } from '../components/Icons.tsx';
+import {formatStatusLabel, tr, type UiLang} from '../i18n.ts';
 
 export type WorkstationTab = 'details' | 'monitor' | 'activity' | 'graph';
 
 interface StageNodeData extends Record<string, unknown> {
   readonly node: GraphNode;
   readonly isSelected: boolean;
+  readonly lang: UiLang;
 }
 
 interface PhaseNodeData extends Record<string, unknown> {
   readonly node: GraphNode;
   readonly doneCount: number;
   readonly totalCount: number;
+  readonly lang: UiLang;
   readonly onToggleCollapse: (nodeId: string, nextCollapsed: boolean) => void;
 }
 
 interface TaskMiniNodeData extends Record<string, unknown> {
   readonly node: GraphNode;
   readonly isSelected: boolean;
+  readonly lang: UiLang;
+}
+
+function localizeStageTitle(lang: UiLang, node: GraphNode): string {
+  if (lang === 'EN') {
+    return node.title;
+  }
+  switch (node.kind) {
+    case 'start':
+      return '开始 (Start)';
+    case 'end':
+      return '认证完结 (End)';
+    case 'verify':
+      return '规格与 DDD 完整性守卫';
+    case 'gates':
+      return '确定性硬门禁 (Lint/Test)';
+    case 'selfcheck':
+      return '提审前自检 (Selfcheck)';
+    case 'audit_jqa':
+      return 'JQA 一致性初审';
+    case 'audit_sqa':
+      return 'SQA 架构与逻辑终审';
+    case 'decision':
+      if (node.title.includes('JQA')) return '裁决：JQA 初审';
+      if (node.title.includes('SQA')) return '裁决：SQA 终审';
+      return '门禁裁决节点';
+    case 'restore':
+      return node.title.includes('DEV')
+        ? '物理回退恢复 (DEV)'
+        : '物理回退恢复 (Restore)';
+    case 'checkpoint':
+      return node.code === 'CP-0'
+        ? '准备阶段 (基线检查点)'
+        : '质量锚点检查点 (QA CP)';
+    default:
+      return node.title;
+  }
 }
 
 function getKindMeta(kind: GraphNodeKind): {
@@ -161,7 +202,7 @@ function getBorderClass(node: GraphNode): string {
 }
 
 function ForgeStageNode({data}: NodeProps): ReactElement {
-  const {node, isSelected} = data as StageNodeData;
+  const {node, isSelected, lang} = data as StageNodeData;
   const meta = getKindMeta(node.kind);
   const borderClass = getBorderClass(node);
   const isDone = node.status === 'certified' || node.status === 'waived';
@@ -169,6 +210,7 @@ function ForgeStageNode({data}: NodeProps): ReactElement {
     node.status === 'running' ||
     node.status === 'ready' ||
     node.status === 'rewound';
+  const displayTitle = localizeStageTitle(lang, node);
 
   return (
     <div
@@ -195,7 +237,7 @@ function ForgeStageNode({data}: NodeProps): ReactElement {
           />
         )}
       </div>
-      <div className="tg-node-title-row" title={node.title}>
+      <div className="tg-node-title-row" title={displayTitle}>
         <span
           style={{
             color:
@@ -209,7 +251,7 @@ function ForgeStageNode({data}: NodeProps): ReactElement {
         >
           {meta.badgeIcon}
         </span>
-        <span>{node.title}</span>
+        <span>{displayTitle}</span>
       </div>
       <Handle type="source" position={Position.Right} id="right" />
       <Handle type="source" position={Position.Bottom} id="bottom" />
@@ -318,15 +360,10 @@ function ForgePhaseNode({data}: NodeProps): ReactElement {
 }
 
 function ForgeTaskMiniNode({data}: NodeProps): ReactElement {
-  const {node, isSelected} = data as TaskMiniNodeData;
+  const {node, isSelected, lang} = data as TaskMiniNodeData;
   const isDone = node.status === 'certified' || node.status === 'waived';
   const isRunning = node.status === 'running';
   const dotColor = isDone ? '#22c55e' : isRunning ? '#eab308' : '#94a3b8';
-  const statusText = isDone
-    ? 'completed'
-    : isRunning
-      ? 'in_progress'
-      : node.status;
 
   return (
     <div
@@ -361,7 +398,7 @@ function ForgeTaskMiniNode({data}: NodeProps): ReactElement {
         </span>
       </div>
       <div style={{fontSize: 10, color: '#64748b', paddingLeft: 13}}>
-        {statusText}
+        {formatStatusLabel(lang, node.status)}
       </div>
       <Handle type="source" position={Position.Right} id="right" />
     </div>
@@ -404,6 +441,7 @@ function renderWbsStatusIcon(status: GraphNodeStatus): ReactElement {
 }
 
 export function WorkstationView(props: {
+  readonly lang: UiLang;
   readonly snapshot: BootstrapSnapshot;
   readonly activeHubId: string;
   readonly activeChangeId: string | null;
@@ -415,6 +453,7 @@ export function WorkstationView(props: {
   readonly onRefresh: () => void;
 }): ReactElement {
   const {
+    lang,
     snapshot,
     activeHubId,
     activeChangeId,
@@ -444,6 +483,7 @@ export function WorkstationView(props: {
   const [activeTab, setActiveTab] = useState<WorkstationTab>('graph');
   const [detail, setDetail] = useState<ChangeDetailSnapshot | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [showInspector, setShowInspector] = useState(true);
   const [collapsedSidebarPhases, setCollapsedSidebarPhases] = useState<
     Record<string, boolean>
   >({});
@@ -543,6 +583,16 @@ export function WorkstationView(props: {
     [snapshot.repositories, detail?.change.repoId, hubRepos, selectedRepoId],
   );
 
+  const boundDddTerms = useMemo((): readonly DomainTermEntry[] => {
+    if (!activeRepo) return [];
+    return snapshot.domainTerms.filter(
+      t =>
+        t.hubId === activeHubId &&
+        (t.boundedContext === activeRepo.boundedContext ||
+          t.owningRepoIds.includes(activeRepo.id)),
+    );
+  }, [snapshot.domainTerms, activeHubId, activeRepo]);
+
   const handleToggleContainerCollapse = async (
     nodeId: string,
     nextCollapsed: boolean,
@@ -569,7 +619,6 @@ export function WorkstationView(props: {
         .map(n => n.id),
     );
 
-    // Compute vertical Y-shift whenever an upstream PhaseContainer is collapsed
     const sortedContainers = detail.nodes
       .filter(n => n.kind === 'phase_container')
       .sort((a, b) => a.positionY - b.positionY);
@@ -621,6 +670,7 @@ export function WorkstationView(props: {
             node: n,
             doneCount: doneChildren,
             totalCount: children.length,
+            lang,
             onToggleCollapse: (id: string, col: boolean) => {
               void handleToggleContainerCollapse(id, col);
             },
@@ -648,12 +698,12 @@ export function WorkstationView(props: {
           data: {
             node: n,
             isSelected: n.id === selectedNodeId,
+            lang,
           } satisfies TaskMiniNodeData,
         });
         continue;
       }
 
-      // If parentWbsId is a collapsed PhaseContainer and this is Gates/GatesDecision, pull left cleanly
       let x = n.positionX;
       let y = shiftBeforeY(n.positionY);
       if (
@@ -679,6 +729,7 @@ export function WorkstationView(props: {
         data: {
           node: n,
           isSelected: n.id === selectedNodeId,
+          lang,
         } satisfies StageNodeData,
       });
     }
@@ -763,7 +814,7 @@ export function WorkstationView(props: {
       });
 
     return {rfNodes: nodesOut, rfEdges: edgesOut};
-  }, [detail, selectedNodeId]);
+  }, [detail, selectedNodeId, lang]);
 
   const handleRunResume = async (): Promise<void> => {
     if (!detail) {
@@ -792,7 +843,12 @@ export function WorkstationView(props: {
         changeId: detail.change.id,
         title: ghostTitle.trim(),
         description:
-          ghostDesc.trim() || 'Runtime GhostNode plan amendment slice.',
+          ghostDesc.trim() ||
+          tr(
+            lang,
+            '运行时动态插入的 GhostNode 前置修订切片。',
+            'Runtime GhostNode plan amendment slice.',
+          ),
         insertBeforeNodeId: targetId,
       });
       setGhostTitle('');
@@ -821,18 +877,21 @@ export function WorkstationView(props: {
             style={{textAlign: 'center', padding: 40}}
           >
             <div style={{fontSize: 16, fontWeight: 700, marginBottom: 6}}>
-              No Active Changes in Hub
+              {tr(lang, '当前联邦中枢暂无在途变更', 'No Active Changes in Hub')}
             </div>
             <p style={{color: '#64748b', marginBottom: 16}}>
-              Create a governed Change to compile a synchronized WBS + Twin
-              Graph and isolate a physical Git worktree.
+              {tr(
+                lang,
+                '创建一份受控变更单，自动编译同步 WBS 与双生执行图，并开辟物理隔离的 Git Worktree。',
+                'Create a governed Change to compile a synchronized WBS + Twin Graph and isolate a physical Git worktree.',
+              )}
             </p>
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => onOpenCreateChangeModal(hubRepos[0]?.id)}
             >
-              <PlusIcon size={14} /> New Change
+              <PlusIcon size={14} /> {tr(lang, '新建变更单', 'New Change')}
             </button>
           </div>
         </div>
@@ -848,14 +907,14 @@ export function WorkstationView(props: {
 
   return (
     <div className="workstation-root">
-      {/* Top Workstation Control Strip (1:1 Reference Match) */}
+      {/* Top Workstation Control Strip */}
       <div className="workstation-strip">
         <div className="workstation-strip-left">
           <span className="workstation-brand">
             <span style={{color: '#3b82f6', display: 'flex'}}>
               <GridIcon size={15} />
             </span>
-            ForgeOps Workstation
+            {tr(lang, 'ForgeOps 工作台', 'ForgeOps Workstation')}
           </span>
 
           <select
@@ -890,10 +949,13 @@ export function WorkstationView(props: {
                 c.title.length > 36
                   ? `${c.title.slice(0, 35).replace(/\s+\S*$/, '')}…`
                   : c.title;
+              const stLabel =
+                c.status === 'certified'
+                  ? tr(lang, '已完成', 'completed')
+                  : tr(lang, '在途', 'active');
               return (
                 <option key={c.id} value={c.id}>
-                  {c.code.toLowerCase()} · {shortTitle} (
-                  {c.status === 'certified' ? 'completed' : 'active'})
+                  {c.code.toLowerCase()} · {shortTitle} ({stLabel})
                 </option>
               );
             })}
@@ -904,7 +966,11 @@ export function WorkstationView(props: {
               type="button"
               className="tag tag-blue"
               style={{cursor: 'pointer', height: 25, padding: '0 9px'}}
-              title="Open Change Team & TQLA Dashboard"
+              title={tr(
+                lang,
+                '打开变更编组与 TQLA 双级门禁治理台',
+                'Open Change Team & TQLA Dashboard',
+              )}
               onClick={() => onOpenChangeDashboard(detail.change.id)}
             >
               {tierTagLabel}
@@ -919,7 +985,7 @@ export function WorkstationView(props: {
             disabled={busy || !detail}
             onClick={() => void handleRunResume()}
           >
-            <PlayIcon size={12} /> Run / Resume
+            <PlayIcon size={12} /> {tr(lang, '启动 / 续跑', 'Run / Resume')}
           </button>
           <button
             type="button"
@@ -927,10 +993,10 @@ export function WorkstationView(props: {
             disabled={!detail}
             onClick={() => setShowGhostModal(true)}
           >
-            <PlusIcon size={13} /> Amendment
+            <PlusIcon size={13} /> {tr(lang, '计划修订', 'Amendment')}
           </button>
           <button type="button" className="btn btn-sm" onClick={onRefresh}>
-            <RefreshIcon size={13} /> Refresh
+            <RefreshIcon size={13} /> {tr(lang, '刷新', 'Refresh')}
           </button>
         </div>
       </div>
@@ -941,7 +1007,7 @@ export function WorkstationView(props: {
         <aside className="wbs-sidebar">
           <div className="wbs-progress-box">
             <div className="wbs-progress-header">
-              <span>Progress</span>
+              <span>{tr(lang, '总体进度', 'Progress')}</span>
               <span className="wbs-progress-pct">{progressPct}%</span>
             </div>
             <div className="wbs-progress-track">
@@ -951,7 +1017,8 @@ export function WorkstationView(props: {
               />
             </div>
             <div className="wbs-progress-sub">
-              {doneTaskCount} / {allTaskNodes.length} tasks
+              {doneTaskCount} / {allTaskNodes.length}{' '}
+              {tr(lang, '个切片任务', 'tasks')}
             </div>
           </div>
 
@@ -993,7 +1060,9 @@ export function WorkstationView(props: {
                       ) : (
                         <ChevronDownIcon size={13} />
                       )}
-                      <span>Phase {idx + 1}</span>
+                      <span>
+                        {tr(lang, `阶段 ${idx + 1}`, `Phase ${idx + 1}`)}
+                      </span>
                     </span>
                     <span
                       className={`wbs-phase-count ${pct === 100 ? 'done' : ''}`}
@@ -1010,7 +1079,10 @@ export function WorkstationView(props: {
                           className={`wbs-task-card ${
                             selectedNode?.id === t.id ? 'selected' : ''
                           }`}
-                          onClick={() => setSelectedNodeId(t.id)}
+                          onClick={() => {
+                            setSelectedNodeId(t.id);
+                            setShowInspector(true);
+                          }}
                           onDoubleClick={() => {
                             setSelectedNodeId(t.id);
                             setActiveTab('details');
@@ -1019,7 +1091,7 @@ export function WorkstationView(props: {
                           {renderWbsStatusIcon(t.status)}
                           <div style={{minWidth: 0, flex: 1}}>
                             <div className="wbs-task-title">
-                              Task {t.code}: {t.title}
+                              {tr(lang, '任务', 'Task')} {t.code}: {t.title}
                             </div>
                             <div
                               className="wbs-task-code"
@@ -1031,7 +1103,9 @@ export function WorkstationView(props: {
                             >
                               <span>T{t.code}</span>
                               {t.kind === 'ghost' && (
-                                <span className="tag tag-indigo">Ghost</span>
+                                <span className="tag tag-indigo">
+                                  {tr(lang, '动态修订', 'Ghost')}
+                                </span>
                               )}
                             </div>
                           </div>
@@ -1051,10 +1125,10 @@ export function WorkstationView(props: {
             <div className="underline-tabs" style={{borderBottom: 'none'}}>
               {(
                 [
-                  ['details', 'Task Details'],
-                  ['monitor', 'Flow Monitor'],
-                  ['activity', 'Activity'],
-                  ['graph', 'Twin Graph'],
+                  ['details', tr(lang, '任务详情', 'Task Details')],
+                  ['monitor', tr(lang, '实时执行流', 'Flow Monitor')],
+                  ['activity', tr(lang, '演进活动', 'Activity')],
+                  ['graph', tr(lang, '双生执行图', 'Twin Graph')],
                 ] as const
               ).map(([tabKey, label]) => (
                 <button
@@ -1077,14 +1151,24 @@ export function WorkstationView(props: {
               {selectedNode ? (
                 <div className="surface-card">
                   <div className="surface-card-header">
-                    <span>Task Information</span>
+                    <span>
+                      {tr(
+                        lang,
+                        '任务与认知契约信息',
+                        'Task & Epistemic Contract Information',
+                      )}
+                    </span>
                     <div style={{display: 'flex', gap: 8}}>
                       <button
                         type="button"
                         className="btn btn-sm"
                         onClick={() => void handleInspectDiff()}
                       >
-                        Inspect Worktree Diff
+                        {tr(
+                          lang,
+                          '检视 Worktree 代码差异',
+                          'Inspect Worktree Diff',
+                        )}
                       </button>
                       {detail && (
                         <button
@@ -1094,7 +1178,7 @@ export function WorkstationView(props: {
                             onOpenChangeDashboard(detail.change.id)
                           }
                         >
-                          Configure Team
+                          {tr(lang, '编组与门禁配置', 'Configure Team')}
                         </button>
                       )}
                     </div>
@@ -1109,15 +1193,22 @@ export function WorkstationView(props: {
                       }}
                     >
                       <div>
-                        <div className="field-label">Task ID</div>
-                        <div style={{fontWeight: 700, fontSize: 13.5}}>
+                        <div className="field-label">
+                          {tr(lang, '节点编号', 'Task ID')}
+                        </div>
+                        <div
+                          className="selectable"
+                          style={{fontWeight: 700, fontSize: 13.5}}
+                        >
                           {selectedNode.kind === 'task'
                             ? `T${selectedNode.code}`
                             : selectedNode.code}
                         </div>
                       </div>
                       <div>
-                        <div className="field-label">Phase</div>
+                        <div className="field-label">
+                          {tr(lang, '所属阶段', 'Phase')}
+                        </div>
                         <div style={{fontWeight: 600}}>
                           {(() => {
                             const idx = phaseContainers.findIndex(
@@ -1126,13 +1217,15 @@ export function WorkstationView(props: {
                                 p.id === selectedNode.parentWbsId,
                             );
                             return idx >= 0
-                              ? `Phase ${idx + 1}`
-                              : 'Global Spine';
+                              ? tr(lang, `阶段 ${idx + 1}`, `Phase ${idx + 1}`)
+                              : tr(lang, '全局控制脊柱', 'Global Spine');
                           })()}
                         </div>
                       </div>
                       <div>
-                        <div className="field-label">Status</div>
+                        <div className="field-label">
+                          {tr(lang, '认证状态', 'Status')}
+                        </div>
                         <span
                           className={`tag ${
                             selectedNode.status === 'certified'
@@ -1144,13 +1237,13 @@ export function WorkstationView(props: {
                                   : ''
                           }`}
                         >
-                          {selectedNode.status === 'certified'
-                            ? 'completed'
-                            : selectedNode.status}
+                          {formatStatusLabel(lang, selectedNode.status)}
                         </span>
                       </div>
                       <div>
-                        <div className="field-label">Assignee</div>
+                        <div className="field-label">
+                          {tr(lang, '指派执行智能体', 'Assignee')}
+                        </div>
                         <div style={{color: '#334155', fontWeight: 500}}>
                           {selectedNode.assignedAdapterId
                             ? `${selectedNode.assignedAdapterId} (${selectedNode.assignedModel ?? 'default'})`
@@ -1160,23 +1253,59 @@ export function WorkstationView(props: {
                     </div>
 
                     <div style={{marginBottom: 16}}>
-                      <div className="field-label">Description</div>
-                      <div style={{color: '#1e293b', lineHeight: 1.6}}>
-                        Task {selectedNode.code}: {selectedNode.title} —{' '}
+                      <div className="field-label">
+                        {tr(lang, '切片职责与边界说明', 'Description')}
+                      </div>
+                      <div
+                        className="selectable"
+                        style={{color: '#1e293b', lineHeight: 1.65}}
+                      >
+                        {selectedNode.code}: {selectedNode.title} —{' '}
                         {selectedNode.description}
                       </div>
                     </div>
 
+                    {boundDddTerms.length > 0 && (
+                      <div style={{marginBottom: 16}}>
+                        <div className="field-label">
+                          {tr(
+                            lang,
+                            '挂载 DDD 领域通用语言约束（严禁混用黑名单同义词）',
+                            'Grounded DDD Ubiquitous Language Invariants',
+                          )}
+                        </div>
+                        <div
+                          style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}
+                        >
+                          {boundDddTerms.map(term => (
+                            <span
+                              key={term.id}
+                              className="tag tag-indigo"
+                              title={`${term.definition} | 禁用: ${term.forbiddenAliases.join(', ')}`}
+                            >
+                              {term.canonicalTerm} ({term.localLabel})
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {selectedNode.fileScope.length > 0 && (
                       <div style={{marginBottom: 16}}>
-                        <div className="field-label">File Scope</div>
+                        <div className="field-label">
+                          {tr(
+                            lang,
+                            '受控文件修改边界 (File Scope)',
+                            'File Scope',
+                          )}
+                        </div>
                         <div
                           style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}
                         >
                           {selectedNode.fileScope.map(f => (
                             <span
                               key={f}
-                              className="tag"
+                              className="tag selectable"
                               style={{fontFamily: 'var(--font-mono)'}}
                             >
                               {f}
@@ -1188,6 +1317,7 @@ export function WorkstationView(props: {
 
                     {selectedNode.outputSummary && (
                       <div
+                        className="selectable"
                         style={{
                           padding: '10px 14px',
                           borderRadius: 8,
@@ -1197,7 +1327,13 @@ export function WorkstationView(props: {
                           fontSize: 12.5,
                         }}
                       >
-                        <strong>Certified Deliverable:</strong>{' '}
+                        <strong>
+                          {tr(
+                            lang,
+                            '已认证交付证据：',
+                            'Certified Deliverable: ',
+                          )}
+                        </strong>
                         {selectedNode.outputSummary}
                       </div>
                     )}
@@ -1216,18 +1352,23 @@ export function WorkstationView(props: {
                             className="field-label"
                             style={{marginBottom: 0}}
                           >
-                            Isolated Git Worktree Diff (
-                            {detail?.change.gitBranch})
+                            {tr(
+                              lang,
+                              '物理隔离 Git Worktree 差异',
+                              'Isolated Git Worktree Diff',
+                            )}{' '}
+                            ({detail?.change.gitBranch})
                           </span>
                           <button
                             type="button"
                             className="btn btn-sm"
                             onClick={() => setDiffText(null)}
                           >
-                            Close Diff
+                            {tr(lang, '收起差异', 'Close Diff')}
                           </button>
                         </div>
                         <pre
+                          className="selectable"
                           style={{
                             margin: 0,
                             padding: 14,
@@ -1266,16 +1407,21 @@ export function WorkstationView(props: {
               >
                 <div className="surface-card">
                   <div className="surface-card-body">
-                    <div className="field-label">Execution Status</div>
+                    <div className="field-label">
+                      {tr(lang, '变更状态', 'Execution Status')}
+                    </div>
                     <div style={{fontSize: 15, fontWeight: 700}}>
-                      {detail.change.status.toUpperCase()}
+                      {formatStatusLabel(lang, detail.change.status)}
                     </div>
                   </div>
                 </div>
                 <div className="surface-card">
                   <div className="surface-card-body">
-                    <div className="field-label">Git Worktree Branch</div>
+                    <div className="field-label">
+                      {tr(lang, '隔离工作树分支', 'Git Worktree Branch')}
+                    </div>
                     <div
+                      className="selectable"
                       style={{
                         fontSize: 12.5,
                         fontWeight: 600,
@@ -1288,7 +1434,9 @@ export function WorkstationView(props: {
                 </div>
                 <div className="surface-card">
                   <div className="surface-card-body">
-                    <div className="field-label">Quality Score</div>
+                    <div className="field-label">
+                      {tr(lang, '门禁质量分', 'Quality Score')}
+                    </div>
                     <div
                       style={{fontSize: 15, fontWeight: 700, color: '#16a34a'}}
                     >
@@ -1298,7 +1446,9 @@ export function WorkstationView(props: {
                 </div>
                 <div className="surface-card">
                   <div className="surface-card-body">
-                    <div className="field-label">Sessions Recorded</div>
+                    <div className="field-label">
+                      {tr(lang, '独立切片会话数', 'Sessions Recorded')}
+                    </div>
                     <div style={{fontSize: 15, fontWeight: 700}}>
                       {detail.sessions.length}
                     </div>
@@ -1308,15 +1458,25 @@ export function WorkstationView(props: {
 
               <div className="surface-card">
                 <div className="surface-card-header">
-                  <span>Live Execution Transcript Stream</span>
-                  <span className="tag tag-indigo">SSE Connected</span>
+                  <span>
+                    {tr(
+                      lang,
+                      '实时智能体执行与工具输出流',
+                      'Live Execution Transcript Stream',
+                    )}
+                  </span>
+                  <span className="tag tag-indigo">
+                    {tr(lang, 'SSE 实时流已连接', 'SSE Connected')}
+                  </span>
                 </div>
                 <div className="surface-card-body">
                   {[...sessionMessages, ...liveChunks].length === 0 ? (
                     <div style={{color: '#64748b', padding: '12px 0'}}>
-                      No execution transcripts yet. Click{' '}
-                      <strong>Run / Resume</strong> in the top bar to launch
-                      autonomous slice execution.
+                      {tr(
+                        lang,
+                        '暂无切片会话轨迹。点击右上角「启动 / 续跑」开始无人值守推进。',
+                        'No execution transcripts yet. Click Run / Resume in the top bar to launch autonomous slice execution.',
+                      )}
                     </div>
                   ) : (
                     <div
@@ -1356,6 +1516,7 @@ export function WorkstationView(props: {
                             </span>
                           </div>
                           <div
+                            className="selectable"
                             style={{
                               fontSize: 12.5,
                               color: '#1e293b',
@@ -1380,13 +1541,21 @@ export function WorkstationView(props: {
             >
               <div className="surface-card">
                 <div className="surface-card-header">
-                  <span>Change Activity & Governance Timeline</span>
-                  <span className="tag">{changeAuditItems.length} events</span>
+                  <span>
+                    {tr(
+                      lang,
+                      '变更治理与审计时间轴',
+                      'Change Activity & Governance Timeline',
+                    )}
+                  </span>
+                  <span className="tag">
+                    {changeAuditItems.length} {tr(lang, '条记录', 'events')}
+                  </span>
                 </div>
                 <div className="surface-card-body">
                   {changeAuditItems.length === 0 ? (
                     <div style={{color: '#64748b'}}>
-                      No activity recorded yet.
+                      {tr(lang, '暂无活动记录。', 'No activity recorded yet.')}
                     </div>
                   ) : (
                     changeAuditItems.map(item => (
@@ -1397,7 +1566,9 @@ export function WorkstationView(props: {
                         <div style={{fontWeight: 700, color: '#1e293b'}}>
                           {item.title}
                         </div>
-                        <div style={{color: '#475569'}}>{item.detail}</div>
+                        <div className="selectable" style={{color: '#475569'}}>
+                          {item.detail}
+                        </div>
                       </div>
                     ))
                   )}
@@ -1409,8 +1580,161 @@ export function WorkstationView(props: {
           {activeTab === 'graph' && (
             <div className="workstation-tab-panel graph-mode">
               <div className="tg-floating-pill">
-                Twin Graph (Phase 容器 + Task 嵌套)
+                {tr(
+                  lang,
+                  '双生执行图 (Phase 阶段容器 + Task 切片嵌套 + TQLA 双级门禁)',
+                  'Twin Graph (Phase Container + Nested Tasks + TQLA Gates)',
+                )}
               </div>
+
+              {!showInspector && selectedNode && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  style={{
+                    position: 'absolute',
+                    top: 12,
+                    right: 14,
+                    zIndex: 6,
+                    background: '#ffffff',
+                  }}
+                  onClick={() => setShowInspector(true)}
+                >
+                  <EyeIcon size={12} />{' '}
+                  {tr(lang, '展开认知检视器', 'Show Node Inspector')}
+                </button>
+              )}
+
+              {/* SDD §7.2 Floating Node & 4-Section Epistemic Rollover Inspector */}
+              {showInspector && selectedNode && (
+                <div className="tg-inspector-card">
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: 8,
+                    }}
+                  >
+                    <span style={{fontWeight: 700, color: '#0f172a'}}>
+                      {selectedNode.code} ·{' '}
+                      {localizeStageTitle(lang, selectedNode)}
+                    </span>
+                    <button
+                      type="button"
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        color: '#94a3b8',
+                      }}
+                      title={tr(lang, '收起浮层', 'Minimize')}
+                      onClick={() => setShowInspector(false)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: 6,
+                      flexWrap: 'wrap',
+                      marginBottom: 8,
+                    }}
+                  >
+                    <span className="tag tag-blue">
+                      {formatStatusLabel(lang, selectedNode.status)}
+                    </span>
+                    <span className="tag">
+                      {tr(lang, '尝试', 'Attempts')}:{' '}
+                      {selectedNode.attemptCount}/{selectedNode.maxAttempts}
+                    </span>
+                    {selectedNode.assignedModel && (
+                      <span className="tag tag-indigo">
+                        {selectedNode.assignedModel}
+                      </span>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      color: '#475569',
+                      lineHeight: 1.5,
+                      marginBottom: 10,
+                    }}
+                  >
+                    {selectedNode.description}
+                  </div>
+
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 7,
+                      background: '#f8fafc',
+                      border: '1px solid #e2e8f0',
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        color: '#4f46e5',
+                        marginBottom: 4,
+                      }}
+                    >
+                      {tr(
+                        lang,
+                        'SDD 四段式认知移交摘要 (Epistemic Rollover)',
+                        'SDD Epistemic Rollover Ledger',
+                      )}
+                    </div>
+                    <div style={{fontSize: 11.5, color: '#334155'}}>
+                      <div>
+                        •{' '}
+                        <strong>
+                          {tr(lang, '已证实事实：', 'Confirmed: ')}
+                        </strong>
+                        {selectedNode.outputSummary ||
+                          tr(
+                            lang,
+                            '遵循限界上下文契约与文件边界',
+                            'Grounded to Bounded Context contract',
+                          )}
+                      </div>
+                      <div style={{marginTop: 3}}>
+                        •{' '}
+                        <strong>
+                          {tr(lang, 'DDD 术语锚点：', 'DDD Terms: ')}
+                        </strong>
+                        {boundDddTerms.length > 0
+                          ? boundDddTerms.map(t => t.canonicalTerm).join(', ')
+                          : tr(lang, '全局标准词典', 'Hub Standard Glossary')}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{display: 'flex', gap: 6}}>
+                    <button
+                      type="button"
+                      className="btn btn-soft btn-sm"
+                      style={{flex: 1}}
+                      onClick={() => setActiveTab('details')}
+                    >
+                      {tr(lang, '完整详情', 'Full Details')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{flex: 1}}
+                      onClick={() => setShowGhostModal(true)}
+                    >
+                      + GhostNode
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {detail ? (
                 <ReactFlow
@@ -1418,8 +1742,11 @@ export function WorkstationView(props: {
                   nodes={rfNodes}
                   edges={rfEdges}
                   nodeTypes={NODE_TYPES}
-                  onNodeClick={(_ev, node) => setSelectedNodeId(node.id)}
-                  defaultViewport={{x: 56, y: 18, zoom: 0.78}}
+                  onNodeClick={(_ev, node) => {
+                    setSelectedNodeId(node.id);
+                    setShowInspector(true);
+                  }}
+                  defaultViewport={{x: 42, y: 18, zoom: 0.76}}
                   fitViewOptions={{padding: 0.14}}
                   minZoom={0.25}
                   maxZoom={1.6}
@@ -1470,11 +1797,11 @@ export function WorkstationView(props: {
                     fontSize: 13,
                   }}
                 >
-                  Loading Twin Graph...
+                  {tr(lang, '正在编译加载双生执行图…', 'Loading Twin Graph...')}
                 </div>
               )}
 
-              {/* Bottom-left Physical Git Checkpoints Bar (1:1 Reference Match) */}
+              {/* Bottom-left Physical Git Checkpoints Bar */}
               <div className="tg-checkpoints-bar">
                 <span
                   style={{
@@ -1486,22 +1813,33 @@ export function WorkstationView(props: {
                     flexShrink: 0,
                   }}
                 >
-                  <ShieldIcon size={13} /> Checkpoints:
+                  <ShieldIcon size={13} />{' '}
+                  {tr(lang, '物理检查点:', 'Checkpoints:')}
                 </span>
                 {(detail?.checkpoints ?? []).length === 0 ? (
                   <span style={{color: '#94a3b8', whiteSpace: 'nowrap'}}>
-                    Run Change to anchor QA Checkpoints
+                    {tr(
+                      lang,
+                      '运行变更后自动锚定 Git 快照（支持零丢码回滚）',
+                      'Run Change to anchor QA Checkpoints',
+                    )}
                   </span>
                 ) : (
                   detail?.checkpoints.map((cp, idx) => {
                     const shortLabel =
-                      idx === 0 ? 'Baseline' : `QA Checkpoint #${idx}`;
+                      idx === 0
+                        ? tr(lang, '基线快照', 'Baseline')
+                        : `${tr(lang, '质量锚点', 'QA CP')} #${idx}`;
                     return (
                       <button
                         key={cp.id}
                         type="button"
                         className="tg-cp-pill"
-                        title={`Rollback worktree to ${cp.label} (${cp.gitCommitSha.slice(0, 8)}) — saves rescue ref`}
+                        title={tr(
+                          lang,
+                          `物理回滚工作树至 ${cp.gitCommitSha.slice(0, 8)}（自动创建 refs/forgeops-backup 救援引用）`,
+                          `Rollback worktree to ${cp.gitCommitSha.slice(0, 8)} (saves rescue ref)`,
+                        )}
                         onClick={() => {
                           if (!detail) return;
                           void forgeApi
@@ -1517,7 +1855,7 @@ export function WorkstationView(props: {
                 )}
               </div>
 
-              {/* Bottom-right Legend Bar (1:1 Reference Match) */}
+              {/* Bottom-right Legend Bar */}
               <div className="tg-legend-bar">
                 <span className="tg-legend-item">
                   <span
@@ -1529,19 +1867,19 @@ export function WorkstationView(props: {
                       display: 'inline-block',
                     }}
                   />
-                  Phase 容器
+                  {tr(lang, 'Phase 容器', 'Phase Container')}
                 </span>
                 <span className="tg-legend-item">
                   <span className="tg-dot" style={{background: '#4ade80'}} />
-                  Completed
+                  {tr(lang, '已完成', 'Completed')}
                 </span>
                 <span className="tg-legend-item">
                   <span className="tg-dot" style={{background: '#eab308'}} />
-                  In Progress
+                  {tr(lang, '执行中', 'In Progress')}
                 </span>
                 <span className="tg-legend-item">
                   <span className="tg-dot" style={{background: '#94a3b8'}} />
-                  Pending
+                  {tr(lang, '待执行', 'Pending')}
                 </span>
                 <span className="tg-legend-item">
                   <span
@@ -1551,7 +1889,7 @@ export function WorkstationView(props: {
                       background: '#faf5ff',
                     }}
                   />
-                  Ghost (Amendment)
+                  {tr(lang, 'Ghost 计划修订', 'Ghost (Amendment)')}
                 </span>
               </div>
             </div>
@@ -1559,7 +1897,7 @@ export function WorkstationView(props: {
         </section>
       </div>
 
-      {/* Clean Light Modal for GhostNode Amendment */}
+      {/* Light Modal for GhostNode Amendment */}
       {showGhostModal && detail && (
         <div
           className="modal-backdrop"
@@ -1567,7 +1905,13 @@ export function WorkstationView(props: {
         >
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <span>Propose GhostNode Plan Amendment</span>
+              <span>
+                {tr(
+                  lang,
+                  '提议动态插入 GhostNode 计划修订切片',
+                  'Propose GhostNode Plan Amendment',
+                )}
+              </span>
               <button
                 type="button"
                 className="btn btn-sm"
@@ -1579,19 +1923,33 @@ export function WorkstationView(props: {
             <div className="modal-body">
               <div style={{marginBottom: 12}}>
                 <label className="field-label">
-                  Insert Before Selected Node ({selectedNode?.code ?? 'Task'})
+                  {tr(
+                    lang,
+                    `在所选节点 (${selectedNode?.code ?? 'Task'}) 之前无环插入前置任务`,
+                    `Insert Before Selected Node (${selectedNode?.code ?? 'Task'})`,
+                  )}
                 </label>
                 <input
-                  placeholder="e.g. Backfill SettlementVoucher idempotency index"
+                  placeholder={tr(
+                    lang,
+                    '例如：补齐 SettlementVoucher 幂等唯一索引迁移脚本',
+                    'e.g. Backfill SettlementVoucher idempotency index',
+                  )}
                   value={ghostTitle}
                   onChange={e => setGhostTitle(e.target.value)}
                 />
               </div>
               <div>
-                <label className="field-label">Slice Mandate Description</label>
+                <label className="field-label">
+                  {tr(lang, '切片职责与门禁说明', 'Slice Mandate Description')}
+                </label>
                 <textarea
                   rows={3}
-                  placeholder="Describe files, invariants, and verification expectation..."
+                  placeholder={tr(
+                    lang,
+                    '说明涉及文件、不变量约束与验收标准…',
+                    'Describe files, invariants, and verification expectation...',
+                  )}
                   value={ghostDesc}
                   onChange={e => setGhostDesc(e.target.value)}
                 />
@@ -1603,7 +1961,7 @@ export function WorkstationView(props: {
                 className="btn"
                 onClick={() => setShowGhostModal(false)}
               >
-                Cancel
+                {tr(lang, '取消', 'Cancel')}
               </button>
               <button
                 type="button"
@@ -1611,7 +1969,7 @@ export function WorkstationView(props: {
                 disabled={busy || !ghostTitle.trim()}
                 onClick={() => void handleSubmitGhost()}
               >
-                Splice GhostNode into DAG
+                {tr(lang, '无环注入双生图', 'Splice GhostNode into DAG')}
               </button>
             </div>
           </div>
