@@ -52,11 +52,11 @@
 - [x] **6.4** Build **Workstation**: synchronized WBS tree + collapsible `PhaseContainer` `@xyflow/react` canvas (`Verify -> Gates -> SelfCheck -> JQA/SQA Audit -> Decision -> Restore -> Checkpoint` + dashed `GhostNode`s) + streaming Flow Monitor + bottom Git SHA Checkpoints bar
 
 ## Phase 7 (M7): Renderer UI Part 2 — Engineering Rooms, Memory Observatory & Infra Plane
-- [ ] **7.1** Build **Engineering Rooms** (5 scenario channels, Thread Mandate drawer, `@agent` autocomplete, Promote-to-Change modal)
-- [ ] **7.2** Build **Cognitive Memory Observatory** (interactive Human × Agent Ebbinghaus curves, `"Acknowledge & Anchor"` spaced review button, FTS5 evidence search, Active vs. Superseded Temporal Memory browser)
-- [ ] **7.3** Build **Infra Control Plane & Agent Factory** (`Infra Steward Agent` console, `Soul Constitution`, `Skills Bank`, `Agents Market` w/ Custom Manifest + live operational badges + `Doctor` check, `Models Pool`, `Daemon Agents`, `Evolution & Audit Logs`)
+- [x] **7.1** Build **Engineering Rooms** (5 scenario channels, Thread Mandate drawer, `@agent` autocomplete, Promote-to-Change modal)
+- [x] **7.2** Build **Cognitive Memory Observatory** (interactive Human × Agent Ebbinghaus curves, `"Acknowledge & Anchor"` spaced review button, FTS5 evidence search, Active vs. Superseded Temporal Memory browser)
+- [x] **7.3** Build **Infra Control Plane & Agent Factory** (`Infra Steward Agent` console, `Soul Constitution`, `Skills Bank`, `Agents Market` w/ Custom Manifest + live operational badges + `Doctor` check, `Models Pool`, `Daemon Agents`, `Evolution & Audit Logs`)
 
 ## Phase 8 (M8): Lean E2E Verification, Live Desktop Smoke & Release
-- [ ] **8.1** Implement compact E2E verification gates (`verify/*.verify.ts` `< 12%` of total LoC)
-- [ ] **8.2** Pass `npm run verify` (`gts lint` + dual `tsc` + Vite build + all verification gates = `0` errors)
-- [ ] **8.3** Verify live Electron desktop startup, seed realistic multi-repo + DDD workspace, and tag `v2.1.0`
+- [x] **8.1** Implement compact E2E verification gates (`verify/*.verify.ts` `< 12%` of total LoC)
+- [x] **8.2** Pass `npm run verify` (`gts lint` + dual `tsc` + Vite build + all verification gates = `0` errors)
+- [x] **8.3** Verify live Electron desktop startup, seed realistic multi-repo + DDD workspace, and tag `v2.1.0`

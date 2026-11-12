@@ -4,6 +4,25 @@ All specification evolutions, scope refinements, and architectural decisions are
 
 ---
 
+## [2026-11-11] Entry 003 — Completed M1–M8 Implementation, E2E Verification & `v2.1.0` Desktop Release
+
+### Delivered Capabilities
+1. **Toolchain, Contracts & Pure Domain Core (`M1`):**
+   - Configured strict Google TypeScript Style (`gts` / ESLint 9 + Prettier), dual-face TypeScript (`NodeNext` Host + `Bundler` React 19 Renderer), Vite 8, and esbuild Electron 44 bundler (`dist/electron/` + `dist/renderer/`).
+   - Implemented pure domain engines in `src/core/`: collapsible Twin-Graph compiler (`compileTwinGraph`), branch-isolated `computeRewindSet`, acyclic `spliceGhostNode`, DDD Ubiquitous Language drift detector (`detectTerminologyDrift`), Human × Agent Ebbinghaus retention & 3-tier capsule synthesizer (`buildRehydrationCapsule`), cross-project `rankAttentionQueue`, and `Turbo | Supervised | Strict` governance policy.
+2. **SQLite WAL + FTS5 Store & Multi-Repo Git Worktree Sandbox (`M2`):**
+   - Implemented `ForgeStore` (`src/store/database.ts`) over built-in `node:sqlite` with `SAVEPOINT` nested transactions, `messages_fts` & `memories_fts` FTS5 full-text indexes, bi-temporal (`valid_from` / `valid_until`) semantic memory supersession, and immutable `audit_ledger`.
+   - Implemented `SandboxProcessRunner` (`shell: false`, Windows `PATHEXT`/`ComSpec` safety, credential scrubbing, `taskkill /T /F` tree teardown) and `GitWorktreeManager` (`realpathSync.native` symlink confinement, multi-repo `git worktree` provisioning, physical Git checkpoints, and `refs/forgeops-backup/...` rescue refs before rollback).
+3. **Universal Multi-Agent Adapter Hub & Scoped `forge_station` MCP (`M3`):**
+   - Implemented `McpStationServer` (per-attempt Bearer token auth + 7 governed `forge_*` tools), `acp-stdio` (`Kimi`, `Hermes`, `OpenCode ACP`), `cli-stream` (`Codex`, `Claude Code`, `OpenCode`, `Pi`, `WorkBuddy`, custom manifests), `native-api` (`OpenAI-compatible` & `Anthropic Messages`), and `ResourceSlotBroker` (`N` worker slots + `1` dedicated Human Priority Slot).
+4. **8h Continuity, Requirement Closure, `Infra Steward` & Sleep Consolidation (`M4–M5`):**
+   - Implemented `RequirementClosureEngine`, external `CompletionCertifier` (fail-closed `parseFailClosedAuditJson` + DDD drift gate), `ContinuityEngine` (epistemic rollover, premature-stop blocker, `CooldownHolding`, 2-strike Strong Lead escalation, crash recovery), `InfraStewardEngine` (`Environment Doctor`, post-change `Retro` `agent-wiki` pruning, governed `INFRA` evolution), `DreamingEngine`, `HostSecretVault`, `EngineeringRoomsService`, `ForgeHttpServer`, and hardened Electron 44 `main.ts` + `preload.ts`.
+5. **6-Surface Enterprise Desktop UI & Lean Verification (`M6–M8`):**
+   - Built `OverviewView`, `HubDddView`, `WorkstationView` (`@xyflow/react` collapsible `PhaseContainer` + `Decision -> Restore -> Checkpoint` + `GhostNode`), `RoomsView`, `MemoryObservatoryView` (Dual Ebbinghaus SVG curves + FTS5 search), and `InfraFactoryView`.
+   - Verified Vite production output directory alignment (`dist/renderer` matching `dist/electron/main.cjs`), passed `npm run verify` (`0` lint/type errors, `6/6` E2E verification gates passing, `verify/` `< 4%` of source LoC), and verified live Electron 44 Chromium window boot (`FORGEOPS_ELECTRON_SMOKE_OK:true`).
+
+---
+
 ## [2026-11-11] Entry 002 — v2.1 Enterprise Refinement: Multi-Repo Hub, DDD, Infra Steward & Bilingual Spec
 
 ### Context & Rationale

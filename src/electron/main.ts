@@ -70,14 +70,25 @@ async function bootstrapDesktop(): Promise<void> {
 
   if (isSmoke) {
     // Allow React bootstrap + authenticated /api/bootstrap fetch to settle.
-    setTimeout(async () => {
-      try {
-        const title = mainWindow?.getTitle() ?? '';
-        process.stdout.write(`FORGEOPS_ELECTRON_SMOKE_OK:${title}\n`);
-      } finally {
-        app.quit();
-      }
-    }, 1200);
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const domText = (await mainWindow?.webContents.executeJavaScript(
+            'document.body ? document.body.innerText : ""',
+          )) as string;
+          const ok = domText.includes('ForgeOps');
+          process.stdout.write(
+            `FORGEOPS_ELECTRON_SMOKE_OK:${ok}:${domText.slice(0, 120).replace(/\s+/g, ' ')}\n`,
+          );
+          if (!ok) {
+            app.exit(2);
+            return;
+          }
+        } finally {
+          app.quit();
+        }
+      })();
+    }, 1500);
   }
 }
 
