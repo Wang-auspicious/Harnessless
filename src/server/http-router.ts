@@ -1,0 +1,797 @@
+/**
+ * Authenticated Loopback HTTP & Multiplexed SSE Control Server (`127.0.0.1:0`).
+ * Protects all endpoints with a CSPRNG Bearer token and never blocks on
+ * long-running agent execution.
+ */
+
+import {randomBytes, timingSafeEqual} from 'node:crypto';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
+import {rankAttentionQueue} from '../core/cognitive.ts';
+import type {IAgentAdapterHub} from '../adapters/contracts.ts';
+import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
+import type {
+  BootstrapSnapshot,
+  ChangeDetailSnapshot,
+  ForgeSseEvent,
+  MemoryObservatorySnapshot,
+} from '../shared/api.ts';
+import {ForgeError} from '../shared/errors.ts';
+import type {RepoTier} from '../shared/types.ts';
+import {
+  asRecord,
+  optNumber,
+  optString,
+  optStringArray,
+  PERMISSION_TIERS,
+  reqEnum,
+  reqString,
+  validateAdapterManifest,
+} from '../shared/validation.ts';
+import type {ForgeStore} from '../store/database.ts';
+import type {ContinuityEngine} from '../engines/continuity.ts';
+import type {DreamingEngine} from '../engines/dreaming.ts';
+import type {InfraStewardEngine} from '../engines/infra-steward.ts';
+import type {RequirementClosureEngine} from '../engines/requirement-closure.ts';
+import type {EngineeringRoomsService} from './rooms-service.ts';
+import type {HostSecretVault} from './secret-vault.ts';
+
+export class ForgeHttpServer {
+  readonly sessionToken: string;
+  private server: Server | null = null;
+  private port = 0;
+  private readonly sseClients = new Set<ServerResponse>();
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+
+  private readonly store: ForgeStore;
+  private readonly vault: HostSecretVault;
+  private readonly worktrees: IGitWorktreeManager;
+  private readonly adapters: IAgentAdapterHub;
+  private readonly closure: RequirementClosureEngine;
+  private readonly continuity: ContinuityEngine;
+  private readonly steward: InfraStewardEngine;
+  private readonly dreaming: DreamingEngine;
+  private readonly rooms: EngineeringRoomsService;
+  private readonly worktreesRoot: string;
+
+  constructor(deps: {
+    readonly store: ForgeStore;
+    readonly vault: HostSecretVault;
+    readonly worktrees: IGitWorktreeManager;
+    readonly adapters: IAgentAdapterHub;
+    readonly closure: RequirementClosureEngine;
+    readonly continuity: ContinuityEngine;
+    readonly steward: InfraStewardEngine;
+    readonly dreaming: DreamingEngine;
+    readonly rooms: EngineeringRoomsService;
+    readonly worktreesRoot: string;
+    readonly sessionToken?: string;
+  }) {
+    this.sessionToken = deps.sessionToken ?? randomBytes(32).toString('hex');
+    this.store = deps.store;
+    this.vault = deps.vault;
+    this.worktrees = deps.worktrees;
+    this.adapters = deps.adapters;
+    this.closure = deps.closure;
+    this.continuity = deps.continuity;
+    this.steward = deps.steward;
+    this.dreaming = deps.dreaming;
+    this.rooms = deps.rooms;
+    this.worktreesRoot = deps.worktreesRoot;
+  }
+
+  get apiBaseUrl(): string {
+    return `http://127.0.0.1:${this.port}`;
+  }
+
+  async start(): Promise<void> {
+    if (this.server) {
+      return;
+    }
+    this.server = createServer((req, res) => {
+      void this.handleRequest(req, res);
+    });
+    await new Promise<void>((resolve, reject) => {
+      this.server!.once('error', reject);
+      this.server!.listen(0, '127.0.0.1', () => {
+        const addr = this.server!.address();
+        if (addr && typeof addr === 'object') {
+          this.port = addr.port;
+        }
+        resolve();
+      });
+    });
+
+    this.heartbeatTimer = setInterval(() => {
+      for (const client of this.sseClients) {
+        client.write(': heartbeat\n\n');
+      }
+    }, 15_000);
+    this.heartbeatTimer.unref();
+  }
+
+  async stop(): Promise<void> {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const client of this.sseClients) {
+      client.end();
+    }
+    this.sseClients.clear();
+    if (!this.server) {
+      return;
+    }
+    const srv = this.server;
+    this.server = null;
+    await new Promise<void>(resolve => srv.close(() => resolve()));
+  }
+
+  broadcast(event: ForgeSseEvent): void {
+    const frame = `data: ${JSON.stringify(event)}\n\n`;
+    for (const client of this.sseClients) {
+      client.write(frame);
+    }
+  }
+
+  private isAuthenticated(req: IncomingMessage, url: URL): boolean {
+    const authHeader = req.headers.authorization ?? '';
+    const bearer = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : '';
+    const candidate = bearer || (url.searchParams.get('token') ?? '');
+    const expectedBuf = Buffer.from(this.sessionToken, 'utf8');
+    const actualBuf = Buffer.from(candidate, 'utf8');
+    if (expectedBuf.length !== actualBuf.length) {
+      return false;
+    }
+    return timingSafeEqual(expectedBuf, actualBuf);
+  }
+
+  private async handleRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Authorization, Content-Type',
+    );
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.port || 80}`);
+    if (!this.isAuthenticated(req, url)) {
+      this.sendJson(res, 401, {
+        code: 'UNAUTHORIZED',
+        message: 'Valid ForgeOps Bearer session token required.',
+      });
+      return;
+    }
+
+    try {
+      const method = req.method ?? 'GET';
+      const path = url.pathname;
+
+      if (method === 'GET' && path === '/api/events') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        });
+        res.write(': connected\n\n');
+        this.sseClients.add(res);
+        req.on('close', () => {
+          this.sseClients.delete(res);
+        });
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/bootstrap') {
+        this.sendJson(res, 200, this.buildBootstrapSnapshot());
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/hubs') {
+        const body = asRecord(await this.readJsonBody(req));
+        const hub = this.store.createHub({
+          name: reqString(body, 'name', 120),
+          rootPath: reqString(body, 'rootPath', 512),
+          description: optString(body, 'description', '', 2048),
+          permissionTier: reqEnum(body, 'permissionTier', PERMISSION_TIERS),
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'hubs',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, hub);
+        return;
+      }
+
+      const anchorMatch = /^\/api\/hubs\/([^/]+)\/anchor$/.exec(path);
+      if (method === 'POST' && anchorMatch) {
+        const hub = this.store.touchHubHumanAnchor(anchorMatch[1]!, true);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'capsules',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, hub);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/repositories') {
+        const body = asRecord(await this.readJsonBody(req));
+        const localPath = reqString(body, 'localPath', 512);
+        await this.worktrees.ensureGitRepoInitialized(localPath, 'main');
+        const repo = this.store.registerRepository({
+          hubId: reqString(body, 'hubId', 80),
+          name: reqString(body, 'name', 120),
+          tier: reqEnum(body, 'tier', [
+            'infra',
+            'service',
+          ] as const) as RepoTier,
+          localPath,
+          verifyCommand: optString(body, 'verifyCommand', '', 512),
+          boundedContext: reqString(body, 'boundedContext', 120),
+          contractSummary: optString(body, 'contractSummary', '', 4096),
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'repositories',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, repo);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/domain-terms') {
+        const body = asRecord(await this.readJsonBody(req));
+        const hubId = reqString(body, 'hubId', 80);
+        const term = this.store.upsertDomainTerm({
+          hubId,
+          boundedContext: reqString(body, 'boundedContext', 120),
+          owningRepoIds: optStringArray(body, 'owningRepoIds', 32),
+          canonicalTerm: reqString(body, 'canonicalTerm', 120),
+          localLabel: optString(body, 'localLabel', '', 120),
+          definition: reqString(body, 'definition', 2048),
+          forbiddenAliases: optStringArray(body, 'forbiddenAliases', 32),
+          schemaAnchors: optStringArray(body, 'schemaAnchors', 32),
+        });
+        const audit = this.store.appendAudit({
+          hubId,
+          changeId: null,
+          category: 'ddd_refactor',
+          actor: 'human_operator',
+          title: `Locked DDD Term "${term.canonicalTerm}" (${term.boundedContext})`,
+          detail: `Forbidden synonyms: ${term.forbiddenAliases.join(', ') || '(none)'}`,
+        });
+        this.broadcast({type: 'audit.logged', entry: audit});
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'ddd',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, term);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/changes') {
+        const body = asRecord(await this.readJsonBody(req));
+        const change = await this.closure.createAndPlanChange({
+          hubId: reqString(body, 'hubId', 80),
+          repoId: reqString(body, 'repoId', 80),
+          title: reqString(body, 'title', 200),
+          summary: reqString(body, 'summary', 8192),
+          permissionTier: reqEnum(body, 'permissionTier', PERMISSION_TIERS),
+          maxOvernightHours: optNumber(body, 'maxOvernightHours', 8, 0.5, 48),
+          budgetUsdLimit: optNumber(body, 'budgetUsdLimit', 25, 0.5, 5000),
+          leadAdapterId: optString(body, 'leadAdapterId', '') || undefined,
+          workerAdapterId: optString(body, 'workerAdapterId', '') || undefined,
+          worktreesRoot: this.worktreesRoot,
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'changes',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, change);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/changes/epic') {
+        const body = asRecord(await this.readJsonBody(req));
+        const changes = await this.closure.createCoordinatedEpicChanges({
+          hubId: reqString(body, 'hubId', 80),
+          repoIds: optStringArray(body, 'repoIds', 32),
+          epicTitle: reqString(body, 'epicTitle', 200),
+          summary: reqString(body, 'summary', 8192),
+          permissionTier: reqEnum(body, 'permissionTier', PERMISSION_TIERS),
+          worktreesRoot: this.worktreesRoot,
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'changes',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, changes);
+        return;
+      }
+
+      const changeDetailMatch = /^\/api\/changes\/([^/]+)$/.exec(path);
+      if (method === 'GET' && changeDetailMatch) {
+        const changeId = changeDetailMatch[1]!;
+        const change = this.store.getChange(changeId);
+        if (!change) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Change "${changeId}" not found`,
+            404,
+          );
+        }
+        const detail: ChangeDetailSnapshot = {
+          change,
+          nodes: this.store.listGraphNodes(changeId),
+          edges: this.store.listGraphEdges(changeId),
+          checkpoints: this.store.listCheckpoints(changeId),
+          sessions: this.store.listSessions({changeId, limit: 40}),
+        };
+        this.sendJson(res, 200, detail);
+        return;
+      }
+
+      const changeDiffMatch = /^\/api\/changes\/([^/]+)\/diff$/.exec(path);
+      if (method === 'GET' && changeDiffMatch) {
+        const change = this.store.getChange(changeDiffMatch[1]!);
+        if (!change) {
+          throw new ForgeError('NOT_FOUND', 'Change not found', 404);
+        }
+        const diff = await this.worktrees.diffSinceCommit(
+          change.worktreePath,
+          change.baseCommitSha,
+        );
+        this.sendJson(res, 200, diff);
+        return;
+      }
+
+      const changeExecMatch = /^\/api\/changes\/([^/]+)\/execute$/.exec(path);
+      if (method === 'POST' && changeExecMatch) {
+        const changeId = changeExecMatch[1]!;
+        const change = this.store.getChange(changeId);
+        if (!change) {
+          throw new ForgeError('NOT_FOUND', 'Change not found', 404);
+        }
+        // Non-blocking launch: return 202 Accepted immediately while SSE streams progress.
+        void this.continuity.startChangeExecution(changeId);
+        this.sendJson(res, 202, {accepted: true, changeId});
+        return;
+      }
+
+      const changeArchiveMatch = /^\/api\/changes\/([^/]+)\/archive$/.exec(
+        path,
+      );
+      if (method === 'POST' && changeArchiveMatch) {
+        const archived = this.store.archiveChange(changeArchiveMatch[1]!);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'changes',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, archived);
+        return;
+      }
+
+      const changeRestoreMatch = /^\/api\/changes\/([^/]+)\/restore$/.exec(
+        path,
+      );
+      if (method === 'POST' && changeRestoreMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        const restored = await this.continuity.manualRestoreToCheckpoint(
+          changeRestoreMatch[1]!,
+          reqString(body, 'checkpointId', 80),
+        );
+        this.sendJson(res, 200, restored);
+        return;
+      }
+
+      const changeGhostMatch = /^\/api\/changes\/([^/]+)\/ghost$/.exec(path);
+      if (method === 'POST' && changeGhostMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        const ghost = this.continuity.proposeGhostAmendment({
+          changeId: changeGhostMatch[1]!,
+          title: reqString(body, 'title', 160),
+          description: reqString(body, 'description', 2048),
+          insertBeforeNodeId: reqString(body, 'insertBeforeNodeId', 120),
+          gateCommand: optString(body, 'gateCommand', '') || undefined,
+          actor: 'human_operator',
+        });
+        this.sendJson(res, 201, ghost);
+        return;
+      }
+
+      const collapseMatch = /^\/api\/nodes\/([^/]+)\/collapse$/.exec(path);
+      if (method === 'POST' && collapseMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        this.store.updateGraphNode(collapseMatch[1]!, {
+          collapsed: Boolean(body['collapsed']),
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'graph',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, {ok: true});
+        return;
+      }
+
+      const sessMsgMatch = /^\/api\/sessions\/([^/]+)\/messages$/.exec(path);
+      if (method === 'GET' && sessMsgMatch) {
+        this.sendJson(
+          res,
+          200,
+          this.store.listSessionMessages(sessMsgMatch[1]!),
+        );
+        return;
+      }
+
+      const resolveAttnMatch = /^\/api\/attention\/([^/]+)\/resolve$/.exec(
+        path,
+      );
+      if (method === 'POST' && resolveAttnMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        const resolution = reqString(body, 'resolution', 1024);
+        const item = this.store.resolveAttention(
+          resolveAttnMatch[1]!,
+          resolution,
+        );
+
+        if (item.changeId) {
+          const chg = this.store.getChange(item.changeId);
+          if (chg) {
+            if (resolution.toLowerCase().includes('turbo')) {
+              this.store.updateChange(chg.id, {permissionTier: 'turbo'});
+            }
+            if (item.nodeId) {
+              const waive = resolution.toLowerCase().includes('waive');
+              this.store.updateGraphNode(item.nodeId, {
+                status: waive ? 'waived' : 'certified',
+                outputSummary: `Human resolution: ${resolution}`,
+              });
+            }
+            if (
+              resolution.toLowerCase().includes('approve') ||
+              resolution.toLowerCase().includes('resume') ||
+              resolution.toLowerCase().includes('start')
+            ) {
+              this.store.updateChange(chg.id, {status: 'planned'});
+              void this.continuity.startChangeExecution(chg.id);
+            }
+          }
+        }
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'attention',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, item);
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/rooms') {
+        const hubId = url.searchParams.get('hubId') ?? '';
+        const roomId = url.searchParams.get('roomId') ?? undefined;
+        this.sendJson(res, 200, this.rooms.getRoomSnapshot(hubId, roomId));
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/rooms') {
+        const body = asRecord(await this.readJsonBody(req));
+        const room = this.store.createRoom({
+          hubId: reqString(body, 'hubId', 80),
+          name: reqString(body, 'name', 80),
+          scenario: reqEnum(body, 'scenario', [
+            'req-grill',
+            'arch-council',
+            'triage-ops',
+            'direct-ops',
+            'exec-briefing',
+          ] as const),
+          topic: optString(body, 'topic', '', 512),
+        });
+        this.sendJson(res, 201, room);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/rooms/messages') {
+        const body = asRecord(await this.readJsonBody(req));
+        const msg = await this.rooms.postMessage({
+          roomId: reqString(body, 'roomId', 80),
+          threadId: optString(body, 'threadId', '') || undefined,
+          threadTitle: optString(body, 'threadTitle', '') || undefined,
+          bodyMarkdown: reqString(body, 'bodyMarkdown', 16_384),
+          mentions: optStringArray(body, 'mentions', 16),
+        });
+        this.sendJson(res, 201, msg);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/rooms/promote') {
+        const body = asRecord(await this.readJsonBody(req));
+        const change = await this.rooms.promoteThreadToChange({
+          threadId: reqString(body, 'threadId', 80),
+          repoId: reqString(body, 'repoId', 80),
+          title: reqString(body, 'title', 200),
+          permissionTier: reqEnum(body, 'permissionTier', PERMISSION_TIERS),
+        });
+        this.sendJson(res, 201, change);
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/memory') {
+        const hubId = url.searchParams.get('hubId') ?? undefined;
+        const allMemories = this.store.listSemanticMemories({
+          hubId,
+          includeSuperseded: true,
+        });
+        const snap: MemoryObservatorySnapshot = {
+          capsules: this.dreaming.buildAllCapsules(),
+          activeMemories: allMemories.filter(m => m.validUntil === null),
+          supersededMemories: allMemories.filter(m => m.validUntil !== null),
+          recentSessions: this.store.listSessions({hubId, limit: 35}),
+        };
+        this.sendJson(res, 200, snap);
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/evidence/search') {
+        const q = url.searchParams.get('q') ?? '';
+        const hubId = url.searchParams.get('hubId') ?? undefined;
+        this.sendJson(res, 200, this.store.searchEvidenceFts(q, hubId, 30));
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/memory/dream') {
+        const report = await this.dreaming.runSleepConsolidation();
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'memory',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, report);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/doctor') {
+        const report = await this.steward.runEnvironmentDoctor();
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, report);
+        return;
+      }
+
+      const retroMatch = /^\/api\/infra\/retro\/([^/]+)$/.exec(path);
+      if (method === 'POST' && retroMatch) {
+        const resRetro = this.steward.runRetroOptimization(retroMatch[1]!);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'hubs',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, resRetro ?? {ok: false});
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/evolve') {
+        const body = asRecord(await this.readJsonBody(req));
+        const chg = await this.steward.proposeInfraEvolution({
+          hubId: reqString(body, 'hubId', 80),
+          infraRepoId: reqString(body, 'infraRepoId', 80),
+          title: reqString(body, 'title', 200),
+          rationale: reqString(body, 'rationale', 4096),
+          permissionTier: reqEnum(body, 'permissionTier', PERMISSION_TIERS),
+          worktreesRoot: this.worktreesRoot,
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'changes',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, chg);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/constitution') {
+        const body = asRecord(await this.readJsonBody(req));
+        const updated = this.store.saveConstitution(
+          reqString(body, 'markdown', 65_536),
+          optStringArray(body, 'blockedCommands', 64),
+          'human_operator',
+        );
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, updated);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/skills') {
+        const body = asRecord(await this.readJsonBody(req));
+        const skill = this.store.upsertSkill({
+          slug: reqString(body, 'slug', 80),
+          title: reqString(body, 'title', 140),
+          category: reqEnum(body, 'category', [
+            'grill',
+            'ddd',
+            'architecture',
+            'qa',
+            'retro',
+            'infra',
+          ] as const),
+          version: optString(body, 'version', '1.0.0', 32),
+          promptBody: reqString(body, 'promptBody', 32_768),
+          updatedBy: 'human_operator',
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, skill);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/adapters') {
+        const manifest = validateAdapterManifest(await this.readJsonBody(req));
+        this.store.upsertAdapterManifest(manifest);
+        const probe = await this.adapters.probeAdapter(manifest);
+        this.store.updateAdapterProbe(manifest.id, probe.ok, probe.message);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, {manifest, probe});
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/infra/providers') {
+        const body = asRecord(await this.readJsonBody(req));
+        const providerId = reqString(body, 'providerId', 80);
+        const baseUrl = optString(body, 'baseUrl', '');
+        if (baseUrl) {
+          this.store.updateModelProviderEndpoint(providerId, baseUrl);
+        }
+        if (
+          body['apiKey'] !== undefined &&
+          typeof body['apiKey'] === 'string'
+        ) {
+          this.vault.setApiKey(providerId, body['apiKey']);
+        }
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(
+          res,
+          200,
+          this.store.listModelProviders(id => this.vault.getKeyStatus(id)),
+        );
+        return;
+      }
+
+      const daemonMatch = /^\/api\/infra\/daemons\/([^/]+)$/.exec(path);
+      if (method === 'POST' && daemonMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        const id = reqEnum({id: daemonMatch[1]}, 'id', [
+          'continuity_watchdog',
+          'dreaming_consolidator',
+          'infra_patrol',
+        ] as const);
+        const daemons = this.store.updateDaemon(id, {
+          enabled: Boolean(body['enabled']),
+        });
+        this.sendJson(res, 200, daemons);
+        return;
+      }
+
+      this.sendJson(res, 404, {
+        code: 'NOT_FOUND',
+        message: `Unknown route: ${method} ${path}`,
+      });
+    } catch (err) {
+      if (err instanceof ForgeError) {
+        this.sendJson(res, err.status, {
+          code: err.code,
+          message: err.message,
+          details: err.details,
+        });
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.sendJson(res, 500, {
+        code: 'INTERNAL_ERROR',
+        message,
+      });
+    }
+  }
+
+  private buildBootstrapSnapshot(): BootstrapSnapshot {
+    const capsules = this.dreaming.buildAllCapsules();
+    const retentionMap = new Map(
+      capsules.map(c => [c.hubId, c.retentionScore]),
+    );
+    const attentionQueue = rankAttentionQueue(
+      this.store.listAttentionItems(false),
+      retentionMap,
+    );
+
+    return {
+      constitution: this.store.getConstitution(),
+      hubs: this.store.listHubs(false),
+      repositories: this.store.listRepositories(),
+      domainTerms: this.store.listDomainTerms(),
+      changes: this.store.listChanges(undefined, false),
+      attentionQueue,
+      capsules,
+      adapters: this.store.listAdapterProfiles(),
+      providers: this.store.listModelProviders(id =>
+        this.vault.getKeyStatus(id),
+      ),
+      skills: this.store.listSkills(),
+      daemons: this.store.getDaemons(),
+      slotLoad: this.adapters.getSlotLoad(),
+      recentAuditLogs: this.store.listAuditLedger(60),
+    };
+  }
+
+  private async readJsonBody(req: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > 2_097_152) {
+        throw new ForgeError('VALIDATION_ERROR', 'Request payload > 2MB', 413);
+      }
+      chunks.push(buf);
+    }
+    const text = Buffer.concat(chunks).toString('utf8').trim();
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new ForgeError('VALIDATION_ERROR', 'Malformed JSON body', 400);
+    }
+  }
+
+  private sendJson(
+    res: ServerResponse,
+    status: number,
+    payload: unknown,
+  ): void {
+    const raw = JSON.stringify(payload);
+    res.writeHead(status, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(raw),
+    });
+    res.end(raw);
+  }
+}
