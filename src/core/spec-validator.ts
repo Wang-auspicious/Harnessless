@@ -185,6 +185,71 @@ export function validateCompiledMissionPlan(input: {
           ),
         );
       }
+
+      for (const node of execNodes) {
+        if (node.kind === 'restore' || node.id === endNode.id) {
+          continue;
+        }
+        if (!reachable.has(node.id)) {
+          issues.push(
+            makeIssue(
+              'error',
+              'structure',
+              `Orphan node ${chg.code}/${node.code} (${node.kind}) is unreachable from START.`,
+              'Connect all executable Twin-Graph nodes to the START reachability DAG.',
+              chg.code,
+              node.code,
+            ),
+          );
+        }
+      }
+    }
+
+    if (input.preset === 'strict_audit') {
+      if (chg.permissionTier !== 'strict') {
+        issues.push(
+          makeIssue(
+            'error',
+            'policy',
+            `Change ${chg.code} uses permissionTier "${chg.permissionTier}" under strict_audit preset; expected "strict".`,
+            'Set Change permissionTier to "strict" for strict_audit missions.',
+            chg.code,
+          ),
+        );
+      }
+      const requiredKinds: ReadonlyArray<GraphNode['kind']> = [
+        'gates',
+        'audit_jqa',
+        'audit_sqa',
+        'decision',
+      ];
+      for (const reqKind of requiredKinds) {
+        if (!execNodes.some(n => n.kind === reqKind)) {
+          issues.push(
+            makeIssue(
+              'error',
+              'policy',
+              `Change ${chg.code} is missing required "${reqKind}" gate node under strict_audit preset.`,
+              `Include ${reqKind} verification gates in every strict_audit Twin-Graph.`,
+              chg.code,
+            ),
+          );
+        }
+      }
+      for (const gateNode of execNodes.filter(n => n.kind === 'gates')) {
+        if (!(gateNode.gateCommand ?? '').trim()) {
+          issues.push(
+            makeIssue(
+              'error',
+              'policy',
+              `Hard gate ${chg.code}/${gateNode.code} has empty gateCommand under strict_audit preset.`,
+              'Configure a deterministic repository verification command.',
+              chg.code,
+              gateNode.code,
+            ),
+          );
+        }
+      }
     }
 
     // Check DDD terminology drift in Change specification
@@ -202,6 +267,25 @@ export function validateCompiledMissionPlan(input: {
           chg.code,
         ),
       );
+    }
+
+    for (const node of nodes) {
+      if (
+        !Number.isInteger(node.maxAttempts) ||
+        node.maxAttempts < 1 ||
+        node.maxAttempts > 20
+      ) {
+        issues.push(
+          makeIssue(
+            'error',
+            'policy',
+            `Node ${chg.code}/${node.code} has invalid maxAttempts (${node.maxAttempts}); expected integer 1..20.`,
+            'Set node maxAttempts between 1 and 20.',
+            chg.code,
+            node.code,
+          ),
+        );
+      }
     }
 
     // L2 & L3 node checks

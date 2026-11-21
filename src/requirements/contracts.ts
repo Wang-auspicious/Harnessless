@@ -67,11 +67,29 @@ export const rawItemSchema = dslObject({
   sourceRef: dslString(160, 1),
 });
 
+export const evidenceEntrySchema = dslObject({
+  kind: dslChoice(
+    'user_fact',
+    'document_fact',
+    'agent_inference',
+    'assumption',
+  ),
+  claim: dslString(600, 1),
+  sourceRef: dslString(160, 1),
+});
+
+export const intakeQuestionSchema = dslObject({
+  question: dslString(400, 1),
+  critical: dslBoolean,
+});
+
 export const intakeSchema = dslObject({
   summary: dslString(1200, 1),
   scenarios: dslArray(dslString(400, 1), 1, 12),
   goals: dslArray(dslString(400, 1), 1, 12),
   rawItems: dslArray(rawItemSchema, 1, 24),
+  evidence: dslArray(evidenceEntrySchema, 0, 24),
+  questions: dslArray(intakeQuestionSchema, 0, 12),
   ambiguities: dslArray(dslString(400, 1), 0, 12),
   risks: dslArray(dslString(400, 1), 0, 12),
   blockingQuestions: dslArray(dslString(400, 1), 0, 8),
@@ -82,7 +100,7 @@ export type IntakeArtifactData = Validated<typeof intakeSchema>;
 export const dependencyEdgeSchema = dslObject({
   from: dslString(80, 1),
   to: dslString(80, 1),
-  kind: dslChoice('depends_on', 'conflict', 'refines'),
+  kind: dslChoice('depends_on', 'prerequisite', 'conflict', 'refines'),
   reason: dslString(400, 1),
 });
 
@@ -201,7 +219,7 @@ export const proposalScopeItemSchema = dslObject(
   ['supersedesScopeKey'],
 );
 
-export const proposalSchema = dslObject({
+const rawProposalSchema = dslObject({
   title: dslString(200, 1),
   background: dslString(1500, 1),
   scenarios: dslArray(dslString(400, 1), 1, 12),
@@ -218,17 +236,42 @@ export const proposalSchema = dslObject({
   scopeItems: dslArray(proposalScopeItemSchema, 1, 24),
 });
 
-export type ProposalArtifactData = Validated<typeof proposalSchema>;
+export type ProposalArtifactData = Validated<typeof rawProposalSchema>;
+
+export const proposalSchema: Schema<ProposalArtifactData> = {
+  json: rawProposalSchema.json,
+  parse(value, path = '$'): ProposalArtifactData {
+    const parsed = rawProposalSchema.parse(value, path);
+    const seenKeys = new Set<string>();
+    for (let i = 0; i < parsed.scopeItems.length; i += 1) {
+      const key = parsed.scopeItems[i]!.scopeKey;
+      if (seenKeys.has(key)) {
+        throw new SchemaError(
+          `${path}.scopeItems[${i}].scopeKey: duplicate scopeKey "${key}"`,
+        );
+      }
+      seenKeys.add(key);
+    }
+    return parsed;
+  },
+};
 
 export const evalFindingSchema = dslObject(
   {
-    severity: dslChoice('high', 'medium', 'low'),
+    severity: dslChoice(
+      'veto',
+      'blocking',
+      'condition',
+      'uncertain',
+      'informational',
+    ),
     message: dslString(500, 1),
     scopeKey: dslOptional(dslString(120, 1)),
+    issueIds: dslOptional(dslArray(dslString(60, 1), 0, 16)),
     owner: dslOptional(dslString(120, 1)),
     verification: dslOptional(dslString(400, 1)),
   },
-  ['scopeKey', 'owner', 'verification'],
+  ['scopeKey', 'issueIds', 'owner', 'verification'],
 );
 
 const rawEvaluationSchema = dslObject({
@@ -245,6 +288,16 @@ export const evaluationSchema: Schema<EvaluationArtifactData> = {
   json: rawEvaluationSchema.json,
   parse(value, path = '$'): EvaluationArtifactData {
     const parsed = rawEvaluationSchema.parse(value, path);
+    for (let i = 0; i < parsed.findings.length; i += 1) {
+      const f = parsed.findings[i]!;
+      if (f.severity === 'condition' || f.severity === 'uncertain') {
+        if (!f.owner || !f.verification) {
+          throw new SchemaError(
+            `${path}.findings[${i}]: ${f.severity} finding requires non-empty owner and verification`,
+          );
+        }
+      }
+    }
     if (parsed.verdict === 'condition' || parsed.verdict === 'uncertain') {
       if (parsed.findings.length === 0) {
         throw new SchemaError(
@@ -284,7 +337,8 @@ export const prdDraftSchema = dslObject({
 export type PrdDraftData = Validated<typeof prdDraftSchema>;
 
 export interface HamaReportData {
-  readonly verdict: 'pass' | 'condition' | 'fail';
+  readonly verdict:
+    'pass' | 'conditional_pass' | 'revision_required' | 'escalation';
   readonly conditions: readonly {
     readonly dimension: EvalDimension;
     readonly message: string;
