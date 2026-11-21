@@ -3,40 +3,20 @@
  */
 
 import type {
-  AddCommentRequest,
-  BaselineImpactReport,
-  BaselineImpactRequest,
   BootstrapSnapshot,
   ChangeDetailSnapshot,
-  ControlCommandInput,
-  ControlSchemaResponse,
   CreateChangeRequest,
   CreateHubRequest,
-  CreateMissionRequest,
   CreateRoomRequest,
-  DecisionInput,
   EvidenceSearchHit,
-  FocusProjection,
   ForgePreloadBridge,
   ForgeSseEvent,
-  HamaDetailSnapshot,
-  MemoryGraphSnapshot,
-  MemoryLivingDocRecord,
   MemoryObservatorySnapshot,
-  MemoryObservationRecord,
-  MemoryRecallQuery,
-  MemoryRecallResult,
-  MemoryReflectResult,
-  MemoryRetainRequest,
-  MissionDetailSnapshot,
-  MissionEvidenceResponse,
-  MissionTraceabilityResponse,
   PostRoomMessageRequest,
   PromoteThreadToChangeRequest,
   ProposeGhostNodeRequest,
   RegisterAdapterRequest,
   RegisterRepoRequest,
-  ResolveCommentDispositionRequest,
   RoomDetailSnapshot,
   UpdateChangeTeamRequest,
   UpdateProviderSecretRequest,
@@ -60,14 +40,6 @@ import type {
   SoulConstitution,
   TranscriptMessage,
 } from '../../../src/shared/types.ts';
-import type {
-  ApprovedRequirementsBaseline,
-  ExecutionMode,
-  HamaCommentRecord,
-  MissionDecisionRecord,
-  MissionEventRecord,
-  MissionRecord,
-} from '../../../src/shared/v3-types.ts';
 
 declare global {
   interface Window {
@@ -90,22 +62,6 @@ export interface DreamConsolidationDto {
   readonly coldArchivedMemories: number;
   readonly capsulesRefreshed: number;
   readonly completedAt: string;
-}
-
-export interface OutboxEffectDto {
-  readonly id: string;
-  readonly kind: string;
-  readonly dedupeKey: string;
-  readonly payloadJson: string;
-  readonly status: 'pending' | 'leased' | 'dead_letter';
-  readonly leaseToken: string | null;
-  readonly leasedUntil: string | null;
-  readonly payloadVersion: number;
-  readonly maxAttempts: number;
-  readonly attempts: number;
-  readonly nextDueAt: string;
-  readonly lastError: string;
-  readonly createdAt: string;
 }
 
 function getBridgeConfig(): {
@@ -359,183 +315,6 @@ export const forgeApi = {
     apiFetch<readonly DaemonStatus[]>(
       `/api/infra/daemons/${encodeURIComponent(id)}`,
       {method: 'POST', body: {enabled}},
-    ),
-
-  getControlSchema: (): Promise<ControlSchemaResponse> =>
-    apiFetch<ControlSchemaResponse>('/api/schema/controls'),
-
-  listMissions: (
-    hubId?: string,
-    includeArchived = false,
-  ): Promise<readonly MissionRecord[]> => {
-    const qs = new URLSearchParams();
-    if (hubId) {
-      qs.set('hubId', hubId);
-    }
-    if (includeArchived) {
-      qs.set('includeArchived', '1');
-    }
-    const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch<readonly MissionRecord[]>(`/api/missions${suffix}`);
-  },
-
-  createMission: (
-    body: CreateMissionRequest,
-  ): Promise<{
-    readonly mission: MissionRecord;
-    readonly focus: FocusProjection;
-  }> => apiFetch('/api/missions', {method: 'POST', body}),
-
-  getMissionDetail: (missionId: string): Promise<MissionDetailSnapshot> =>
-    apiFetch<MissionDetailSnapshot>(
-      `/api/missions/${encodeURIComponent(missionId)}`,
-    ),
-
-  getMissionFocus: (missionId: string): Promise<FocusProjection> =>
-    apiFetch<FocusProjection>(
-      `/api/missions/${encodeURIComponent(missionId)}/focus`,
-    ),
-
-  resolveMissionDecision: (
-    missionId: string,
-    body: DecisionInput,
-  ): Promise<{
-    readonly decision: MissionDecisionRecord;
-    readonly mission: MissionRecord;
-    readonly focus: FocusProjection;
-  }> =>
-    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/decisions`, {
-      method: 'POST',
-      body,
-    }),
-
-  executeMissionControl: (
-    missionId: string,
-    body: ControlCommandInput,
-  ): Promise<{
-    readonly mission: MissionRecord;
-    readonly focus: FocusProjection;
-    readonly spawnedMission?: MissionRecord;
-  }> =>
-    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/control`, {
-      method: 'POST',
-      body,
-    }),
-
-  getMissionHama: (missionId: string): Promise<HamaDetailSnapshot> =>
-    apiFetch<HamaDetailSnapshot>(
-      `/api/missions/${encodeURIComponent(missionId)}/hama`,
-    ),
-
-  addHamaComment: (
-    missionId: string,
-    body: AddCommentRequest,
-  ): Promise<HamaCommentRecord> =>
-    apiFetch<HamaCommentRecord>(
-      `/api/missions/${encodeURIComponent(missionId)}/comments`,
-      {method: 'POST', body},
-    ),
-
-  resolveHamaComment: (
-    missionId: string,
-    commentId: string,
-    body: ResolveCommentDispositionRequest,
-  ): Promise<HamaCommentRecord> =>
-    apiFetch<HamaCommentRecord>(
-      `/api/missions/${encodeURIComponent(missionId)}/comments/${encodeURIComponent(commentId)}/disposition`,
-      {method: 'POST', body},
-    ),
-
-  getMissionTraceability: (
-    missionId: string,
-  ): Promise<MissionTraceabilityResponse> =>
-    apiFetch<MissionTraceabilityResponse>(
-      `/api/missions/${encodeURIComponent(missionId)}/traceability`,
-    ),
-
-  getMissionEvidence: (missionId: string): Promise<MissionEvidenceResponse> =>
-    apiFetch<MissionEvidenceResponse>(
-      `/api/missions/${encodeURIComponent(missionId)}/evidence`,
-    ),
-
-  getMissionEvents: (
-    missionId: string,
-    limit = 250,
-  ): Promise<readonly MissionEventRecord[]> =>
-    apiFetch<readonly MissionEventRecord[]>(
-      `/api/missions/${encodeURIComponent(missionId)}/events?limit=${limit}`,
-    ),
-
-  listBaselines: (
-    projectId?: string,
-  ): Promise<readonly ApprovedRequirementsBaseline[]> => {
-    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
-    return apiFetch<readonly ApprovedRequirementsBaseline[]>(
-      `/api/baselines${qs}`,
-    );
-  },
-
-  getBaselineImpact: (
-    baselineId: string,
-    body: BaselineImpactRequest,
-  ): Promise<BaselineImpactReport> =>
-    apiFetch<BaselineImpactReport>(
-      `/api/baselines/${encodeURIComponent(baselineId)}/impact`,
-      {method: 'POST', body},
-    ),
-
-  retainMemory: (body: MemoryRetainRequest): Promise<unknown> =>
-    apiFetch('/api/memory/retain', {method: 'POST', body}),
-
-  recallMemory: (body: MemoryRecallQuery): Promise<MemoryRecallResult> =>
-    apiFetch<MemoryRecallResult>('/api/memory/recall', {
-      method: 'POST',
-      body,
-    }),
-
-  reflectMemory: (body: {
-    readonly hubId: string;
-    readonly executionMode: ExecutionMode;
-    readonly question: string;
-    readonly limit?: number;
-  }): Promise<MemoryReflectResult> =>
-    apiFetch<MemoryReflectResult>('/api/memory/reflect', {
-      method: 'POST',
-      body,
-    }),
-
-  listLivingDocs: (
-    hubId: string,
-    executionMode: ExecutionMode,
-  ): Promise<readonly MemoryLivingDocRecord[]> =>
-    apiFetch<readonly MemoryLivingDocRecord[]>(
-      `/api/memory/living-docs?hubId=${encodeURIComponent(hubId)}&executionMode=${executionMode}`,
-    ),
-
-  listMemoryObservations: (
-    hubId: string,
-    executionMode: ExecutionMode,
-    includeRetired = false,
-  ): Promise<readonly MemoryObservationRecord[]> =>
-    apiFetch<readonly MemoryObservationRecord[]>(
-      `/api/memory/observations?hubId=${encodeURIComponent(hubId)}&executionMode=${executionMode}${includeRetired ? '&includeRetired=1' : ''}`,
-    ),
-
-  getMemoryGraph: (
-    hubId: string,
-    executionMode: ExecutionMode,
-  ): Promise<MemoryGraphSnapshot> =>
-    apiFetch<MemoryGraphSnapshot>(
-      `/api/memory/graph?hubId=${encodeURIComponent(hubId)}&executionMode=${executionMode}`,
-    ),
-
-  listOutbox: (limit = 100): Promise<readonly OutboxEffectDto[]> =>
-    apiFetch<readonly OutboxEffectDto[]>(`/api/infra/outbox?limit=${limit}`),
-
-  retryOutboxEffect: (effectId: string): Promise<OutboxEffectDto> =>
-    apiFetch<OutboxEffectDto>(
-      `/api/infra/outbox/${encodeURIComponent(effectId)}/retry`,
-      {method: 'POST'},
     ),
 
   pickDirectory: async (): Promise<string | null> => {
