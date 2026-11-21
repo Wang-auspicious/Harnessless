@@ -4,6 +4,26 @@ All specification evolutions, scope refinements, and architectural decisions are
 
 ---
 
+## [2026-11-21] Entry 006 — v3.1.0 SDLC Studio: Code-Grounded Workbench, IDE Escape Hatch, Deterministic Failure Guard & Git Hotfix Reconciliation
+
+### Context & Rationale
+Synthesized real-world engineering feedback to elevate usability, failure containment, and long-term state fidelity while keeping ForgeOps's crisp v2.2 DirectUI styling (`#f8fafc` / `#ffffff`, `Anthropic Serif` + `思源宋体`) intact: eliminated blind upfront proposals without reading source files, added half-way IDE debugging/handover instead of binary black-box retries, stopped silent test tampering and infinite retry loops, and prevented stale locked memories from fighting manual Git hotfixes.
+
+### Delivered Changes
+1. **Code-Grounded Idea → Proposal Workbench (`src/core/codebase-probe.ts`, `src/sandbox/repo-scanner.ts`, `src/requirements/hama-engine.ts`):**
+   - Added symlink-confined read-only codebase probe scanning target repos (`matchedFiles`, exports, importer fan-in edges, `package.json` verify command detection, Git hotspots & `Revert` history, and reality challenge notes) to drive objective `express | standard | full_hama` triage and ground HAMA specs in real code (`codebase_probe` artifact).
+2. **Deterministic Failure Guard, Anti-Spin Breaker & Read/Write Serialization (`src/core/failure-guard.ts`, `src/core/trial-simulator.ts`, `src/engines/certifier.ts`, `src/engines/continuity.ts`):**
+   - Added failure taxonomy (`infra_env` | `test_tampering` | `spec_gap` | `logic_bug`), diff-based test-tampering checks (`.skip` / `.only` / deleted tests / unreplaced assertion drops), destructive DDL/export-removal warnings, and normalized error-fingerprint + A→B→A diff-oscillation spin breakers.
+   - Added Read-Set ∩ Write-Set dependency serialization in `simulateTwinGraphTrial` / `simulateMissionTrial`.
+3. **IDE Escape Hatch, Verify-Safe Human Handover & Causal Diff (`src/engines/continuity.ts`, `src/electron/main.ts`, `src/electron/preload.ts`, `renderer/src/views/WorkstationView.tsx`):**
+   - Added allowlist-confined `openPath` / `openInEditor` Electron IPC, `pauseForHumanTakeover`, `getTakeoverStatus`, `resumeFromHumanHandover` (preserving manual edits on failed verification; creating `HANDOVER-*` Git checkpoints & optional `L3_locked` rules on pass), and DAG-grouped Causal Diff (`getCausalDiff`).
+4. **Out-of-Band Git Hotfix Reconciliation & v2.2 DirectUI Evolution (`src/memory/hindsight-engine.ts`, `src/store/memory-repo.ts`, `renderer/src/views/MissionStudioView.tsx`, `ControlTaskView.tsx`):**
+   - Added external commit / `Revert` scanning (`reconcileExternalGitChanges`), automatic `contested` + `staleSuspect` flagging on affected rules, pitfall retention, `resolveObservationConflict` (`adopt_code` | `keep_rule` | `retire`), plain-Chinese control schema registry (`CONTROL_SCHEMA_REGISTRY`), and `MissionStudioView`.
+5. **Verification (`verify/sdlc-studio-v31.verify.ts`):**
+   - Added offline deterministic E2E test suite verifying probe grounding, failure guard & Read/Write contention serialization, verify-safe IDE takeover & Causal Diff, and external Git hotfix reconciliation.
+
+---
+
 ## [2026-11-12] Entry 005 — v2.2.0 DirectUI Native Shell, `Anthropic Serif` + `思源宋体` Typography, Full Bilingual i18n & SDD Spec Studio
 
 ### Context & Rationale
