@@ -1,11 +1,16 @@
 import {
+  closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
   statSync,
+  type Stats,
   writeFileSync,
 } from 'node:fs';
 import {dirname, isAbsolute, join, relative, resolve} from 'node:path';
@@ -15,6 +20,7 @@ import type {
   CheckpointCommitResult,
   IGitWorktreeManager,
   ISandboxProcessRunner,
+  ProcessRunResult,
   RepoMergeReadinessResult,
   RewindWorktreeResult,
   WorktreeDiffSummary,
@@ -22,10 +28,27 @@ import type {
 } from './contracts.ts';
 import {WorktreeLockManager} from './worktree-lock.ts';
 
-const WIN_RESERVED_DEVICE = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
+const WIN_RESERVED_DEVICE =
+  /^(CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i;
 
 function stripWinVerbatimPrefix(p: string): string {
   return p.startsWith('\\\\?\\') ? p.slice(4) : p;
+}
+
+function tryLstat(targetPath: string): Stats | null {
+  try {
+    return lstatSync(targetPath);
+  } catch (err) {
+    if (
+      err &&
+      typeof err === 'object' &&
+      'code' in err &&
+      (err as {code?: unknown}).code === 'ENOENT'
+    ) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 function canonicalizeWithExistingAncestors(targetPath: string): string {
@@ -33,7 +56,27 @@ function canonicalizeWithExistingAncestors(targetPath: string): string {
   const tailSegments: string[] = [];
   let cursor = abs;
 
-  while (!existsSync(cursor)) {
+  while (true) {
+    const st = tryLstat(cursor);
+    if (st !== null) {
+      if (st.isSymbolicLink()) {
+        try {
+          const resolvedLink = stripWinVerbatimPrefix(
+            realpathSync.native(cursor),
+          );
+          return tailSegments.length > 0
+            ? stripWinVerbatimPrefix(resolve(resolvedLink, ...tailSegments))
+            : resolvedLink;
+        } catch {
+          throw new ForgeError(
+            'FORBIDDEN_PATH',
+            `SANDBOX_ESCAPE: Dangling or unresolvable symlink "${cursor}" is forbidden`,
+            403,
+          );
+        }
+      }
+      break;
+    }
     const parent = dirname(cursor);
     if (parent === cursor) {
       break;
@@ -44,11 +87,15 @@ function canonicalizeWithExistingAncestors(targetPath: string): string {
   }
 
   let resolvedBase = cursor;
-  if (existsSync(cursor)) {
+  if (tryLstat(cursor) !== null) {
     try {
       resolvedBase = stripWinVerbatimPrefix(realpathSync.native(cursor));
-    } catch {
-      resolvedBase = stripWinVerbatimPrefix(resolve(cursor));
+    } catch (err) {
+      throw new ForgeError(
+        'FORBIDDEN_PATH',
+        `SANDBOX_ESCAPE: Unresolvable path "${cursor}": ${err instanceof Error ? err.message : String(err)}`,
+        403,
+      );
     }
   }
 
@@ -67,6 +114,50 @@ function sanitizeRefSegment(raw: string): string {
   );
 }
 
+function countFileLinesStreamed(filePath: string): {
+  readonly isBinary: boolean;
+  readonly lineCount: number;
+} {
+  const chunkSize = 65_536;
+  const buf = Buffer.allocUnsafe(chunkSize);
+  const fd = openSync(filePath, 'r');
+  try {
+    let totalBytesRead = 0;
+    let newlines = 0;
+    let lastByte = -1;
+    while (true) {
+      const n = readSync(fd, buf, 0, chunkSize, null);
+      if (n <= 0) {
+        break;
+      }
+      if (totalBytesRead < 8192) {
+        const probeEnd = Math.min(n, 8192 - totalBytesRead);
+        for (let i = 0; i < probeEnd; i += 1) {
+          if (buf[i] === 0) {
+            return {isBinary: true, lineCount: 0};
+          }
+        }
+      }
+      for (let i = 0; i < n; i += 1) {
+        if (buf[i] === 10) {
+          newlines += 1;
+        }
+      }
+      lastByte = buf[n - 1]!;
+      totalBytesRead += n;
+    }
+    if (totalBytesRead === 0) {
+      return {isBinary: false, lineCount: 0};
+    }
+    return {
+      isBinary: false,
+      lineCount: lastByte === 10 ? newlines : newlines + 1,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function buildUntrackedUnifiedDiff(
   worktreePath: string,
   relPaths: readonly string[],
@@ -75,16 +166,23 @@ function buildUntrackedUnifiedDiff(
   let addedLines = 0;
   let totalBytes = 0;
 
-  for (const rel of relPaths.slice(0, 100)) {
-    if (totalBytes > 256_000) {
-      break;
-    }
+  for (const rel of relPaths) {
     const full = join(worktreePath, rel);
     try {
       const st = statSync(full);
-      if (!st.isFile() || st.size > 131_072) {
+      if (!st.isFile()) {
         continue;
       }
+      const canIncludePatch =
+        blocks.length < 100 && totalBytes < 256_000 && st.size <= 131_072;
+      if (!canIncludePatch) {
+        const counted = countFileLinesStreamed(full);
+        if (!counted.isBinary) {
+          addedLines += counted.lineCount;
+        }
+        continue;
+      }
+
       const buf = readFileSync(full);
       const probeLen = Math.min(buf.length, 8192);
       let isBinary = false;
@@ -113,8 +211,11 @@ function buildUntrackedUnifiedDiff(
       ];
       const body = rawLines.map(line => `+${line}`);
       const block = [...header, ...body].join('\n');
-      totalBytes += block.length;
-      blocks.push(block);
+      const blockBytes = Buffer.byteLength(block, 'utf8');
+      if (totalBytes + blockBytes <= 256_000) {
+        totalBytes += blockBytes;
+        blocks.push(block);
+      }
     } catch {
       // Ignore unreadable transient files.
     }
@@ -144,6 +245,20 @@ export class GitWorktreeManager implements IGitWorktreeManager {
     this.locks = locks;
   }
 
+  private runGit(
+    cwd: string,
+    args: readonly string[],
+    timeoutMs?: number,
+  ): Promise<ProcessRunResult> {
+    return this.runner.run({
+      executable: 'git',
+      args,
+      cwd,
+      extraEnv: {LC_ALL: 'C'},
+      timeoutMs,
+    });
+  }
+
   resolveInside(
     rootDir: string,
     candidatePath: string,
@@ -161,6 +276,18 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       );
     }
 
+    if (
+      /^[A-Za-z]:(?![/\\])/.test(candidatePath) ||
+      /^(?:\\\\|\/\/)[.?](?:\\|\/)/.test(candidatePath) ||
+      /^\\\\\?\\UNC\\/i.test(candidatePath)
+    ) {
+      throw new ForgeError(
+        'FORBIDDEN_PATH',
+        `SANDBOX_ESCAPE: Unsafe Windows drive-relative or device path "${candidatePath}" is forbidden`,
+        403,
+      );
+    }
+
     const canonicalRoot = canonicalizeWithExistingAncestors(rootDir);
     const joinedCandidate = isAbsolute(candidatePath)
       ? stripWinVerbatimPrefix(resolve(candidatePath))
@@ -169,7 +296,9 @@ export class GitWorktreeManager implements IGitWorktreeManager {
 
     const rel = relative(canonicalRoot, canonicalTarget);
     const escapes =
-      rel.startsWith('..') ||
+      rel === '..' ||
+      rel.startsWith('../') ||
+      rel.startsWith('..\\') ||
       isAbsolute(rel) ||
       (process.platform === 'win32' &&
         canonicalRoot[0]?.toLowerCase() !== canonicalTarget[0]?.toLowerCase());
@@ -222,39 +351,30 @@ export class GitWorktreeManager implements IGitWorktreeManager {
   ): Promise<string> {
     mkdirSync(repoPath, {recursive: true});
     return this.locks.withRepoLock(repoPath, this.runner, async () => {
-      const headCheck = await this.runner.run({
-        executable: 'git',
-        args: ['rev-parse', '--verify', 'HEAD'],
-        cwd: repoPath,
-      });
+      const headCheck = await this.runGit(repoPath, [
+        'rev-parse',
+        '--verify',
+        'HEAD',
+      ]);
 
       if (headCheck.exitCode === 0 && headCheck.stdout.trim().length > 0) {
         return headCheck.stdout.trim();
       }
 
-      const gitDirCheck = await this.runner.run({
-        executable: 'git',
-        args: ['rev-parse', '--is-inside-work-tree'],
-        cwd: repoPath,
-      });
+      const gitDirCheck = await this.runGit(repoPath, [
+        'rev-parse',
+        '--is-inside-work-tree',
+      ]);
 
       if (gitDirCheck.exitCode !== 0) {
-        const initRes = await this.runner.run({
-          executable: 'git',
-          args: ['init', '-b', defaultBranch],
-          cwd: repoPath,
-        });
+        const initRes = await this.runGit(repoPath, [
+          'init',
+          '-b',
+          defaultBranch,
+        ]);
         if (initRes.exitCode !== 0) {
-          await this.runner.run({
-            executable: 'git',
-            args: ['init'],
-            cwd: repoPath,
-          });
-          await this.runner.run({
-            executable: 'git',
-            args: ['checkout', '-B', defaultBranch],
-            cwd: repoPath,
-          });
+          await this.runGit(repoPath, ['init']);
+          await this.runGit(repoPath, ['checkout', '-B', defaultBranch]);
         }
       }
 
@@ -267,26 +387,18 @@ export class GitWorktreeManager implements IGitWorktreeManager {
         );
       }
 
-      await this.runner.run({
-        executable: 'git',
-        args: ['add', '-A'],
-        cwd: repoPath,
-      });
+      await this.runGit(repoPath, ['add', '-A']);
 
-      const commitRes = await this.runner.run({
-        executable: 'git',
-        args: [
-          '-c',
-          'user.name=ForgeOps',
-          '-c',
-          'user.email=forgeops@local',
-          'commit',
-          '--allow-empty',
-          '-m',
-          'chore: initialize repository',
-        ],
-        cwd: repoPath,
-      });
+      const commitRes = await this.runGit(repoPath, [
+        '-c',
+        'user.name=ForgeOps',
+        '-c',
+        'user.email=forgeops@local',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'chore: initialize repository',
+      ]);
 
       if (commitRes.exitCode !== 0) {
         throw new ForgeError(
@@ -296,11 +408,7 @@ export class GitWorktreeManager implements IGitWorktreeManager {
         );
       }
 
-      const shaRes = await this.runner.run({
-        executable: 'git',
-        args: ['rev-parse', 'HEAD'],
-        cwd: repoPath,
-      });
+      const shaRes = await this.runGit(repoPath, ['rev-parse', 'HEAD']);
       return shaRes.stdout.trim();
     });
   }
@@ -326,11 +434,7 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       const worktreePath = this.resolveInside(input.worktreesRoot, dirName);
       const branchName = `forgeops/${cleanChange}${idSuffix}`;
 
-      await this.runner.run({
-        executable: 'git',
-        args: ['worktree', 'prune'],
-        cwd: input.repoPath,
-      });
+      await this.runGit(input.repoPath, ['worktree', 'prune']);
 
       if (existsSync(worktreePath)) {
         if (input.changeId) {
@@ -340,39 +444,36 @@ export class GitWorktreeManager implements IGitWorktreeManager {
             409,
           );
         }
-        await this.runner.run({
-          executable: 'git',
-          args: ['worktree', 'remove', '--force', worktreePath],
-          cwd: input.repoPath,
-        });
+        await this.runGit(input.repoPath, [
+          'worktree',
+          'remove',
+          '--force',
+          worktreePath,
+        ]);
         rmSync(worktreePath, {recursive: true, force: true});
       }
 
       let baseCommitSha = defaultHead;
       if (input.baseRef) {
-        const refRes = await this.runner.run({
-          executable: 'git',
-          args: ['rev-parse', '--verify', input.baseRef],
-          cwd: input.repoPath,
-        });
+        const refRes = await this.runGit(input.repoPath, [
+          'rev-parse',
+          '--verify',
+          input.baseRef,
+        ]);
         if (refRes.exitCode === 0 && refRes.stdout.trim().length > 0) {
           baseCommitSha = refRes.stdout.trim();
         }
       }
 
-      const addRes = await this.runner.run({
-        executable: 'git',
-        args: [
-          'worktree',
-          'add',
-          '--force',
-          '-B',
-          branchName,
-          worktreePath,
-          baseCommitSha,
-        ],
-        cwd: input.repoPath,
-      });
+      const addRes = await this.runGit(input.repoPath, [
+        'worktree',
+        'add',
+        '--force',
+        '-B',
+        branchName,
+        worktreePath,
+        baseCommitSha,
+      ]);
 
       if (addRes.exitCode !== 0) {
         throw new ForgeError(
@@ -402,43 +503,28 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       input.worktreePath,
       this.runner,
       async () => {
-        await this.runner.run({
-          executable: 'git',
-          args: ['add', '-A'],
-          cwd: input.worktreePath,
-        });
+        await this.runGit(input.worktreePath, ['add', '-A']);
 
-        const diffCached = await this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'diff',
-            '--cached',
-            '--name-only',
-            '-z',
-          ],
-          cwd: input.worktreePath,
-        });
-        const changedFiles = diffCached.stdout
-          .split('\0')
-          .map(s => s.trim())
-          .filter(Boolean);
+        const diffCached = await this.runGit(input.worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--cached',
+          '--name-only',
+          '-z',
+        ]);
+        const changedFiles = diffCached.stdout.split('\0').filter(Boolean);
 
-        const commitRes = await this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'user.name=ForgeOps',
-            '-c',
-            'user.email=forgeops@local',
-            'commit',
-            '--allow-empty',
-            '-m',
-            input.message,
-          ],
-          cwd: input.worktreePath,
-        });
+        const commitRes = await this.runGit(input.worktreePath, [
+          '-c',
+          'user.name=ForgeOps',
+          '-c',
+          'user.email=forgeops@local',
+          'commit',
+          '--allow-empty',
+          '-m',
+          input.message,
+        ]);
 
         if (commitRes.exitCode !== 0) {
           throw new ForgeError(
@@ -448,22 +534,17 @@ export class GitWorktreeManager implements IGitWorktreeManager {
           );
         }
 
-        const revRes = await this.runner.run({
-          executable: 'git',
-          args: ['rev-parse', 'HEAD'],
-          cwd: input.worktreePath,
-        });
+        const revRes = await this.runGit(input.worktreePath, [
+          'rev-parse',
+          'HEAD',
+        ]);
         const commitSha = revRes.stdout.trim();
         const shortSha = commitSha.slice(0, 8);
         const cleanChange = sanitizeRefSegment(input.changeCode);
         const cleanNode = sanitizeRefSegment(input.nodeCode);
         const gitTag = `forgeops/${cleanChange}/${cleanNode}-${shortSha}`;
 
-        await this.runner.run({
-          executable: 'git',
-          args: ['tag', '-f', gitTag, commitSha],
-          cwd: input.worktreePath,
-        });
+        await this.runGit(input.worktreePath, ['tag', '-f', gitTag, commitSha]);
 
         return {
           commitSha,
@@ -486,11 +567,11 @@ export class GitWorktreeManager implements IGitWorktreeManager {
         const cleanChange = sanitizeRefSegment(input.changeCode);
         const rescueRef = `refs/forgeops-backup/${cleanChange}/${Date.now()}`;
 
-        const refRes = await this.runner.run({
-          executable: 'git',
-          args: ['update-ref', rescueRef, 'HEAD'],
-          cwd: input.worktreePath,
-        });
+        const refRes = await this.runGit(input.worktreePath, [
+          'update-ref',
+          rescueRef,
+          'HEAD',
+        ]);
         if (refRes.exitCode !== 0) {
           throw new ForgeError(
             'INTERNAL_ERROR',
@@ -499,11 +580,11 @@ export class GitWorktreeManager implements IGitWorktreeManager {
           );
         }
 
-        const resetRes = await this.runner.run({
-          executable: 'git',
-          args: ['reset', '--hard', input.targetCommitSha],
-          cwd: input.worktreePath,
-        });
+        const resetRes = await this.runGit(input.worktreePath, [
+          'reset',
+          '--hard',
+          input.targetCommitSha,
+        ]);
         if (resetRes.exitCode !== 0) {
           throw new ForgeError(
             'INTERNAL_ERROR',
@@ -512,17 +593,12 @@ export class GitWorktreeManager implements IGitWorktreeManager {
           );
         }
 
-        await this.runner.run({
-          executable: 'git',
-          args: ['clean', '-fd'],
-          cwd: input.worktreePath,
-        });
+        await this.runGit(input.worktreePath, ['clean', '-fd']);
 
-        const headRes = await this.runner.run({
-          executable: 'git',
-          args: ['rev-parse', 'HEAD'],
-          cwd: input.worktreePath,
-        });
+        const headRes = await this.runGit(input.worktreePath, [
+          'rev-parse',
+          'HEAD',
+        ]);
 
         return {
           restoredCommitSha: headRes.stdout.trim() || input.targetCommitSha,
@@ -541,65 +617,63 @@ export class GitWorktreeManager implements IGitWorktreeManager {
     }
     await this.locks.withRepoLock(worktreePath, this.runner, async () => {
       if (fileScope.length === 0) {
-        await this.runner.run({
-          executable: 'git',
-          args: ['reset', '--hard', 'HEAD'],
-          cwd: worktreePath,
-        });
-        await this.runner.run({
-          executable: 'git',
-          args: ['clean', '-fd'],
-          cwd: worktreePath,
-        });
+        await this.runGit(worktreePath, ['reset', '--hard', 'HEAD']);
+        await this.runGit(worktreePath, ['clean', '-fd']);
         return;
       }
 
       const [trackedRes, untrackedRes] = await Promise.all([
-        this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'diff',
-            '--name-only',
-            '-z',
-            'HEAD',
-          ],
-          cwd: worktreePath,
-        }),
-        this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'ls-files',
-            '--others',
-            '--exclude-standard',
-            '-z',
-          ],
-          cwd: worktreePath,
-        }),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--name-only',
+          '-z',
+          'HEAD',
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '-z',
+        ]),
       ]);
+
+      if (trackedRes.exitCode !== 0 || untrackedRes.exitCode !== 0) {
+        throw new ForgeError(
+          'INTERNAL_ERROR',
+          `Failed to inspect worktree before revertTaskScope: ${trackedRes.stderr || untrackedRes.stderr}`,
+          500,
+        );
+      }
 
       const trackedMatches = trackedRes.stdout
         .split('\0')
-        .map(s => s.trim())
         .filter(f => f && isFileInsideScope(f, fileScope));
       if (trackedMatches.length > 0) {
-        await this.runner.run({
-          executable: 'git',
-          args: ['checkout', 'HEAD', '--', ...trackedMatches],
-          cwd: worktreePath,
-        });
+        const checkoutRes = await this.runGit(worktreePath, [
+          'checkout',
+          'HEAD',
+          '--',
+          ...trackedMatches,
+        ]);
+        if (checkoutRes.exitCode !== 0) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            `git checkout failed during revertTaskScope: ${checkoutRes.stderr}`,
+            500,
+          );
+        }
       }
 
       const untrackedMatches = untrackedRes.stdout
         .split('\0')
-        .map(s => s.trim())
         .filter(f => f && isFileInsideScope(f, fileScope));
       for (const rel of untrackedMatches) {
         const safe = this.resolveInside(worktreePath, rel);
-        rmSync(safe, {force: true});
+        rmSync(safe, {recursive: true, force: true});
       }
     });
   }
@@ -609,31 +683,30 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       return [];
     }
     const [trackedRes, untrackedRes] = await Promise.all([
-      this.runner.run({
-        executable: 'git',
-        args: [
-          '-c',
-          'core.quotePath=false',
-          'diff',
-          '--name-only',
-          '-z',
-          'HEAD',
-        ],
-        cwd: worktreePath,
-      }),
-      this.runner.run({
-        executable: 'git',
-        args: [
-          '-c',
-          'core.quotePath=false',
-          'ls-files',
-          '--others',
-          '--exclude-standard',
-          '-z',
-        ],
-        cwd: worktreePath,
-      }),
+      this.runGit(worktreePath, [
+        '-c',
+        'core.quotePath=false',
+        'diff',
+        '--name-only',
+        '-z',
+        'HEAD',
+      ]),
+      this.runGit(worktreePath, [
+        '-c',
+        'core.quotePath=false',
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+        '-z',
+      ]),
     ]);
+    if (trackedRes.exitCode !== 0 || untrackedRes.exitCode !== 0) {
+      throw new ForgeError(
+        'INTERNAL_ERROR',
+        `snapshotWorkingTree failed: ${trackedRes.stderr || untrackedRes.stderr}`,
+        500,
+      );
+    }
     return Array.from(
       new Set([
         ...trackedRes.stdout.split('\0').filter(Boolean),
@@ -650,16 +723,133 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       return;
     }
     await this.locks.withRepoLock(worktreePath, this.runner, async () => {
-      await this.runner.run({
-        executable: 'git',
-        args: ['checkout', 'HEAD', '--', ...files],
-        cwd: worktreePath,
-      });
+      const [trackedRes, stagedAddedRes, untrackedRes] = await Promise.all([
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--name-only',
+          '-z',
+          'HEAD',
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--cached',
+          '--name-only',
+          '--diff-filter=A',
+          '-z',
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '-z',
+        ]),
+      ]);
+
+      if (
+        trackedRes.exitCode !== 0 ||
+        stagedAddedRes.exitCode !== 0 ||
+        untrackedRes.exitCode !== 0
+      ) {
+        throw new ForgeError(
+          'INTERNAL_ERROR',
+          `Failed to inspect worktree in revertFiles: ${trackedRes.stderr || stagedAddedRes.stderr || untrackedRes.stderr}`,
+          500,
+        );
+      }
+
+      const trackedChangedSet = new Set(
+        trackedRes.stdout.split('\0').filter(Boolean),
+      );
+      const stagedAddedSet = new Set(
+        stagedAddedRes.stdout.split('\0').filter(Boolean),
+      );
+      const untrackedList = untrackedRes.stdout.split('\0').filter(Boolean);
+      const untrackedSet = new Set(untrackedList);
+
+      const trackedToRevert: string[] = [];
+      const stagedAddedToReset: string[] = [];
+      const untrackedToDelete: string[] = [];
+
+      const seen = new Set<string>();
       for (const rel of files) {
-        const safe = this.resolveInside(worktreePath, rel);
-        if (existsSync(safe)) {
-          rmSync(safe, {recursive: true, force: true});
+        if (!rel) {
+          continue;
         }
+        const safe = this.resolveInside(worktreePath, rel);
+        const norm = rel.replace(/\\/g, '/').replace(/^\.\//, '');
+        if (!norm || seen.has(norm)) {
+          continue;
+        }
+        seen.add(norm);
+
+        const isUntracked =
+          untrackedSet.has(norm) ||
+          untrackedList.some(u => u.endsWith('/') && norm.startsWith(u));
+        if (isUntracked) {
+          untrackedToDelete.push(safe);
+          continue;
+        }
+        if (stagedAddedSet.has(norm)) {
+          stagedAddedToReset.push(norm);
+          untrackedToDelete.push(safe);
+          continue;
+        }
+        if (trackedChangedSet.has(norm)) {
+          trackedToRevert.push(norm);
+          continue;
+        }
+        const checkTracked = await this.runGit(worktreePath, [
+          'ls-files',
+          '--error-unmatch',
+          '--',
+          norm,
+        ]);
+        if (checkTracked.exitCode === 0) {
+          trackedToRevert.push(norm);
+        }
+      }
+
+      if (stagedAddedToReset.length > 0) {
+        const resetRes = await this.runGit(worktreePath, [
+          'reset',
+          '-q',
+          'HEAD',
+          '--',
+          ...stagedAddedToReset,
+        ]);
+        if (resetRes.exitCode !== 0) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            `git reset failed during revertFiles: ${resetRes.stderr}`,
+            500,
+          );
+        }
+      }
+
+      if (trackedToRevert.length > 0) {
+        const checkoutRes = await this.runGit(worktreePath, [
+          'checkout',
+          'HEAD',
+          '--',
+          ...trackedToRevert,
+        ]);
+        if (checkoutRes.exitCode !== 0) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            `git checkout failed during revertFiles: ${checkoutRes.stderr}`,
+            500,
+          );
+        }
+      }
+
+      for (const safe of untrackedToDelete) {
+        rmSync(safe, {recursive: true, force: true});
       }
     });
   }
@@ -670,61 +860,57 @@ export class GitWorktreeManager implements IGitWorktreeManager {
   ): Promise<WorktreeDiffSummary> {
     const [statRes, numstatRes, patchRes, namesRes, untrackedRes] =
       await Promise.all([
-        this.runner.run({
-          executable: 'git',
-          args: ['-c', 'core.quotePath=false', 'diff', '--stat', fromCommitSha],
-          cwd: worktreePath,
-        }),
-        this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'diff',
-            '--numstat',
-            fromCommitSha,
-          ],
-          cwd: worktreePath,
-        }),
-        this.runner.run({
-          executable: 'git',
-          args: ['-c', 'core.quotePath=false', 'diff', fromCommitSha],
-          cwd: worktreePath,
-        }),
-        this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'diff',
-            '--name-only',
-            '-z',
-            fromCommitSha,
-          ],
-          cwd: worktreePath,
-        }),
-        this.runner.run({
-          executable: 'git',
-          args: [
-            '-c',
-            'core.quotePath=false',
-            'ls-files',
-            '--others',
-            '--exclude-standard',
-            '-z',
-          ],
-          cwd: worktreePath,
-        }),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--stat',
+          fromCommitSha,
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--numstat',
+          fromCommitSha,
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          fromCommitSha,
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'diff',
+          '--name-only',
+          '-z',
+          fromCommitSha,
+        ]),
+        this.runGit(worktreePath, [
+          '-c',
+          'core.quotePath=false',
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '-z',
+        ]),
       ]);
 
-    const trackedFiles = namesRes.stdout
-      .split('\0')
-      .map(s => s.trim())
-      .filter(Boolean);
-    const untrackedFiles = untrackedRes.stdout
-      .split('\0')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const failed = [statRes, numstatRes, patchRes, namesRes, untrackedRes].find(
+      r => r.exitCode !== 0 || r.timedOut,
+    );
+    if (failed) {
+      throw new ForgeError(
+        'INTERNAL_ERROR',
+        `git diffSinceCommit failed (exit ${failed.exitCode}): ${failed.stderr || failed.stdout}`,
+        500,
+      );
+    }
+
+    const trackedFiles = namesRes.stdout.split('\0').filter(Boolean);
+    const untrackedFiles = untrackedRes.stdout.split('\0').filter(Boolean);
 
     const changedFiles = Array.from(
       new Set([...trackedFiles, ...untrackedFiles]),
@@ -771,12 +957,13 @@ export class GitWorktreeManager implements IGitWorktreeManager {
     targetBranch: string,
     changeBranch: string,
   ): Promise<RepoMergeReadinessResult> {
-    const res = await this.runner.run({
-      executable: 'git',
-      args: ['merge-tree', '--write-tree', targetBranch, changeBranch],
-      cwd: repoPath,
-    });
-    if (res.exitCode === 0) {
+    const res = await this.runGit(repoPath, [
+      'merge-tree',
+      '--write-tree',
+      targetBranch,
+      changeBranch,
+    ]);
+    if (res.exitCode === 0 && !res.timedOut) {
       return {
         clean: true,
         conflictFiles: [],
@@ -784,44 +971,32 @@ export class GitWorktreeManager implements IGitWorktreeManager {
       };
     }
     const combined = `${res.stdout}\n${res.stderr}`;
-    if (/CONFLICT/i.test(combined)) {
-      const conflictFiles = Array.from(
-        new Set(
-          combined
-            .split(/\r?\n/)
-            .filter(l => /CONFLICT/i.test(l))
-            .map(l => l.trim().slice(0, 200)),
-        ),
-      );
-      return {
-        clean: false,
-        conflictFiles,
-        diagnostic: `Merge conflicts detected against ${targetBranch}`,
-      };
-    }
-    // Fallback if git lacks --write-tree
-    const baseRes = await this.runner.run({
-      executable: 'git',
-      args: ['merge-base', targetBranch, changeBranch],
-      cwd: repoPath,
-    });
+    const conflictFiles = Array.from(
+      new Set(
+        combined
+          .split(/\r?\n/)
+          .filter(l => /CONFLICT/i.test(l))
+          .map(l => {
+            const m = /Merge conflict in\s+(.+)$/i.exec(l);
+            return (m?.[1] ?? l).trim().slice(0, 200);
+          })
+          .filter(Boolean),
+      ),
+    );
     return {
-      clean: baseRes.exitCode === 0,
-      conflictFiles: [],
+      clean: false,
+      conflictFiles,
       diagnostic:
-        baseRes.exitCode === 0
-          ? `Common ancestor verified (${baseRes.stdout.trim().slice(0, 8)})`
-          : combined.trim().slice(0, 240) || 'Unable to verify merge readiness',
+        conflictFiles.length > 0
+          ? `Merge conflicts detected against ${targetBranch}`
+          : combined.trim().slice(0, 240) ||
+            `git merge-tree failed with exit code ${res.exitCode}`,
     };
   }
 
   async cleanupOrphanWorktrees(repoPath: string): Promise<readonly string[]> {
     return this.locks.withRepoLock(repoPath, this.runner, async () => {
-      const pruneRes = await this.runner.run({
-        executable: 'git',
-        args: ['worktree', 'prune', '-v'],
-        cwd: repoPath,
-      });
+      const pruneRes = await this.runGit(repoPath, ['worktree', 'prune', '-v']);
       const combined = `${pruneRes.stdout}\n${pruneRes.stderr}`;
       return combined
         .split(/\r?\n/)

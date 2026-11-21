@@ -5,8 +5,8 @@
  * epistemic submission tools over JSON-RPC 2.0.
  */
 
-import {randomUUID} from 'node:crypto';
-import {readFileSync} from 'node:fs';
+import {createHash, randomUUID, timingSafeEqual} from 'node:crypto';
+import {closeSync, openSync, readSync, statSync} from 'node:fs';
 import {
   createServer,
   type IncomingMessage,
@@ -116,6 +116,7 @@ const MCP_TOOL_DEFINITIONS = [
         title: {type: 'string'},
         claim: {type: 'string'},
         subjectKey: {type: 'string'},
+        confidence: {type: 'number'},
       },
       required: ['title', 'claim'],
       additionalProperties: false,
@@ -182,6 +183,50 @@ const MCP_TOOL_DEFINITIONS = [
     },
   },
 ] as const;
+
+const MAX_ARTIFACT_READ_BYTES = 524_288;
+const RESERVED_RETAIN_SUBJECT_PREFIXES = [
+  'ddd:',
+  'req:',
+  'constitution:',
+  'decision:',
+];
+
+function tokensMatchTimingSafe(a: string, b: string): boolean {
+  const digestA = createHash('sha256').update(a, 'utf8').digest();
+  const digestB = createHash('sha256').update(b, 'utf8').digest();
+  return timingSafeEqual(digestA, digestB);
+}
+
+function readBoundedArtifactFile(filePath: string, maxChars: number): string {
+  const st = statSync(filePath);
+  if (!st.isFile()) {
+    throw new ForgeError(
+      'VALIDATION_ERROR',
+      'forge_read_artifact target is not a regular file',
+      400,
+    );
+  }
+  const toRead = Math.min(st.size, MAX_ARTIFACT_READ_BYTES);
+  if (toRead <= 0) {
+    return '';
+  }
+  const fd = openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(toRead);
+    let offset = 0;
+    while (offset < toRead) {
+      const n = readSync(fd, buf, offset, toRead - offset, offset);
+      if (n <= 0) {
+        break;
+      }
+      offset += n;
+    }
+    return buf.subarray(0, offset).toString('utf8').slice(0, maxChars);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -261,7 +306,7 @@ export class McpStationServer implements IMcpStationServer {
 
     return {
       attemptToken,
-      mcpEndpointUrl: `${this.boundBaseUrl}/mcp?token=${encodeURIComponent(attemptToken)}`,
+      mcpEndpointUrl: `${this.boundBaseUrl}/mcp`,
       revoke: () => {
         const existing = this.attempts.get(attemptToken);
         if (existing) {
@@ -275,6 +320,21 @@ export class McpStationServer implements IMcpStationServer {
 
   getSubmission(attemptToken: string): McpSubmissionPayload | null {
     return this.submissions.get(attemptToken) ?? null;
+  }
+
+  private findAttemptByToken(
+    token: string | null,
+  ): ActiveAttemptContext | undefined {
+    if (!token) {
+      return undefined;
+    }
+    let matched: ActiveAttemptContext | undefined;
+    for (const candidate of this.attempts.values()) {
+      if (tokensMatchTimingSafe(token, candidate.attemptToken)) {
+        matched = candidate;
+      }
+    }
+    return matched;
   }
 
   private extractBearerOrQueryToken(req: IncomingMessage): string | null {
@@ -301,7 +361,25 @@ export class McpStationServer implements IMcpStationServer {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    const rawBody = await this.readBody(req);
+    let rawBody = '';
+    try {
+      rawBody = await this.readBody(req);
+    } catch (err) {
+      const status = err instanceof ForgeError ? err.status : 400;
+      const message = err instanceof Error ? err.message : String(err);
+      this.sendJson(
+        res,
+        status,
+        {
+          jsonrpc: '2.0',
+          id: null,
+          error: {code: status === 413 ? -32000 : -32700, message},
+        },
+        status === 413,
+      );
+      return;
+    }
+
     let rpc: JsonRpcRequest = {};
     try {
       if (rawBody.trim().length > 0) {
@@ -318,7 +396,7 @@ export class McpStationServer implements IMcpStationServer {
 
     const reqId = rpc.id ?? null;
     const token = this.extractBearerOrQueryToken(req);
-    const ctx = token ? this.attempts.get(token) : undefined;
+    const ctx = this.findAttemptByToken(token);
 
     if (!ctx || ctx.revoked) {
       this.sendJson(res, 401, {
@@ -349,12 +427,9 @@ export class McpStationServer implements IMcpStationServer {
         return;
       }
 
-      if (method === 'notifications/initialized') {
-        this.sendJson(res, 200, {
-          jsonrpc: '2.0',
-          id: reqId,
-          result: {ok: true},
-        });
+      if (method.startsWith('notifications/')) {
+        res.writeHead(204);
+        res.end();
         return;
       }
 
@@ -397,7 +472,7 @@ export class McpStationServer implements IMcpStationServer {
         return;
       }
 
-      this.sendJson(res, 404, {
+      this.sendJson(res, 200, {
         jsonrpc: '2.0',
         id: reqId,
         error: {code: -32601, message: `Method not found: ${method}`},
@@ -411,10 +486,6 @@ export class McpStationServer implements IMcpStationServer {
         error: {
           code: -32003,
           message: `${code}: ${message}`,
-        },
-        result: {
-          isError: true,
-          content: [{type: 'text', text: `${code}: ${message}`}],
         },
       });
     }
@@ -448,7 +519,7 @@ export class McpStationServer implements IMcpStationServer {
           ctx.worktreePath,
           relPath,
         );
-        const content = readFileSync(safePath, 'utf8').slice(0, 65_536);
+        const content = readBoundedArtifactFile(safePath, 65_536);
         return {path: relPath, content};
       }
 
@@ -526,9 +597,33 @@ export class McpStationServer implements IMcpStationServer {
             400,
           );
         }
+        if (
+          subjectKey &&
+          RESERVED_RETAIN_SUBJECT_PREFIXES.some(prefix =>
+            subjectKey.toLowerCase().startsWith(prefix),
+          )
+        ) {
+          throw new ForgeError(
+            'POLICY_DENIED',
+            `forge_memory_retain cannot overwrite reserved subjectKey prefix "${subjectKey}"`,
+            403,
+          );
+        }
+        const rawConfidence =
+          typeof args['confidence'] === 'number' &&
+          Number.isFinite(args['confidence'])
+            ? args['confidence']
+            : 0.65;
+        const confidence = Math.max(0.05, Math.min(0.65, rawConfidence));
+
         ctx.retainCallCount += 1;
         if (ctx.hindsight) {
-          return ctx.hindsight.retainObserved(title, claim, subjectKey);
+          return ctx.hindsight.retainObserved(
+            title,
+            claim,
+            subjectKey,
+            confidence,
+          );
         }
         const mem = this.store.recordSemanticMemory({
           hubId: ctx.hubId,
@@ -536,7 +631,11 @@ export class McpStationServer implements IMcpStationServer {
           title,
           summary: claim,
         });
-        return {retainedId: mem.id, authorityTier: 'L1_observed'};
+        return {
+          retainedId: mem.id,
+          authorityTier: 'L1_observed',
+          confidence,
+        };
       }
 
       case 'forge_report_progress': {
@@ -643,10 +742,16 @@ export class McpStationServer implements IMcpStationServer {
     return new Promise<string>((resolvePromise, rejectPromise) => {
       const chunks: Buffer[] = [];
       let total = 0;
+      let settled = false;
+
       req.on('data', (chunk: Buffer) => {
+        if (settled) {
+          return;
+        }
         total += chunk.length;
         if (total > 2_097_152) {
-          req.destroy();
+          settled = true;
+          req.pause();
           rejectPromise(
             new ForgeError('VALIDATION_ERROR', 'MCP payload > 2MB', 413),
           );
@@ -655,9 +760,19 @@ export class McpStationServer implements IMcpStationServer {
         chunks.push(chunk);
       });
       req.on('end', () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
         resolvePromise(Buffer.concat(chunks).toString('utf8'));
       });
-      req.on('error', rejectPromise);
+      req.on('error', (err: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        rejectPromise(err);
+      });
     });
   }
 
@@ -665,12 +780,17 @@ export class McpStationServer implements IMcpStationServer {
     res: ServerResponse,
     statusCode: number,
     payload: unknown,
+    closeConnection = false,
   ): void {
     const body = JSON.stringify(payload);
-    res.writeHead(statusCode, {
+    const headers: Record<string, string | number> = {
       'content-type': 'application/json; charset=utf-8',
       'content-length': Buffer.byteLength(body),
-    });
+    };
+    if (closeConnection) {
+      headers['connection'] = 'close';
+    }
+    res.writeHead(statusCode, headers);
     res.end(body);
   }
 }

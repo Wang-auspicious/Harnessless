@@ -7,15 +7,20 @@
 import {contextBridge, ipcRenderer} from 'electron';
 import type {ForgePreloadBridge} from '../shared/api.ts';
 
-function readArgValue(prefix: string): string {
-  const hit = process.argv.find(arg => arg.startsWith(prefix));
-  return hit ? hit.slice(prefix.length) : '';
+interface BridgeConfigPayload {
+  readonly apiBaseUrl?: string;
+  readonly sessionToken?: string;
+  readonly hasNativeTitlebarOverlay?: boolean;
 }
 
+const config = ipcRenderer.sendSync(
+  'forgeops:get-bridge-config',
+) as BridgeConfigPayload | null;
+
 const bridge: ForgePreloadBridge = {
-  apiBaseUrl: readArgValue('--forgeops-api-url='),
-  sessionToken: readArgValue('--forgeops-token='),
-  hasNativeTitlebarOverlay: readArgValue('--forgeops-win-overlay=') === '1',
+  apiBaseUrl: config?.apiBaseUrl ?? '',
+  sessionToken: config?.sessionToken ?? '',
+  hasNativeTitlebarOverlay: Boolean(config?.hasNativeTitlebarOverlay),
   pickDirectory: () => ipcRenderer.invoke('forgeops:pick-directory'),
   openExternal: (url: string) =>
     ipcRenderer.invoke('forgeops:open-external', url),

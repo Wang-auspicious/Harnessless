@@ -9,8 +9,19 @@
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import process from 'node:process';
-import {app, BrowserWindow, dialog, ipcMain, shell} from 'electron';
+import {pathToFileURL} from 'node:url';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  safeStorage,
+  session,
+  shell,
+  type WebFrameMain,
+} from 'electron';
 import {ForgeRuntime} from '../server/runtime.ts';
+import {registerElectronSafeStorage} from '../server/secret-vault.ts';
 
 interface PersistedWindowBounds {
   readonly width: number;
@@ -86,6 +97,35 @@ function isAllowedExternalUrl(raw: string): boolean {
   }
 }
 
+function isTrustedSenderFrame(
+  senderFrame: WebFrameMain | null,
+  allowedFileUrl: string,
+  allowedDevOrigin: string | null,
+): boolean {
+  const frameUrl = senderFrame?.url;
+  if (!frameUrl) {
+    return false;
+  }
+  if (allowedDevOrigin) {
+    try {
+      return new URL(frameUrl).origin === allowedDevOrigin;
+    } catch {
+      return false;
+    }
+  }
+  const baseFrameUrl = frameUrl.split('#')[0] ?? frameUrl;
+  return baseFrameUrl === allowedFileUrl;
+}
+
+async function stopRuntimeQuietly(): Promise<void> {
+  if (!runtime) {
+    return;
+  }
+  const toStop = runtime;
+  runtime = null;
+  await toStop.stop().catch(() => undefined);
+}
+
 async function bootstrapDesktop(): Promise<void> {
   const dataDir =
     process.env['FORGEOPS_DATA_DIR'] ??
@@ -93,14 +133,43 @@ async function bootstrapDesktop(): Promise<void> {
   mkdirSync(dataDir, {recursive: true});
   const boundsPath = join(dataDir, 'window-bounds.json');
 
+  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => {
+    cb(false);
+  });
+
+  registerElectronSafeStorage(safeStorage);
   runtime = new ForgeRuntime({dataDir});
   await runtime.start();
 
   // Kick off non-blocking Environment Doctor probe in background.
   void runtime.steward.runEnvironmentDoctor().catch(() => undefined);
 
-  ipcMain.handle('forgeops:pick-directory', async () => {
-    if (!mainWindow) {
+  const devUrl = process.env['FORGEOPS_RENDERER_DEV_URL'];
+  const htmlPath = resolve(__dirname, '../renderer/index.html');
+  const allowedFileUrl = pathToFileURL(htmlPath).href;
+  const allowedDevOrigin = devUrl ? new URL(devUrl).origin : null;
+  const useWinOverlay = process.platform === 'win32' && !isSmoke;
+
+  ipcMain.on('forgeops:get-bridge-config', ev => {
+    if (
+      !runtime ||
+      !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin)
+    ) {
+      ev.returnValue = null;
+      return;
+    }
+    ev.returnValue = {
+      apiBaseUrl: runtime.httpServer.apiBaseUrl,
+      sessionToken: runtime.httpServer.sessionToken,
+      hasNativeTitlebarOverlay: useWinOverlay,
+    };
+  });
+
+  ipcMain.handle('forgeops:pick-directory', async ev => {
+    if (
+      !mainWindow ||
+      !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin)
+    ) {
       return null;
     }
     const res = await dialog.showOpenDialog(mainWindow, {
@@ -112,8 +181,12 @@ async function bootstrapDesktop(): Promise<void> {
     return res.filePaths[0] ?? null;
   });
 
-  ipcMain.handle('forgeops:open-external', async (_ev, rawUrl: unknown) => {
-    if (typeof rawUrl !== 'string' || !isAllowedExternalUrl(rawUrl)) {
+  ipcMain.handle('forgeops:open-external', async (ev, rawUrl: unknown) => {
+    if (
+      !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin) ||
+      typeof rawUrl !== 'string' ||
+      !isAllowedExternalUrl(rawUrl)
+    ) {
       return false;
     }
     await shell.openExternal(rawUrl);
@@ -122,7 +195,6 @@ async function bootstrapDesktop(): Promise<void> {
 
   const preloadPath = resolve(__dirname, 'preload.cjs');
   const savedBounds = loadWindowBounds(boundsPath);
-  const useWinOverlay = process.platform === 'win32' && !isSmoke;
 
   mainWindow = new BrowserWindow({
     width: savedBounds.width,
@@ -151,11 +223,6 @@ async function bootstrapDesktop(): Promise<void> {
       sandbox: true,
       nodeIntegration: false,
       spellcheck: false,
-      additionalArguments: [
-        `--forgeops-api-url=${runtime.httpServer.apiBaseUrl}`,
-        `--forgeops-token=${runtime.httpServer.sessionToken}`,
-        `--forgeops-win-overlay=${useWinOverlay ? '1' : '0'}`,
-      ],
     },
   });
 
@@ -169,8 +236,6 @@ async function bootstrapDesktop(): Promise<void> {
     }
   });
 
-  const devUrl = process.env['FORGEOPS_RENDERER_DEV_URL'];
-
   // Quarantine external links to OS default browser; prevent webpage-like window navigation.
   mainWindow.webContents.setWindowOpenHandler(({url}) => {
     if (isAllowedExternalUrl(url)) {
@@ -180,10 +245,15 @@ async function bootstrapDesktop(): Promise<void> {
   });
 
   mainWindow.webContents.on('will-navigate', (ev, targetUrl) => {
-    if (devUrl && targetUrl.startsWith(devUrl)) {
-      return;
-    }
-    if (targetUrl.startsWith('file://')) {
+    if (allowedDevOrigin) {
+      try {
+        if (new URL(targetUrl).origin === allowedDevOrigin) {
+          return;
+        }
+      } catch {
+        // Fall through to prevent navigation.
+      }
+    } else if ((targetUrl.split('#')[0] ?? targetUrl) === allowedFileUrl) {
       return;
     }
     ev.preventDefault();
@@ -208,7 +278,6 @@ async function bootstrapDesktop(): Promise<void> {
   if (devUrl) {
     await mainWindow.loadURL(devUrl);
   } else {
-    const htmlPath = resolve(__dirname, '../renderer/index.html');
     await mainWindow.loadFile(htmlPath);
   }
 
@@ -224,6 +293,7 @@ async function bootstrapDesktop(): Promise<void> {
             `FORGEOPS_ELECTRON_SMOKE_OK:${ok}:${domText.slice(0, 120).replace(/\s+/g, ' ')}\n`,
           );
           if (!ok) {
+            await stopRuntimeQuietly();
             app.exit(2);
             return;
           }
@@ -248,10 +318,11 @@ if (!isSmoke && !app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(() => {
-    void bootstrapDesktop().catch(err => {
+    void bootstrapDesktop().catch(async err => {
       const msg =
         err instanceof Error ? (err.stack ?? err.message) : String(err);
       process.stderr.write(`Fatal bootstrap error: ${msg}\n`);
+      await stopRuntimeQuietly();
       app.exit(1);
     });
   });

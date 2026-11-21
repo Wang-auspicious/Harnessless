@@ -107,9 +107,11 @@ export class AgentAdapterHub implements IAgentAdapterHub {
   }
 
   async invoke(req: AgentInvocationRequest): Promise<AgentInvocationResult> {
-    if (req.providerId) {
-      await this.rateLimiter.waitIfCooling(req.providerId, req.signal);
-    }
+    const effectiveProviderId =
+      req.providerId ??
+      this.lookupProvider(req.model)?.providerId ??
+      req.adapter.id;
+    await this.rateLimiter.waitIfCooling(effectiveProviderId, req.signal);
 
     const releaseSlot = req.prioritySlot
       ? await this.broker.acquireHumanPrioritySlot(req.signal)
@@ -135,9 +137,9 @@ export class AgentAdapterHub implements IAgentAdapterHub {
           return assertNever(req.adapter.transport, 'Unsupported transport');
       }
 
-      if (result.outcome === 'rate_limited' && req.providerId) {
+      if (result.outcome === 'rate_limited') {
         this.rateLimiter.markRateLimited(
-          req.providerId,
+          effectiveProviderId,
           result.retryAfterSeconds ?? 30,
         );
       }

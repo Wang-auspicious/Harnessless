@@ -26,7 +26,12 @@ export interface McpSubmissionPayload {
 export interface McpHindsightBridge {
   recall(query: string, limit?: number): unknown;
   reflect(question: string): unknown;
-  retainObserved(title: string, claim: string, subjectKey?: string): unknown;
+  retainObserved(
+    title: string,
+    claim: string,
+    subjectKey?: string,
+    confidence?: number,
+  ): unknown;
 }
 
 export interface McpAttemptRegistrationInput {
