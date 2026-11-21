@@ -52,9 +52,14 @@ describe('Full-Stack ForgeRuntime Control Plane & Twin-Graph E2E', () => {
       assert.equal(checkpoints.length, 3);
       assert.ok(checkpoints.every(cp => cp.gitCommitSha.length === 40));
 
-      // Verify Retro skill compressed Hub agentWikiSummary
+      // Verify Retro skill isolated simulation wiki into simulation LivingDoc without polluting live Hub wiki
       const refreshedHub = runtime.store.getHub(boot.hubs[0]!.id)!;
-      assert.match(refreshedHub.agentWikiSummary, /SettlementVoucher/);
+      assert.equal(refreshedHub.agentWikiSummary, '');
+      const simWiki = runtime.store.memory
+        .listLivingDocs(boot.hubs[0]!.id, 'simulation')
+        .find(d => d.docKind === 'agent_wiki');
+      assert.ok(simWiki);
+      assert.match(simWiki.contentMarkdown, /SettlementVoucher/);
 
       // 4. Run Environment Doctor & Sleep-Time Dream Consolidation
       const doctor = await runtime.steward.runEnvironmentDoctor();

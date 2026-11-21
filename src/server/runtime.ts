@@ -66,7 +66,7 @@ export class ForgeRuntime {
     this.mcpStation = new McpStationServer(this.store, this.worktrees);
     const maxSlots = Math.max(
       1,
-      Math.min(32, Math.trunc(options.maxConcurrentSlots ?? 3)),
+      Math.min(32, Math.trunc(options.maxConcurrentSlots ?? 8)),
     );
     this.adapters = new AgentAdapterHub(
       this.store,
