@@ -1,5 +1,6 @@
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {sha256Canonical} from '../core/canonical-json.ts';
 import {reinforceAgentMemoryStability} from '../core/cognitive.ts';
 import {
   renderUbiquitousLanguageSection,
@@ -32,7 +33,11 @@ import type {
   EpistemicHandoff,
   GraphNode,
 } from '../shared/types.ts';
-import type {FailureForensicsCard} from '../shared/v3-types.ts';
+import type {
+  DecisionOptionPreview,
+  FailureForensicsCard,
+  MissionGateKind,
+} from '../shared/v3-types.ts';
 import type {ForgeStore} from '../store/database.ts';
 import type {CompletionCertifier} from './certifier.ts';
 import type {InfraStewardEngine} from './infra-steward.ts';
@@ -62,7 +67,15 @@ export class ContinuityEngine {
   private readonly rootSignal?: AbortSignal;
   private readonly activeChangeRuns = new Set<string>();
   private readonly activeAbortControllers = new Map<string, AbortController>();
+  private readonly activeWaveAbortControllers = new Map<
+    string,
+    AbortController
+  >();
   private readonly activePromises = new Map<string, Promise<unknown>>();
+  private readonly nodePreAttemptSnapshots = new Map<
+    string,
+    readonly string[]
+  >();
   private reservedInFlightUsd = 0;
 
   constructor(deps: {
@@ -197,9 +210,11 @@ export class ContinuityEngine {
       controller.signal,
     ).finally(() => {
       this.activeAbortControllers.delete(changeId);
+      this.activeWaveAbortControllers.delete(changeId);
       this.activeChangeRuns.delete(changeId);
       this.activePromises.delete(changeId);
       this.emitState('changes');
+      this.emitMissionUpdatedForChange(changeId);
     });
     this.activePromises.set(changeId, runPromise);
     return runPromise;
@@ -218,6 +233,7 @@ export class ContinuityEngine {
       cooldownUntil: null,
     });
     this.emitState('changes');
+    this.emitMissionUpdatedForChange(changeId);
 
     const startedMs = Date.now();
     let rollingHandoff = this.buildHandoffFromStore(current);
@@ -234,7 +250,9 @@ export class ContinuityEngine {
         current.status === 'paused_human' ||
         current.status === 'archived' ||
         current.status === 'cooldown_hold' ||
-        current.status === 'stale_upstream'
+        current.status === 'stale_upstream' ||
+        current.status === 'failed' ||
+        current.status === 'certified'
       ) {
         break;
       }
@@ -245,27 +263,32 @@ export class ContinuityEngine {
         this.store.updateChangeStatusCas(changeId, capturedEpoch, {
           status: 'paused_human',
         });
-        this.raisePauseAttention(
-          current,
-          null,
-          `Overnight continuity window (${current.maxOvernightHours}h) reached for ${current.code}. Continue execution?`,
-        );
-        break;
-      }
-
-      const liveMode = (current.executionMode ?? 'live') === 'live';
-      const budgetHit = liveMode
-        ? current.spentUsd + this.reservedInFlightUsd >= current.budgetUsdLimit
-        : current.spentUsd > current.budgetUsdLimit;
-      if (budgetHit) {
-        this.store.updateChangeStatusCas(changeId, capturedEpoch, {
-          status: 'paused_human',
+        const question = `Overnight continuity window (${current.maxOvernightHours}h) reached for ${current.code}. Continue execution?`;
+        this.raisePauseAttention(current, null, question);
+        this.openMissionPauseGate(current, {
+          nodeId: null,
+          kind: 'budget_extension',
+          targetId: current.id,
+          question,
+          contextSnippet: `Elapsed ${elapsedHours.toFixed(2)}h / max ${current.maxOvernightHours}h on ${current.code}.`,
+          options: [
+            {
+              action: 'extend_budget',
+              label: 'Extend Window & Resume Execution',
+              recommended: true,
+              consequencePreview:
+                'Extends overnight continuity window and resumes execution.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Stop & Mark Mission Failed',
+              recommended: false,
+              consequencePreview: 'Halts Mission execution.',
+              requiresFeedback: false,
+            },
+          ],
         });
-        this.raisePauseAttention(
-          current,
-          null,
-          `Budget ceiling ($${current.budgetUsdLimit.toFixed(2)}) reached for ${current.code}. Approve extension?`,
-        );
         break;
       }
 
@@ -280,22 +303,116 @@ export class ContinuityEngine {
       }
 
       const wave = this.selectNonOverlappingWave(readyNodes, maxParallelSlots);
+      const liveMode = (current.executionMode ?? 'live') === 'live';
       const reserve = liveMode ? wave.length * 0.15 : 0;
-      this.reservedInFlightUsd += reserve;
+
+      const reservation = this.store.atomic(() => {
+        const freshChange = this.store.getChange(changeId);
+        if (
+          !freshChange ||
+          (freshChange.executionEpoch ?? 1) !== capturedEpoch
+        ) {
+          return {ok: false as const, reason: 'epoch_changed' as const};
+        }
+        const changeOver = liveMode
+          ? freshChange.spentUsd + this.reservedInFlightUsd + reserve >
+            freshChange.budgetUsdLimit
+          : freshChange.spentUsd > freshChange.budgetUsdLimit;
+        const freshMission = freshChange.missionId
+          ? this.store.missions.getMission(freshChange.missionId)
+          : null;
+        const missionOver = freshMission
+          ? liveMode
+            ? freshMission.spentUsd + this.reservedInFlightUsd + reserve >
+              freshMission.budgetUsdLimit
+            : freshMission.spentUsd > freshMission.budgetUsdLimit
+          : false;
+
+        if (changeOver || missionOver) {
+          this.store.updateChangeStatusCas(changeId, capturedEpoch, {
+            status: 'paused_human',
+          });
+          return {
+            ok: false as const,
+            reason: 'budget_hit' as const,
+            freshChange,
+            freshMission,
+          };
+        }
+        this.reservedInFlightUsd += reserve;
+        return {ok: true as const, freshChange};
+      });
+
+      if (!reservation.ok) {
+        if (reservation.reason === 'budget_hit') {
+          const c = reservation.freshChange;
+          const m = reservation.freshMission;
+          const limitLabel = m
+            ? `Mission $${m.budgetUsdLimit.toFixed(2)} / Change $${c.budgetUsdLimit.toFixed(2)}`
+            : `$${c.budgetUsdLimit.toFixed(2)}`;
+          const question = `Budget ceiling (${limitLabel}) reached for ${c.code}. Approve extension?`;
+          this.raisePauseAttention(c, null, question);
+          this.openMissionPauseGate(c, {
+            nodeId: null,
+            kind: 'budget_extension',
+            targetId: c.id,
+            question,
+            contextSnippet: `Spent: Change $${c.spentUsd.toFixed(4)}${m ? `, Mission $${m.spentUsd.toFixed(4)}` : ''}, In-flight reserve: $${this.reservedInFlightUsd.toFixed(2)}.`,
+            options: [
+              {
+                action: 'extend_budget',
+                label: 'Extend Budget (+$25) & Resume',
+                recommended: true,
+                consequencePreview:
+                  'Raises Change and Mission USD ceilings by $25 and resumes execution.',
+                requiresFeedback: false,
+              },
+              {
+                action: 'reject',
+                label: 'Stop & Mark Mission Failed',
+                recommended: false,
+                consequencePreview: 'Halts Mission execution at failed status.',
+                requiresFeedback: false,
+              },
+            ],
+          });
+          break;
+        }
+        rollingHandoff = this.buildHandoffFromStore(
+          this.store.getChange(changeId) ?? current,
+        );
+        continue;
+      }
+
+      current = reservation.freshChange;
+      const waveAbort = new AbortController();
+      this.activeWaveAbortControllers.set(changeId, waveAbort);
+      const waveSignal = AbortSignal.any([signal, waveAbort.signal]);
 
       let haltRequested = false;
       try {
         const waveOutcomes = await Promise.allSettled(
-          wave.map(node =>
-            this.executeSingleNode(
-              current,
-              node,
-              rollingHandoff,
-              capturedEpoch,
-              signal,
-              lastSessionId,
-            ),
-          ),
+          wave.map(async node => {
+            try {
+              const out = await this.executeSingleNode(
+                current,
+                node,
+                rollingHandoff,
+                capturedEpoch,
+                waveSignal,
+                lastSessionId,
+              );
+              if (out.haltLoop && !waveAbort.signal.aborted) {
+                waveAbort.abort('wave_halt');
+              }
+              return out;
+            } catch (err) {
+              if (!waveAbort.signal.aborted) {
+                waveAbort.abort('wave_error');
+              }
+              throw err;
+            }
+          }),
         );
 
         const postChange = this.store.getChange(changeId);
@@ -320,6 +437,7 @@ export class ContinuityEngine {
           }
         }
       } finally {
+        this.activeWaveAbortControllers.delete(changeId);
         this.reservedInFlightUsd = Math.max(
           0,
           this.reservedInFlightUsd - reserve,
@@ -388,30 +506,39 @@ export class ContinuityEngine {
       changeCode: change.code,
       targetCommitSha: cp.gitCommitSha,
     });
-    this.store.updateCheckpointRescueRef(cp.id, rewindRes.rescueRef);
 
-    const nextEpoch = this.store.bumpChangeEpochAtomic(changeId);
-    const nodes = this.store.listGraphNodes(changeId);
-    const edges = this.store.listGraphEdges(changeId);
-    const rewindIds = computePhaseBarrierRewindSet(nodes, edges, cp.nodeId);
-    for (const id of rewindIds) {
-      this.store.updateGraphNode(id, {
-        status: 'rewound',
-        outputSummary: `Phase-barrier rewound to ${cp.label} at epoch ${nextEpoch} (rescue ref: ${rewindRes.rescueRef})`,
+    const {updated, audit} = this.store.atomic(() => {
+      this.store.updateCheckpointRescueRef(cp.id, rewindRes.rescueRef);
+      const nextEpoch = this.store.bumpChangeEpochAtomic(changeId);
+      this.store.pruneCheckpointsAfter(changeId, cp.id);
+      const nodes = this.store.listGraphNodes(changeId);
+      const edges = this.store.listGraphEdges(changeId);
+      const rewindIds = computePhaseBarrierRewindSet(nodes, edges, cp.nodeId);
+      for (const id of rewindIds) {
+        this.store.updateGraphNode(id, {
+          status: 'rewound',
+          attemptCount: 0,
+          outputSummary: `Phase-barrier rewound to ${cp.label} at epoch ${nextEpoch} (rescue ref: ${rewindRes.rescueRef})`,
+        });
+        this.store.updateNodeForensics(id, null);
+        this.nodePreAttemptSnapshots.delete(`${changeId}:${id}`);
+      }
+
+      const nextChange = this.store.updateChange(changeId, {status: 'planned'});
+      const aud = this.store.appendAudit({
+        hubId: change.hubId,
+        changeId: change.id,
+        category: 'rewind',
+        actor: 'human_operator',
+        title: `Restored ${change.code} to ${cp.label} (${cp.gitCommitSha.slice(0, 7)})`,
+        detail: `Saved pre-rewind worktree state at ${rewindRes.rescueRef} (epoch ${nextEpoch}).`,
       });
-    }
-
-    const updated = this.store.updateChange(changeId, {status: 'planned'});
-    const audit = this.store.appendAudit({
-      hubId: change.hubId,
-      changeId: change.id,
-      category: 'rewind',
-      actor: 'human_operator',
-      title: `Restored ${change.code} to ${cp.label} (${cp.gitCommitSha.slice(0, 7)})`,
-      detail: `Saved pre-rewind worktree state at ${rewindRes.rescueRef} (epoch ${nextEpoch}).`,
+      return {updated: nextChange, audit: aud};
     });
+
     this.publish({type: 'audit.logged', entry: audit});
     this.emitState('changes');
+    this.emitMissionUpdatedForChange(changeId);
     return updated;
   }
 
@@ -434,6 +561,7 @@ export class ContinuityEngine {
     const repo = this.store.getRepository(change.repoId);
     const nodes = this.store.listGraphNodes(change.id);
     const edges = this.store.listGraphEdges(change.id);
+    const targetNode = nodes.find(n => n.id === input.insertBeforeNodeId);
     const ghostCount = nodes.filter(n => n.kind === 'ghost').length;
     const code = `GHOST-${ghostCount + 1}`;
 
@@ -463,32 +591,46 @@ export class ContinuityEngine {
       ? createdGhost
       : {...createdGhost, status: 'blocked_human'};
     const linkKind = createdGhost.containerNodeId ? 'dep' : 'logic';
-    this.store.spliceGhostNodeAtomic(
-      change.id,
-      finalGhost,
-      input.insertBeforeNodeId,
-      linkKind,
-    );
+    const targetWasRunning = targetNode?.status === 'running';
 
-    const audit = this.store.appendAudit({
-      hubId: change.hubId,
-      changeId: change.id,
-      category: 'ghost_amendment',
-      actor: input.actor ?? 'lead_agent',
-      title: `Spliced GhostNode ${code}: ${input.title}`,
-      detail: input.description,
+    const audit = this.store.atomic(() => {
+      this.store.spliceGhostNodeAtomic(
+        change.id,
+        finalGhost,
+        input.insertBeforeNodeId,
+        linkKind,
+      );
+      if (targetWasRunning && targetNode) {
+        this.store.updateGraphNode(targetNode.id, {
+          status: 'ready',
+          attemptCount: targetNode.attemptCount,
+          outputSummary: `Deferred for precondition GhostNode ${code}.`,
+        });
+        this.store.bumpChangeEpochAtomic(change.id);
+      }
+      if (!autoApprove) {
+        this.store.updateChange(change.id, {status: 'paused_human'});
+      }
+      return this.store.appendAudit({
+        hubId: change.hubId,
+        changeId: change.id,
+        category: 'ghost_amendment',
+        actor: input.actor ?? 'lead_agent',
+        title: `Spliced GhostNode ${code}: ${input.title}`,
+        detail: input.description,
+      });
     });
     this.publish({type: 'audit.logged', entry: audit});
 
     if (!autoApprove) {
-      this.store.updateChange(change.id, {status: 'paused_human'});
+      const question = `Approve runtime GhostNode "${input.title}" in ${change.code}?`;
       const attn = this.store.raiseAttention({
         hubId: change.hubId,
         repoId: change.repoId,
         changeId: change.id,
         nodeId: finalGhost.id,
         kind: 'amendment_approval',
-        question: `Approve runtime GhostNode "${input.title}" in ${change.code}?`,
+        question,
         contextSnippet: input.description,
         options: ['Approve GhostNode & Resume', 'Waive GhostNode & Continue'],
         recommendedIndex: 0,
@@ -496,9 +638,48 @@ export class ContinuityEngine {
         estimatedReadSeconds: 20,
       });
       this.publish({type: 'attention.raised', item: attn});
+      this.openMissionPauseGate(change, {
+        nodeId: finalGhost.id,
+        kind: 'ghost_amendment',
+        targetId: finalGhost.id,
+        question,
+        contextSnippet: input.description,
+        options: [
+          {
+            action: 'approve_ghost',
+            label: 'Approve GhostNode & Resume',
+            recommended: true,
+            consequencePreview:
+              'Approves the spliced GhostNode and resumes execution.',
+            requiresFeedback: false,
+          },
+          {
+            action: 'waive_ghost',
+            label: 'Waive GhostNode & Continue',
+            recommended: false,
+            consequencePreview:
+              'Marks GhostNode waived and resumes downstream nodes.',
+            requiresFeedback: false,
+          },
+        ],
+      });
+      const waveCtrl = this.activeWaveAbortControllers.get(change.id);
+      if (waveCtrl && !waveCtrl.signal.aborted) {
+        waveCtrl.abort('ghost_amendment_pause');
+      }
+      const changeCtrl = this.activeAbortControllers.get(change.id);
+      if (changeCtrl && !changeCtrl.signal.aborted) {
+        changeCtrl.abort('ghost_amendment_pause');
+      }
+    } else if (targetWasRunning) {
+      const waveCtrl = this.activeWaveAbortControllers.get(change.id);
+      if (waveCtrl && !waveCtrl.signal.aborted) {
+        waveCtrl.abort('ghost_precondition');
+      }
     }
 
     this.emitState('changes');
+    this.emitMissionUpdatedForChange(change.id);
     return finalGhost;
   }
 
@@ -597,11 +778,32 @@ export class ContinuityEngine {
         this.store.updateChangeStatusCas(change.id, capturedEpoch, {
           status: 'paused_human',
         });
-        this.raisePauseAttention(
-          change,
-          node.id,
-          `Approve QA Decision Gate (${node.code}) for ${change.code}?`,
-        );
+        const question = `Approve QA Decision Gate (${node.code}) for ${change.code}?`;
+        this.raisePauseAttention(change, node.id, question);
+        this.openMissionPauseGate(change, {
+          nodeId: node.id,
+          kind: 'qa_decision',
+          targetId: node.id,
+          question,
+          contextSnippet: `Strict-mode QA gate ${node.code} on ${change.code} (${change.title}).`,
+          options: [
+            {
+              action: 'approve',
+              label: 'Approve QA Gate & Resume',
+              recommended: true,
+              consequencePreview:
+                'Certifies this DecisionNode and advances to checkpoint/next phase.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Reject & Mark Mission Failed',
+              recommended: false,
+              consequencePreview: 'Halts Mission execution at failed status.',
+              requiresFeedback: false,
+            },
+          ],
+        });
         return {handoff, haltLoop: true};
       }
       this.store.updateGraphNode(node.id, {
@@ -688,6 +890,7 @@ export class ContinuityEngine {
         'certified',
         `${change.code} certified & Retro wiki updated.`,
       );
+      this.emitMissionUpdatedForChange(change.id);
       return {handoff, haltLoop: true};
     }
 
@@ -729,6 +932,63 @@ export class ContinuityEngine {
         };
       }
 
+      if (verdict.outcome === 'rate_limited') {
+        const waitSec = Math.max(15, verdict.retryAfterSeconds ?? 45);
+        const untilIso = new Date(Date.now() + waitSec * 1000).toISOString();
+        this.store.updateGraphNode(node.id, {
+          status: 'ready',
+          attemptCount: Math.max(0, node.attemptCount),
+          outputSummary: `Audit rate-limited; holding in cooldown until ${untilIso}`,
+        });
+        this.store.updateChangeStatusCas(change.id, capturedEpoch, {
+          status: 'cooldown_hold',
+          cooldownUntil: untilIso,
+        });
+        this.emitMissionUpdatedForChange(change.id);
+        return {handoff, haltLoop: true};
+      }
+
+      if (
+        (change.executionMode ?? 'live') === 'live' &&
+        verdict.outcome === 'env_fault'
+      ) {
+        this.store.updateGraphNode(node.id, {
+          status: 'blocked_human',
+          attemptCount: Math.max(0, node.attemptCount),
+          outputSummary: `Fail-closed audit env fault: ${verdict.summary}`,
+        });
+        this.store.updateChangeStatusCas(change.id, capturedEpoch, {
+          status: 'paused_human',
+        });
+        const question = `Live evaluator fault on ${change.code}/${node.code}: ${verdict.summary}`;
+        this.raisePauseAttention(change, node.id, question);
+        this.openMissionPauseGate(change, {
+          nodeId: node.id,
+          kind: 'build_escalation',
+          targetId: change.id,
+          question,
+          contextSnippet: verdict.diagnostics.join(' | ') || verdict.summary,
+          options: [
+            {
+              action: 'resume',
+              label: 'Retry Evaluator & Resume Change',
+              recommended: true,
+              consequencePreview:
+                'Resets blocked evaluator node to ready and resumes execution.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Mark Mission Failed',
+              recommended: false,
+              consequencePreview: 'Stops Mission delivery at failed status.',
+              requiresFeedback: false,
+            },
+          ],
+        });
+        return {handoff, haltLoop: true};
+      }
+
       return this.handleVerificationFailureAndRewind(
         change,
         node,
@@ -763,10 +1023,43 @@ export class ContinuityEngine {
     const executionMode = change.executionMode ?? 'live';
     const hub = this.store.getHub(change.hubId)!;
     const repo = this.store.getRepository(change.repoId)!;
+    const snapKey = `${change.id}:${node.id}`;
 
     if (node.attemptCount > 0) {
-      await this.worktrees.revertTaskScope(change.worktreePath, node.fileScope);
+      const preAttemptFiles = this.nodePreAttemptSnapshots.get(snapKey);
+      if (preAttemptFiles !== undefined) {
+        const currentDirty = await this.worktrees.snapshotWorkingTree(
+          change.worktreePath,
+        );
+        const preSet = new Set(preAttemptFiles);
+        const newlyDirtied = currentDirty.filter(f => !preSet.has(f));
+        if (newlyDirtied.length > 0) {
+          await this.worktrees.revertFiles(change.worktreePath, newlyDirtied);
+        }
+      } else if (node.fileScope.length > 0) {
+        const hasSharedSibling = this.store
+          .listGraphNodes(change.id)
+          .some(
+            s =>
+              s.id !== node.id &&
+              (s.kind === 'task' || s.kind === 'ghost') &&
+              (s.status === 'certified' || s.status === 'running') &&
+              (s.fileScope.length === 0 ||
+                scopesOverlap(s.fileScope, node.fileScope)),
+          );
+        if (!hasSharedSibling) {
+          await this.worktrees.revertTaskScope(
+            change.worktreePath,
+            node.fileScope,
+          );
+        }
+      }
     }
+
+    const preAttemptSnapshot = await this.worktrees.snapshotWorkingTree(
+      change.worktreePath,
+    );
+    this.nodePreAttemptSnapshots.set(snapKey, preAttemptSnapshot);
 
     const terms = selectTermsForRepo(
       this.store.listDomainTerms(hub.id),
@@ -848,7 +1141,7 @@ export class ContinuityEngine {
                   kind: 'experience',
                   subjectKey: subjectKey ?? `obs:${change.code}:${node.code}`,
                   claim,
-                  confidence: 0.72,
+                  confidence: 0.6,
                   pathAnchors: node.fileScope,
                 },
               ],
@@ -881,6 +1174,25 @@ export class ContinuityEngine {
             options.length > 0 ? options : ['Proceed with recommended default'],
         });
         this.publish({type: 'attention.raised', item: attn});
+        this.openMissionPauseGate(change, {
+          nodeId: node.id,
+          kind: 'clarification',
+          targetId: attn.id,
+          question,
+          contextSnippet:
+            snippet || `Worker question on ${change.code}/${node.code}`,
+          options: [
+            {
+              action: 'clarify',
+              label: 'Provide Clarification & Continue',
+              recommended: true,
+              consequencePreview:
+                'Records clarification feedback for the Mission.',
+              requiresFeedback: true,
+            },
+          ],
+          pauseMission: false,
+        });
         return attn;
       },
       onProposeAmendment: (title, description, gateCommand) =>
@@ -908,7 +1220,14 @@ export class ContinuityEngine {
 
     const memorySection =
       hindsightHits.length > 0
-        ? `## Recalled Hindsight Memory\n${hindsightHits.map(h => `- [${h.authorityTier}] ${h.title}: ${h.content}`).join('\n')}`
+        ? `## Recalled Hindsight Memory\n${hindsightHits
+            .map(h => {
+              const warning = h.rejectedWarning
+                ? `**[${h.rejectedWarning}]** `
+                : '';
+              return `- ${warning}[${h.authorityTier}] ${h.title}: ${h.content}`;
+            })
+            .join('\n')}`
         : fallbackMemories.length > 0
           ? `## Recalled Semantic Memories\n${fallbackMemories.map(m => `- [${m.kind}] ${m.title}: ${m.summary}`).join('\n')}`
           : '';
@@ -929,6 +1248,7 @@ export class ContinuityEngine {
       content: contractMarkdown,
     });
 
+    let sessionFinalized = false;
     try {
       let simulatedSub: McpSubmissionPayload | null = null;
       let inv: AgentInvocationResult;
@@ -1015,11 +1335,30 @@ export class ContinuityEngine {
 
       if (!this.isEpochActive(change.id, capturedEpoch, signal)) {
         this.store.finishSession(session.id, 'interrupted');
+        sessionFinalized = true;
+        const freshChange = this.store.getChange(change.id);
+        if (
+          signal.aborted &&
+          freshChange &&
+          (freshChange.executionEpoch ?? 1) === capturedEpoch
+        ) {
+          const freshNode = this.store
+            .listGraphNodes(change.id)
+            .find(n => n.id === node.id);
+          if (freshNode?.status === 'running') {
+            this.store.updateGraphNode(node.id, {
+              status: 'ready',
+              attemptCount: node.attemptCount,
+              outputSummary: 'Interrupted; ready to resume.',
+            });
+          }
+        }
         return {handoff, sessionId: session.id, haltLoop: true};
       }
 
       if (inv.outcome === 'rate_limited') {
         this.store.finishSession(session.id, 'interrupted');
+        sessionFinalized = true;
         const waitSec = Math.max(15, inv.retryAfterSeconds ?? 45);
         const untilIso = new Date(Date.now() + waitSec * 1000).toISOString();
         this.store.updateGraphNode(node.id, {
@@ -1031,6 +1370,7 @@ export class ContinuityEngine {
           status: 'cooldown_hold',
           cooldownUntil: untilIso,
         });
+        this.emitMissionUpdatedForChange(change.id);
         return {handoff, sessionId: session.id, haltLoop: true};
       }
 
@@ -1059,6 +1399,7 @@ export class ContinuityEngine {
 
       if (stoppedPrematurely) {
         this.store.finishSession(session.id, 'failed');
+        sessionFinalized = true;
         this.store.incrementPrematureStopAtomic(change.id);
         this.store.recordTelemetry({
           hubId: hub.id,
@@ -1100,10 +1441,49 @@ export class ContinuityEngine {
             haltLoop: false,
           };
         }
+
+        const failMsg = `Node ${node.code} stopped prematurely after ${node.attemptCount + 1} attempts without deliverable submission.`;
+        this.nodePreAttemptSnapshots.delete(snapKey);
+        this.store.updateGraphNode(node.id, {
+          status: 'failed',
+          outputSummary: failMsg,
+        });
+        this.store.updateChangeStatusCas(change.id, capturedEpoch, {
+          status: 'failed',
+        });
+        this.raisePauseAttention(change, node.id, failMsg);
+        this.openMissionPauseGate(change, {
+          nodeId: node.id,
+          kind: 'build_escalation',
+          targetId: change.id,
+          question: failMsg,
+          contextSnippet: inv.finalText || inv.diagnostic || failMsg,
+          options: [
+            {
+              action: 'resume',
+              label: 'Reset Node & Resume Change',
+              recommended: true,
+              consequencePreview:
+                'Resets failed node attempts to 0 and resumes execution.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Mark Mission Failed',
+              recommended: false,
+              consequencePreview: 'Stops Mission delivery at failed status.',
+              requiresFeedback: false,
+            },
+          ],
+        });
+        return {handoff, sessionId: session.id, haltLoop: true};
       }
 
-      const succeeded = inv.outcome === 'completed' || submission !== null;
+      const succeeded =
+        !stoppedPrematurely &&
+        (inv.outcome === 'completed' || submission !== null);
       this.store.finishSession(session.id, succeeded ? 'completed' : 'failed');
+      sessionFinalized = true;
 
       this.store.recordTelemetry({
         hubId: hub.id,
@@ -1132,16 +1512,38 @@ export class ContinuityEngine {
         if (executionMode === 'live' && inv.outcome === 'env_fault') {
           this.store.updateGraphNode(node.id, {
             status: 'blocked_human',
+            attemptCount: Math.max(0, node.attemptCount),
             outputSummary: `Fail-closed env fault: ${inv.diagnostic}`,
           });
           this.store.updateChangeStatusCas(change.id, capturedEpoch, {
             status: 'paused_human',
           });
-          this.raisePauseAttention(
-            change,
-            node.id,
-            `Live provider fault on ${change.code}/${node.code}: ${inv.diagnostic}`,
-          );
+          const question = `Live provider fault on ${change.code}/${node.code}: ${inv.diagnostic}`;
+          this.raisePauseAttention(change, node.id, question);
+          this.openMissionPauseGate(change, {
+            nodeId: node.id,
+            kind: 'build_escalation',
+            targetId: change.id,
+            question,
+            contextSnippet: inv.diagnostic,
+            options: [
+              {
+                action: 'resume',
+                label: 'Retry Node & Resume Change',
+                recommended: true,
+                consequencePreview:
+                  'Resets blocked node to ready and resumes worker execution.',
+                requiresFeedback: false,
+              },
+              {
+                action: 'reject',
+                label: 'Mark Mission Failed',
+                recommended: false,
+                consequencePreview: 'Stops Mission delivery at failed status.',
+                requiresFeedback: false,
+              },
+            ],
+          });
           return {handoff, sessionId: session.id, haltLoop: true};
         }
 
@@ -1152,6 +1554,7 @@ export class ContinuityEngine {
           });
           return {handoff, sessionId: session.id, haltLoop: false};
         }
+        this.nodePreAttemptSnapshots.delete(snapKey);
         this.store.updateGraphNode(node.id, {
           status: 'failed',
           outputSummary: inv.diagnostic,
@@ -1159,10 +1562,30 @@ export class ContinuityEngine {
         this.store.updateChangeStatusCas(change.id, capturedEpoch, {
           status: 'failed',
         });
+        this.raisePauseAttention(
+          change,
+          node.id,
+          `${node.code} failed after ${node.attemptCount + 1} attempts in ${change.code}: ${inv.diagnostic}`,
+        );
         return {handoff, sessionId: session.id, haltLoop: true};
       }
 
+      this.nodePreAttemptSnapshots.delete(snapKey);
+
       if (node.attemptCount === 0) {
+        for (const hit of hindsightHits) {
+          if (hit.targetKind === 'observation') {
+            const obs = this.store.memory.getObservation(hit.targetId);
+            if (obs) {
+              this.store.memory.touchObservationRecall(
+                obs.id,
+                reinforceAgentMemoryStability(obs.stabilityHours),
+              );
+            }
+          } else if (hit.targetKind === 'fact') {
+            this.store.memory.touchFactRecall(hit.targetId);
+          }
+        }
         for (const mem of fallbackMemories) {
           this.store.reinforceMemory(
             mem.id,
@@ -1227,7 +1650,40 @@ export class ContinuityEngine {
         sessionId: session.id,
         haltLoop: false,
       };
+    } catch (err) {
+      if (!sessionFinalized) {
+        this.store.finishSession(
+          session.id,
+          signal.aborted ? 'interrupted' : 'failed',
+        );
+        sessionFinalized = true;
+      }
+      const freshChange = this.store.getChange(change.id);
+      if (
+        signal.aborted &&
+        freshChange &&
+        (freshChange.executionEpoch ?? 1) === capturedEpoch
+      ) {
+        const freshNode = this.store
+          .listGraphNodes(change.id)
+          .find(n => n.id === node.id);
+        if (freshNode?.status === 'running') {
+          this.store.updateGraphNode(node.id, {
+            status: 'ready',
+            attemptCount: node.attemptCount,
+            outputSummary: 'Interrupted; ready to resume.',
+          });
+        }
+        return {handoff, sessionId: session.id, haltLoop: true};
+      }
+      throw err;
     } finally {
+      if (!sessionFinalized) {
+        this.store.finishSession(
+          session.id,
+          signal.aborted ? 'interrupted' : 'failed',
+        );
+      }
       mcpReg.revoke();
     }
   }
@@ -1244,13 +1700,14 @@ export class ContinuityEngine {
   }> {
     const nodes = this.store.listGraphNodes(change.id);
     const edges = this.store.listGraphEdges(change.id);
+    const freshFailed = nodes.find(n => n.id === failedNode.id) ?? failedNode;
 
     const directFailEdge = edges.find(
-      e => e.kind === 'fail' && e.sourceNodeId === failedNode.id,
+      e => e.kind === 'fail' && e.sourceNodeId === freshFailed.id,
     );
     const pairedDecisionIds = new Set(
       edges
-        .filter(e => e.sourceNodeId === failedNode.id && e.kind !== 'fail')
+        .filter(e => e.sourceNodeId === freshFailed.id && e.kind !== 'fail')
         .map(e => e.targetNodeId),
     );
     const failEdge =
@@ -1267,8 +1724,8 @@ export class ContinuityEngine {
       nodes.find(
         n =>
           n.kind === 'restore' &&
-          failedNode.parentWbsId !== null &&
-          n.parentWbsId === failedNode.parentWbsId,
+          freshFailed.parentWbsId !== null &&
+          n.parentWbsId === freshFailed.parentWbsId,
       );
     const targetCpNodeId = restoreNode?.restoreTargetCheckpointId ?? null;
     const checkpoints = this.store.listCheckpoints(change.id);
@@ -1276,18 +1733,25 @@ export class ContinuityEngine {
       ? checkpoints.find(c => c.nodeId === targetCpNodeId)
       : checkpoints[checkpoints.length - 1];
 
-    if (failedNode.attemptCount + 1 > failedNode.maxAttempts || !targetCp) {
-      this.store.updateGraphNode(failedNode.id, {
+    if (freshFailed.attemptCount >= freshFailed.maxAttempts || !targetCp) {
+      this.store.updateGraphNode(freshFailed.id, {
         status: 'failed',
         outputSummary: `${summary} — ${diagnostics.join(' | ')}`,
       });
-      this.store.updateChange(change.id, {status: 'failed'});
+      this.store.updateChangeStatusCas(change.id, change.executionEpoch ?? 1, {
+        status: 'failed',
+      });
       this.raisePauseAttention(
         change,
-        failedNode.id,
-        `${failedNode.code} failed after ${failedNode.attemptCount + 1} attempts in ${change.code}: ${summary}`,
+        freshFailed.id,
+        `${freshFailed.code} failed after ${freshFailed.attemptCount} attempts in ${change.code}: ${summary}`,
       );
       return {handoff, haltLoop: true};
+    }
+
+    const waveCtrl = this.activeWaveAbortControllers.get(change.id);
+    if (waveCtrl && !waveCtrl.signal.aborted) {
+      waveCtrl.abort('phase_rewind');
     }
 
     const rewindRes = await this.worktrees.rewindToCheckpoint({
@@ -1295,56 +1759,64 @@ export class ContinuityEngine {
       changeCode: change.code,
       targetCommitSha: targetCp.gitCommitSha,
     });
-    this.store.updateCheckpointRescueRef(targetCp.id, rewindRes.rescueRef);
 
-    const nextEpoch = this.store.bumpChangeEpochAtomic(change.id);
-    if (restoreNode) {
-      this.store.updateGraphNode(restoreNode.id, {
-        status: 'certified',
-        outputSummary: `Restored to ${targetCp.gitTag} (backup: ${rewindRes.rescueRef})`,
+    const {nextEpoch, audit} = this.store.atomic(() => {
+      this.store.updateCheckpointRescueRef(targetCp.id, rewindRes.rescueRef);
+      const epoch = this.store.bumpChangeEpochAtomic(change.id);
+      this.store.pruneCheckpointsAfter(change.id, targetCp.id);
+      if (restoreNode) {
+        this.store.updateGraphNode(restoreNode.id, {
+          status: 'certified',
+          outputSummary: `Restored to ${targetCp.gitTag} (backup: ${rewindRes.rescueRef})`,
+        });
+      }
+
+      const rewindSet = computePhaseBarrierRewindSet(
+        nodes,
+        edges,
+        targetCp.nodeId,
+      );
+      for (const rwId of rewindSet) {
+        this.store.updateGraphNode(rwId, {
+          status: 'rewound',
+          attemptCount: 0,
+          outputSummary: `Rewound at epoch ${epoch} after ${freshFailed.code} failure: ${summary}`,
+        });
+        this.store.updateNodeForensics(rwId, null);
+        this.nodePreAttemptSnapshots.delete(`${change.id}:${rwId}`);
+      }
+
+      const forensics: FailureForensicsCard = {
+        failedNodeId: freshFailed.id,
+        failedNodeCode: freshFailed.code,
+        reasonCode: 'GATE_FAILED',
+        summary,
+        diagnostics: diagnostics.slice(0, 6),
+        targetCheckpointLabel: targetCp.label,
+        rescueRef: rewindRes.rescueRef,
+        failedAt: new Date().toISOString(),
+      };
+      this.store.updateNodeForensics(freshFailed.id, forensics);
+      this.store.appendEpistemicItem({
+        changeId: change.id,
+        nodeId: freshFailed.id,
+        executionEpoch: epoch,
+        kind: 'forensics',
+        content: `${freshFailed.code} failed: ${summary} | ${diagnostics.slice(0, 3).join('; ')}`,
+        evidenceRef: rewindRes.rescueRef,
       });
-    }
 
-    const rewindSet = computePhaseBarrierRewindSet(
-      nodes,
-      edges,
-      targetCp.nodeId,
-    );
-    for (const rwId of rewindSet) {
-      this.store.updateGraphNode(rwId, {
-        status: 'rewound',
-        outputSummary: `Rewound at epoch ${nextEpoch} after ${failedNode.code} failure: ${summary}`,
+      const aud = this.store.appendAudit({
+        hubId: change.hubId,
+        changeId: change.id,
+        category: 'rewind',
+        actor: 'continuity_engine',
+        title: `Phase-Barrier Restore triggered by ${freshFailed.code} -> ${targetCp.label}`,
+        detail: `${summary} | Epoch ${epoch} | Backup ref: ${rewindRes.rescueRef}`,
       });
-    }
-
-    const forensics: FailureForensicsCard = {
-      failedNodeId: failedNode.id,
-      failedNodeCode: failedNode.code,
-      reasonCode: 'GATE_FAILED',
-      summary,
-      diagnostics: diagnostics.slice(0, 6),
-      targetCheckpointLabel: targetCp.label,
-      rescueRef: rewindRes.rescueRef,
-      failedAt: new Date().toISOString(),
-    };
-    this.store.updateNodeForensics(failedNode.id, forensics);
-    this.store.appendEpistemicItem({
-      changeId: change.id,
-      nodeId: failedNode.id,
-      executionEpoch: nextEpoch,
-      kind: 'forensics',
-      content: `${failedNode.code} failed: ${summary} | ${diagnostics.slice(0, 3).join('; ')}`,
-      evidenceRef: rewindRes.rescueRef,
+      return {nextEpoch: epoch, audit: aud};
     });
 
-    const audit = this.store.appendAudit({
-      hubId: change.hubId,
-      changeId: change.id,
-      category: 'rewind',
-      actor: 'continuity_engine',
-      title: `Phase-Barrier Restore triggered by ${failedNode.code} -> ${targetCp.label}`,
-      detail: `${summary} | Epoch ${nextEpoch} | Backup ref: ${rewindRes.rescueRef}`,
-    });
     this.publish({type: 'audit.logged', entry: audit});
 
     return {
@@ -1387,8 +1859,11 @@ export class ContinuityEngine {
           dep.status === 'certified' ||
           dep.status === 'planned')
       ) {
-        this.store.updateChangeStatusCas(dep.id, dep.executionEpoch ?? 1, {
+        const nextEpoch = this.store.bumpChangeEpochAtomic(dep.id);
+        void this.abortChangeRun(dep.id);
+        this.store.updateChangeStatusCas(dep.id, nextEpoch, {
           status: 'stale_upstream',
+          expectedStatuses: ['running', 'certified', 'planned'],
         });
       }
     }
@@ -1517,6 +1992,81 @@ export class ContinuityEngine {
       estimatedReadSeconds: 25,
     });
     this.publish({type: 'attention.raised', item: attn});
+  }
+
+  private openMissionPauseGate(
+    change: ChangeRecord,
+    input: {
+      readonly nodeId: string | null;
+      readonly kind: MissionGateKind;
+      readonly targetId: string;
+      readonly question: string;
+      readonly contextSnippet: string;
+      readonly options: readonly DecisionOptionPreview[];
+      readonly pauseMission?: boolean;
+    },
+  ): void {
+    if (!change.missionId) {
+      return;
+    }
+    const existing = this.store.missions
+      .listGates(change.missionId, false)
+      .find(g => g.kind === input.kind && g.targetId === input.targetId);
+    if (existing) {
+      return;
+    }
+    const gate = this.store.missions.openGate({
+      missionId: change.missionId,
+      changeId: change.id,
+      nodeId: input.nodeId,
+      kind: input.kind,
+      targetId: input.targetId,
+      targetHash: sha256Canonical({
+        missionId: change.missionId,
+        changeId: change.id,
+        nodeId: input.nodeId,
+        kind: input.kind,
+        targetId: input.targetId,
+        epoch: change.executionEpoch ?? 1,
+      }),
+      question: input.question,
+      contextSnippet: input.contextSnippet,
+      options: input.options,
+    });
+    if (input.pauseMission !== false) {
+      const m = this.store.missions.getMission(change.missionId);
+      if (m && m.status !== 'aborted' && m.status !== 'delivered') {
+        this.store.missions.updateMissionCas(change.missionId, undefined, {
+          status: 'paused_human',
+        });
+      }
+    }
+    this.publish({
+      type: 'gate.opened',
+      missionId: change.missionId,
+      gateId: gate.id,
+      kind: gate.kind,
+      at: gate.createdAt,
+    });
+    this.emitMissionUpdatedForChange(change.id);
+  }
+
+  private emitMissionUpdatedForChange(changeId: string): void {
+    const chg = this.store.getChange(changeId);
+    if (!chg?.missionId) {
+      return;
+    }
+    const mission = this.store.missions.getMission(chg.missionId);
+    if (!mission) {
+      return;
+    }
+    this.publish({
+      type: 'mission.updated',
+      missionId: mission.id,
+      status: mission.status,
+      stage: mission.stage,
+      at: new Date().toISOString(),
+    });
   }
 
   private emitProgress(

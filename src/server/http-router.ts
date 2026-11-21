@@ -31,6 +31,7 @@ import {
 import {ForgeError} from '../shared/errors.ts';
 import type {RepoTier} from '../shared/types.ts';
 import type {
+  DecisionAction,
   ExecutionMode,
   IntentPresetId,
   MissionConfigOverrides,
@@ -209,7 +210,16 @@ export class ForgeHttpServer {
       return;
     }
 
-    const url = new URL(req.url ?? '/', `http://127.0.0.1:${this.port || 80}`);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://127.0.0.1:${this.port || 80}`);
+    } catch {
+      this.sendJson(res, 400, {
+        code: 'VALIDATION_ERROR',
+        message: 'Malformed request URL',
+      });
+      return;
+    }
     if (!this.isAuthenticated(req, url)) {
       this.sendJson(res, 401, {
         code: 'UNAUTHORIZED',
@@ -272,10 +282,14 @@ export class ForgeHttpServer {
 
       if (method === 'POST' && path === '/api/repositories') {
         const body = asRecord(await this.readJsonBody(req));
+        const hubId = reqString(body, 'hubId', 80);
+        if (!this.store.getHub(hubId)) {
+          throw new ForgeError('NOT_FOUND', `Hub "${hubId}" not found`, 404);
+        }
         const localPath = reqString(body, 'localPath', 512);
         await this.worktrees.ensureGitRepoInitialized(localPath, 'main');
         const repo = this.store.registerRepository({
-          hubId: reqString(body, 'hubId', 80),
+          hubId,
           name: reqString(body, 'name', 120),
           tier: reqEnum(body, 'tier', [
             'infra',
@@ -563,34 +577,129 @@ export class ForgeHttpServer {
         path,
       );
       if (method === 'POST' && resolveAttnMatch) {
+        const attnId = resolveAttnMatch[1]!;
         const body = asRecord(await this.readJsonBody(req));
         const resolution = reqString(body, 'resolution', 1024);
-        const item = this.store.resolveAttention(
-          resolveAttnMatch[1]!,
-          resolution,
-        );
+        const existingAttn = this.store
+          .listAttentionItems(true)
+          .find(a => a.id === attnId);
+        if (!existingAttn) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Attention item "${attnId}" not found`,
+            404,
+          );
+        }
 
-        if (item.changeId) {
-          const chg = this.store.getChange(item.changeId);
-          if (chg) {
-            if (resolution.toLowerCase().includes('turbo')) {
-              this.store.updateChange(chg.id, {permissionTier: 'turbo'});
+        const linkedChange = existingAttn.changeId
+          ? this.store.getChange(existingAttn.changeId)
+          : null;
+        if (linkedChange?.missionId) {
+          if (!this.missions) {
+            throw new ForgeError(
+              'CONFLICT',
+              `Mission-linked attention item "${attnId}" must be resolved via MissionOrchestrator`,
+              409,
+            );
+          }
+          const openGates = this.store.missions.listGates(
+            linkedChange.missionId,
+            false,
+          );
+          const matchingGate =
+            openGates.find(
+              g =>
+                g.targetId === existingAttn.id ||
+                (g.changeId === linkedChange.id &&
+                  (!existingAttn.nodeId || g.nodeId === existingAttn.nodeId)),
+            ) ?? openGates.find(g => g.changeId === linkedChange.id);
+
+          const lower = resolution.toLowerCase();
+          if (matchingGate) {
+            let mappedAction: DecisionAction | null = null;
+            if (lower.includes('waive')) {
+              mappedAction = 'waive_ghost';
+            } else if (matchingGate.kind === 'ghost_amendment') {
+              mappedAction = 'approve_ghost';
+            } else if (matchingGate.kind === 'budget_extension') {
+              mappedAction = 'extend_budget';
+            } else if (matchingGate.kind === 'qa_decision') {
+              mappedAction = 'approve';
+            } else if (matchingGate.kind === 'build_escalation') {
+              mappedAction = 'resume';
+            } else if (matchingGate.kind === 'clarification') {
+              mappedAction = 'clarify';
             }
-            if (item.nodeId) {
-              const waive = resolution.toLowerCase().includes('waive');
-              this.store.updateGraphNode(item.nodeId, {
-                status: waive ? 'waived' : 'certified',
-                outputSummary: `Human resolution: ${resolution}`,
-              });
+            const opt = mappedAction
+              ? matchingGate.options.find(o => o.action === mappedAction)
+              : undefined;
+            if (!opt) {
+              throw new ForgeError(
+                'CONFLICT',
+                `Mission-linked attention item "${attnId}" must be resolved via POST /api/missions/${linkedChange.missionId}/decisions`,
+                409,
+              );
             }
-            if (
-              resolution.toLowerCase().includes('approve') ||
-              resolution.toLowerCase().includes('resume') ||
-              resolution.toLowerCase().includes('start')
-            ) {
-              this.store.updateChange(chg.id, {status: 'planned'});
-              void this.continuity.startChangeExecution(chg.id);
-            }
+            const item = this.store.resolveAttention(attnId, resolution);
+            await this.missions.resolveDecision(linkedChange.missionId, {
+              gateId: matchingGate.id,
+              targetId: matchingGate.targetId,
+              targetHash: matchingGate.targetHash,
+              idempotencyKey: `attn-${attnId}`,
+              actor: 'human_operator',
+              action: opt.action,
+              feedback: resolution,
+              scope: 'proposal',
+              issueIds: [],
+            });
+            this.broadcast({
+              type: 'state.changed',
+              scope: 'attention',
+              at: new Date().toISOString(),
+            });
+            this.sendJson(res, 200, item);
+            return;
+          }
+          const item = this.store.resolveAttention(attnId, resolution);
+          if (
+            lower.includes('approve') ||
+            lower.includes('resume') ||
+            lower.includes('start')
+          ) {
+            await this.missions.executeControl(linkedChange.missionId, {
+              action: 'resume',
+              actor: 'human_operator',
+              feedback: resolution,
+            });
+          }
+          this.broadcast({
+            type: 'state.changed',
+            scope: 'attention',
+            at: new Date().toISOString(),
+          });
+          this.sendJson(res, 200, item);
+          return;
+        }
+
+        const item = this.store.resolveAttention(attnId, resolution);
+        if (linkedChange) {
+          if (resolution.toLowerCase().includes('turbo')) {
+            this.store.updateChange(linkedChange.id, {permissionTier: 'turbo'});
+          }
+          if (item.nodeId) {
+            const waive = resolution.toLowerCase().includes('waive');
+            this.store.updateGraphNode(item.nodeId, {
+              status: waive ? 'waived' : 'certified',
+              outputSummary: `Human resolution: ${resolution}`,
+            });
+          }
+          if (
+            resolution.toLowerCase().includes('approve') ||
+            resolution.toLowerCase().includes('resume') ||
+            resolution.toLowerCase().includes('start')
+          ) {
+            this.store.updateChange(linkedChange.id, {status: 'planned'});
+            void this.continuity.startChangeExecution(linkedChange.id);
           }
         }
         this.broadcast({
@@ -862,6 +971,20 @@ export class ForgeHttpServer {
         return;
       }
 
+      const outboxRetryMatch = /^\/api\/infra\/outbox\/([^/]+)\/retry$/.exec(
+        path,
+      );
+      if (method === 'POST' && outboxRetryMatch) {
+        const row = this.store.requeueOutboxEffect(outboxRetryMatch[1]!);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'infra',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, row);
+        return;
+      }
+
       if (method === 'GET' && path === '/api/missions') {
         const hubId = url.searchParams.get('hubId') ?? undefined;
         const includeArchived =
@@ -884,9 +1007,26 @@ export class ForgeHttpServer {
           );
         }
         const body = asRecord(await this.readJsonBody(req));
+        if (
+          body['documents'] !== undefined &&
+          !Array.isArray(body['documents'])
+        ) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'Field "documents" must be an array',
+            400,
+          );
+        }
         const rawDocs = Array.isArray(body['documents'])
           ? body['documents']
           : [];
+        if (rawDocs.length > 24) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'Field "documents" exceeds maximum of 24 items',
+            400,
+          );
+        }
         const documents = rawDocs.map((d, idx) => {
           const rec = asRecord(d, `documents[${idx}]`);
           return {
@@ -1039,7 +1179,7 @@ export class ForgeHttpServer {
         return;
       }
 
-      const missionControlMatch = /^\/api\/missions\/([^/]+)\/controls$/.exec(
+      const missionControlMatch = /^\/api\/missions\/([^/]+)\/controls?$/.exec(
         path,
       );
       if (method === 'POST' && missionControlMatch) {
@@ -1177,10 +1317,10 @@ export class ForgeHttpServer {
         return;
       }
 
-      const baselineImpactMatch = /^\/api\/baselines\/([^/]+)\/impact$/.exec(
+      const traceabilityMatch = /^\/api\/missions\/([^/]+)\/traceability$/.exec(
         path,
       );
-      if (method === 'GET' && baselineImpactMatch) {
+      if (method === 'GET' && traceabilityMatch) {
         if (!this.missions) {
           throw new ForgeError(
             'INTERNAL_ERROR',
@@ -1188,11 +1328,74 @@ export class ForgeHttpServer {
             500,
           );
         }
-        const compareTo = url.searchParams.get('compareTo') ?? '';
+        this.sendJson(
+          res,
+          200,
+          await this.missions.getMissionTraceability(traceabilityMatch[1]!),
+        );
+        return;
+      }
+
+      const missionEventsMatch = /^\/api\/missions\/([^/]+)\/events$/.exec(
+        path,
+      );
+      if (method === 'GET' && missionEventsMatch) {
+        const mission = this.store.missions.getMission(missionEventsMatch[1]!);
+        if (!mission) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Mission "${missionEventsMatch[1]!}" not found`,
+            404,
+          );
+        }
+        const rawLimit = url.searchParams.get('limit');
+        const limit =
+          rawLimit !== null ? Number.parseInt(rawLimit, 10) : 10_000;
+        this.sendJson(
+          res,
+          200,
+          this.store.missions.listEvents(
+            mission.id,
+            Number.isFinite(limit) && limit > 0
+              ? Math.min(limit, 50_000)
+              : 10_000,
+          ),
+        );
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/baselines') {
+        const projectId = url.searchParams.get('projectId') || undefined;
+        this.sendJson(res, 200, this.store.hama.listBaselines(projectId));
+        return;
+      }
+
+      const baselineImpactMatch = /^\/api\/baselines\/([^/]+)\/impact$/.exec(
+        path,
+      );
+      if ((method === 'POST' || method === 'GET') && baselineImpactMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        let compareTo = url.searchParams.get('compareTo') ?? '';
+        if (method === 'POST') {
+          const body = asRecord(await this.readJsonBody(req));
+          compareTo =
+            optString(body, 'nextBaselineId', '') ||
+            optString(body, 'compareToBaselineId', '') ||
+            compareTo;
+        }
         if (!compareTo) {
           throw new ForgeError(
             'VALIDATION_ERROR',
-            'Query parameter "compareTo" is required',
+            method === 'POST'
+              ? 'Field "nextBaselineId" or "compareToBaselineId" is required'
+              : 'Query parameter "compareTo" is required',
+            400,
           );
         }
         this.sendJson(
@@ -1226,8 +1429,22 @@ export class ForgeHttpServer {
           );
         }
         const body = asRecord(await this.readJsonBody(req));
+        const hubId = reqString(body, 'hubId', 80);
+        if (!this.store.getHub(hubId)) {
+          throw new ForgeError('NOT_FOUND', `Hub "${hubId}" not found`, 404);
+        }
+        const rawTier =
+          body['authorityTier'] !== undefined
+            ? reqEnum(body, 'authorityTier', [
+                'L3_locked',
+                'L2_verified',
+                'L1_observed',
+              ] as const)
+            : undefined;
+        const cappedTier =
+          rawTier === 'L3_locked' ? ('L2_verified' as const) : rawTier;
         const resRetain = this.hindsight.retain({
-          hubId: reqString(body, 'hubId', 80),
+          hubId,
           repoId: optString(body, 'repoId', '') || null,
           missionId: optString(body, 'missionId', '') || null,
           executionMode:
@@ -1240,14 +1457,7 @@ export class ForgeHttpServer {
           sourceType: reqString(body, 'sourceType', 80),
           occurredAt: optString(body, 'occurredAt', '') || undefined,
           rawText: reqString(body, 'rawText', 131_072),
-          authorityTier:
-            body['authorityTier'] !== undefined
-              ? reqEnum(body, 'authorityTier', [
-                  'L3_locked',
-                  'L2_verified',
-                  'L1_observed',
-                ] as const)
-              : undefined,
+          authorityTier: cappedTier,
         });
         this.sendJson(res, 201, resRetain);
         return;
@@ -1317,10 +1527,9 @@ export class ForgeHttpServer {
           url.searchParams.get('hubId') ??
           this.store.listHubs(false)[0]?.id ??
           '';
-        const mode: ExecutionMode =
-          url.searchParams.get('executionMode') === 'simulation'
-            ? 'simulation'
-            : 'live';
+        const mode = this.parseExecutionModeQuery(
+          url.searchParams.get('executionMode'),
+        );
         this.sendJson(
           res,
           200,
@@ -1334,10 +1543,9 @@ export class ForgeHttpServer {
           url.searchParams.get('hubId') ??
           this.store.listHubs(false)[0]?.id ??
           '';
-        const mode: ExecutionMode =
-          url.searchParams.get('executionMode') === 'simulation'
-            ? 'simulation'
-            : 'live';
+        const mode = this.parseExecutionModeQuery(
+          url.searchParams.get('executionMode'),
+        );
         const includeRetired = url.searchParams.get('includeRetired') === '1';
         this.sendJson(
           res,
@@ -1354,10 +1562,9 @@ export class ForgeHttpServer {
           url.searchParams.get('hubId') ??
           this.store.listHubs(false)[0]?.id ??
           '';
-        const mode: ExecutionMode =
-          url.searchParams.get('executionMode') === 'simulation'
-            ? 'simulation'
-            : 'live';
+        const mode = this.parseExecutionModeQuery(
+          url.searchParams.get('executionMode'),
+        );
         this.sendJson(
           res,
           200,
@@ -1390,6 +1597,20 @@ export class ForgeHttpServer {
         message,
       });
     }
+  }
+
+  private parseExecutionModeQuery(raw: string | null): ExecutionMode {
+    if (raw === null || raw === '') {
+      return 'live';
+    }
+    if (raw === 'live' || raw === 'simulation') {
+      return raw;
+    }
+    throw new ForgeError(
+      'VALIDATION_ERROR',
+      `Invalid executionMode "${raw}": must be "live" or "simulation"`,
+      400,
+    );
   }
 
   private buildBootstrapSnapshot(): BootstrapSnapshot {

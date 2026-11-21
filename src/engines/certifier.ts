@@ -7,7 +7,6 @@ import {
 } from '../core/ddd.ts';
 import {isFileInsideScope} from '../core/glob-scope.ts';
 import {
-  SchemaError,
   dslArray,
   dslBoolean,
   dslNumber,
@@ -31,6 +30,9 @@ export interface CertificationVerdict {
   readonly reasonCode: ForgeErrorCode | 'OK';
   readonly summary: string;
   readonly diagnostics: readonly string[];
+  readonly outcome?:
+    'completed' | 'rate_limited' | 'env_fault' | 'task_failure';
+  readonly retryAfterSeconds?: number;
 }
 
 const criteriaResultSchema = dslObject({
@@ -320,6 +322,11 @@ export class CompletionCertifier {
         ? change.team.juniorAuditModel
         : change.team.seniorAuditModel;
 
+    const requiredCriterionIds =
+      node.acceptanceRefs && node.acceptanceRefs.length > 0
+        ? node.acceptanceRefs
+        : change.acceptanceCriteria.map(c => c.id);
+
     if (
       executionMode === 'live' &&
       adapterProfile &&
@@ -333,6 +340,8 @@ export class CompletionCertifier {
         model,
         role: 'evaluator',
       });
+      const startedAt = Date.now();
+      let sessionFinished = false;
 
       const nonce = randomBytes(6).toString('hex');
       const slicedPatch = sliceDiffPrioritized(
@@ -347,10 +356,17 @@ export class CompletionCertifier {
         `Return strict JSON ONLY matching schema: ${JSON.stringify(auditVerdictSchema.json)}`,
       ].join('\n\n');
 
+      const criteriaLines =
+        change.acceptanceCriteria.length > 0
+          ? change.acceptanceCriteria
+              .map(c => `- [${c.id}] ${c.statement}`)
+              .join('\n')
+          : requiredCriterionIds.map(id => `- [${id}]`).join('\n');
       const userPrompt = [
         `Audit Change ${change.code}: ${change.title}`,
         `Target Scope: ${node.fileScope.join(', ') || '*'}`,
-        `Acceptance Criteria:\n${change.acceptanceCriteria.map(c => `- [${c.id}] ${c.statement}`).join('\n')}`,
+        `Required Criterion IDs: ${requiredCriterionIds.join(', ') || '(none)'}`,
+        `Acceptance Criteria:\n${criteriaLines}`,
         `Diff Summary:\n${diff.summary || '(clean baseline)'}`,
         `<untrusted_diff nonce="${nonce}">\n${slicedPatch}\n</untrusted_diff>`,
       ].join('\n\n');
@@ -361,107 +377,199 @@ export class CompletionCertifier {
         content: userPrompt,
       });
 
-      const inv = await this.adapters.invoke({
-        sessionId: sess.id,
-        hubId: change.hubId,
-        changeId: change.id,
-        nodeId: node.id,
-        role: 'evaluator',
-        adapter: adapterProfile.manifest,
-        model,
-        permissionTier: change.permissionTier,
-        cwd: change.worktreePath,
-        systemPrompt,
-        userPrompt,
-        readOnly: true,
-        textOnly: true,
-        maxOutputTokens: 1500,
-        cacheStablePrefix: true,
-        timeoutMs: 60_000,
-        signal,
-      });
+      try {
+        const inv = await this.adapters.invoke({
+          sessionId: sess.id,
+          hubId: change.hubId,
+          changeId: change.id,
+          nodeId: node.id,
+          role: 'evaluator',
+          adapter: adapterProfile.manifest,
+          model,
+          permissionTier: change.permissionTier,
+          cwd: change.worktreePath,
+          systemPrompt,
+          userPrompt,
+          readOnly: true,
+          textOnly: true,
+          maxOutputTokens: 1500,
+          cacheStablePrefix: true,
+          timeoutMs: 60_000,
+          signal,
+        });
 
-      if (inv.costUsd > 0) {
-        this.store.addChangeCostAtomic(change.id, inv.costUsd);
-        if (change.missionId) {
-          this.store.missions.addMissionCostAtomic(
-            change.missionId,
-            inv.costUsd,
-          );
+        if (inv.costUsd > 0) {
+          this.store.addChangeCostAtomic(change.id, inv.costUsd);
+          if (change.missionId) {
+            this.store.missions.addMissionCostAtomic(
+              change.missionId,
+              inv.costUsd,
+            );
+          }
         }
-      }
 
-      this.store.appendTranscriptMessage({
-        sessionId: sess.id,
-        role: 'assistant',
-        content: inv.finalText || inv.diagnostic,
-        isError: inv.outcome !== 'completed',
-        inputTokens: inv.inputTokens,
-        cachedTokens: inv.cachedTokens,
-        outputTokens: inv.outputTokens,
-      });
-      this.store.finishSession(
-        sess.id,
-        inv.outcome === 'completed' ? 'completed' : 'failed',
-      );
+        this.store.appendTranscriptMessage({
+          sessionId: sess.id,
+          role: 'assistant',
+          content: inv.finalText || inv.diagnostic,
+          isError: inv.outcome !== 'completed',
+          inputTokens: inv.inputTokens,
+          cachedTokens: inv.cachedTokens,
+          outputTokens: inv.outputTokens,
+        });
 
-      if (inv.outcome === 'completed') {
-        try {
-          const parsed = extractJsonPayload(inv.finalText, auditVerdictSchema);
-          const allCriteriaPassed = parsed.criteriaResults.every(c => c.passed);
-          const certified = parsed.certified && allCriteriaPassed;
-          return {
-            certified,
-            score: parsed.score,
-            reasonCode:
-              parsed.dddDriftTerms.length > 0
+        const sessionStatus =
+          inv.outcome === 'completed'
+            ? 'completed'
+            : inv.outcome === 'rate_limited' || signal?.aborted
+              ? 'interrupted'
+              : 'failed';
+        this.store.finishSession(sess.id, sessionStatus);
+        sessionFinished = true;
+
+        let verdict: CertificationVerdict;
+        let telemetryOutcome: 'certified' | 'task_failure' | 'env_fault' =
+          'task_failure';
+
+        if (inv.outcome === 'completed') {
+          try {
+            const parsed = extractJsonPayload(
+              inv.finalText,
+              auditVerdictSchema,
+            );
+            const noDrift = parsed.dddDriftTerms.length === 0;
+            const allCriteriaPassed = parsed.criteriaResults.every(
+              c => c.passed,
+            );
+            const missingReqDiagnostics = requiredCriterionIds
+              .filter(reqId => {
+                const matches = parsed.criteriaResults.filter(
+                  c => c.criterionId === reqId,
+                );
+                return matches.length === 0 || matches.some(c => !c.passed);
+              })
+              .map(
+                reqId =>
+                  `Required acceptance criterion "${reqId}" missing or failed in criteriaResults`,
+              );
+            const allRequiredPassed = missingReqDiagnostics.length === 0;
+            const certified =
+              parsed.certified &&
+              noDrift &&
+              allCriteriaPassed &&
+              allRequiredPassed;
+
+            telemetryOutcome = certified ? 'certified' : 'task_failure';
+            verdict = {
+              certified,
+              score: parsed.score,
+              reasonCode: !noDrift
                 ? 'DDD_DRIFT_DETECTED'
                 : certified
                   ? 'OK'
                   : 'GATE_FAILED',
-            summary: parsed.summary,
-            diagnostics: [
-              ...parsed.diagnostics,
-              ...parsed.dddDriftTerms,
-              ...parsed.criteriaResults
-                .filter(c => !c.passed)
-                .map(c => `[${c.criterionId}] ${c.evidence}`),
-            ],
-          };
-        } catch (err) {
-          const legacy = parseFailClosedAuditJson(inv.finalText);
-          if (legacy.passed && err instanceof SchemaError) {
-            return {
-              certified: legacy.passed,
-              score: legacy.score,
-              reasonCode:
-                legacy.dddViolations.length > 0
-                  ? 'DDD_DRIFT_DETECTED'
-                  : legacy.passed
-                    ? 'OK'
-                    : 'GATE_FAILED',
-              summary: `${level.toUpperCase()} QA Audit certified (score ${(legacy.score * 100).toFixed(0)}%).`,
-              diagnostics: [...legacy.findings, ...legacy.dddViolations],
+              outcome: certified ? 'completed' : 'task_failure',
+              summary: parsed.summary,
+              diagnostics: [
+                ...parsed.diagnostics,
+                ...parsed.dddDriftTerms,
+                ...parsed.criteriaResults
+                  .filter(c => !c.passed)
+                  .map(c => `[${c.criterionId}] ${c.evidence}`),
+                ...missingReqDiagnostics,
+              ],
+            };
+          } catch (err) {
+            const legacy = parseFailClosedAuditJson(inv.finalText);
+            const msg = err instanceof Error ? err.message : String(err);
+            telemetryOutcome = 'task_failure';
+            verdict = {
+              certified: false,
+              score: 0,
+              reasonCode: 'GATE_FAILED',
+              outcome: 'task_failure',
+              summary: `${level.toUpperCase()} QA Audit failed closed: ${msg}`,
+              diagnostics: [...legacy.findings, msg],
             };
           }
-          const msg = err instanceof Error ? err.message : String(err);
-          return {
+        } else {
+          telemetryOutcome =
+            inv.outcome === 'env_fault' ? 'env_fault' : 'task_failure';
+          verdict = {
             certified: false,
             score: 0,
-            reasonCode: 'GATE_FAILED',
-            summary: `${level.toUpperCase()} QA Audit failed closed: ${msg}`,
-            diagnostics: [...legacy.findings, msg],
+            reasonCode:
+              inv.outcome === 'rate_limited' || inv.outcome === 'env_fault'
+                ? 'ADAPTER_UNAVAILABLE'
+                : 'GATE_FAILED',
+            outcome: inv.outcome,
+            retryAfterSeconds: inv.retryAfterSeconds,
+            summary: `${level.toUpperCase()} QA Audit could not run (${inv.outcome}): ${inv.diagnostic}`,
+            diagnostics: [inv.diagnostic || 'Audit adapter unavailable'],
           };
         }
-      }
 
-      return {
-        certified: false,
-        score: 0,
-        reasonCode: 'ADAPTER_UNAVAILABLE',
-        summary: `${level.toUpperCase()} QA Audit could not run (${inv.outcome}): ${inv.diagnostic}`,
-        diagnostics: [inv.diagnostic || 'Audit adapter unavailable'],
-      };
+        this.store.recordTelemetry({
+          hubId: change.hubId,
+          changeId: change.id,
+          nodeId: node.id,
+          adapterId: adapterProfile.manifest.id,
+          model,
+          role: 'evaluator',
+          outcome: telemetryOutcome,
+          firstPassCertified: verdict.certified && node.attemptCount === 0,
+          prematureStopTriggered: false,
+          durationSec: inv.durationSec,
+          inputTokens: inv.inputTokens,
+          cachedTokens: inv.cachedTokens,
+          firstTurnCachedTokens: inv.firstTurnCachedTokens,
+          outputTokens: inv.outputTokens,
+          costUsd: inv.costUsd,
+          diagnostic: verdict.summary,
+        });
+
+        return verdict;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const aborted = Boolean(signal?.aborted);
+        if (!sessionFinished) {
+          this.store.finishSession(sess.id, aborted ? 'interrupted' : 'failed');
+          sessionFinished = true;
+        }
+        this.store.recordTelemetry({
+          hubId: change.hubId,
+          changeId: change.id,
+          nodeId: node.id,
+          adapterId: adapterProfile.manifest.id,
+          model,
+          role: 'evaluator',
+          outcome: aborted ? 'task_failure' : 'env_fault',
+          firstPassCertified: false,
+          prematureStopTriggered: false,
+          durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
+          inputTokens: 0,
+          cachedTokens: 0,
+          firstTurnCachedTokens: 0,
+          outputTokens: 0,
+          costUsd: 0,
+          diagnostic: msg,
+        });
+        return {
+          certified: false,
+          score: 0,
+          reasonCode: aborted ? 'ABORTED' : 'ADAPTER_UNAVAILABLE',
+          outcome: aborted ? 'task_failure' : 'env_fault',
+          summary: `${level.toUpperCase()} QA Audit interrupted: ${msg}`,
+          diagnostics: [msg],
+        };
+      } finally {
+        if (!sessionFinished) {
+          this.store.finishSession(
+            sess.id,
+            signal?.aborted ? 'interrupted' : 'failed',
+          );
+        }
+      }
     }
 
     if (executionMode === 'live') {
@@ -469,6 +577,7 @@ export class CompletionCertifier {
         certified: false,
         score: 0,
         reasonCode: 'ADAPTER_UNAVAILABLE',
+        outcome: 'env_fault',
         summary: `${level.toUpperCase()} QA Audit halted fail-closed: evaluator adapter unavailable or circuit open.`,
         diagnostics: [
           'Configure a healthy evaluator provider or switch explicitly to simulation mode.',
