@@ -1,15 +1,10 @@
-/**
- * Multi-Scenario Engineering Rooms Service:
- * Supports `#req-grill`, `#arch-council`, `#triage-ops`, `#direct-ops`, and
- * `#exec-briefing` with Thread Mandates, `@agent` routing over the Reserved
- * Human Priority Slot, and 1-click Promote-to-Change.
- */
-
 import {
   renderUbiquitousLanguageSection,
   selectTermsForRepo,
 } from '../core/ddd.ts';
 import type {IAgentAdapterHub} from '../adapters/contracts.ts';
+import type {HindsightEngine} from '../memory/hindsight-engine.ts';
+import type {HamaEngine} from '../requirements/hama-engine.ts';
 import type {
   PostRoomMessageRequest,
   PromoteThreadToChangeRequest,
@@ -27,6 +22,8 @@ export class EngineeringRoomsService {
   private readonly closure: RequirementClosureEngine;
   private readonly publish: SsePublisher;
   private readonly worktreesRoot: string;
+  private readonly hindsight?: HindsightEngine;
+  private readonly hama?: HamaEngine;
 
   constructor(deps: {
     readonly store: ForgeStore;
@@ -34,12 +31,16 @@ export class EngineeringRoomsService {
     readonly closure: RequirementClosureEngine;
     readonly publish: SsePublisher;
     readonly worktreesRoot: string;
+    readonly hindsight?: HindsightEngine;
+    readonly hama?: HamaEngine;
   }) {
     this.store = deps.store;
     this.adapters = deps.adapters;
     this.closure = deps.closure;
     this.publish = deps.publish;
     this.worktreesRoot = deps.worktreesRoot;
+    this.hindsight = deps.hindsight;
+    this.hama = deps.hama;
   }
 
   getRoomSnapshot(hubId: string, roomId?: string): RoomDetailSnapshot {
@@ -90,7 +91,25 @@ export class EngineeringRoomsService {
     this.store.touchHubHumanAnchor(room.hubId, false);
     this.publish({type: 'room.message', roomId: room.id, message: humanMsg});
 
-    // Dispatch @agent or scenario moderator response asynchronously on Priority Slot.
+    if (room.scenario === 'req-grill' && this.hama) {
+      const mMatch = /#mission:([a-z0-9-]+)/i.exec(req.bodyMarkdown);
+      if (mMatch?.[1]) {
+        try {
+          this.hama.addComment(mMatch[1], {
+            scopeKey: 'room-grill',
+            authorKind: 'human',
+            authorLabel: humanMsg.authorLabel,
+            severity: req.bodyMarkdown.toLowerCase().includes('#blocking')
+              ? 'blocking'
+              : 'advisory',
+            body: req.bodyMarkdown,
+          });
+        } catch {
+          // Ignore unknown mission tag cleanly.
+        }
+      }
+    }
+
     const shouldRespond =
       extractedMentions.length > 0 ||
       room.scenario === 'req-grill' ||
@@ -195,6 +214,14 @@ export class EngineeringRoomsService {
       this.store.listDomainTerms(hub.id),
       repos[0]?.id ?? '',
     );
+    const recalled = this.hindsight
+      ? this.hindsight.recall({
+          hubId: hub.id,
+          executionMode: 'live',
+          query: promptBody,
+          limit: 4,
+        }).hits
+      : [];
 
     const sess = this.store.startSession({
       hubId: hub.id,
@@ -203,14 +230,22 @@ export class EngineeringRoomsService {
       role,
     });
 
+    const memoryContext =
+      recalled.length > 0
+        ? `## Recalled Project Memory\n${recalled.map(h => `- [${h.authorityTier}] ${h.title}: ${h.content}`).join('\n')}`
+        : '';
     const systemPrompt = [
       this.store.getConstitution().markdown,
       `You are collaborating in Engineering Room (${scenario}) for Hub "${hub.name}".`,
       hub.agentWikiSummary || hub.description,
       renderUbiquitousLanguageSection(terms),
-    ].join('\n\n');
+      memoryContext,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
 
     let replyMarkdown = '';
+    let failureDiagnostic = '';
     try {
       const res = await this.adapters.invoke({
         sessionId: sess.id,
@@ -225,6 +260,7 @@ export class EngineeringRoomsService {
         systemPrompt,
         userPrompt: promptBody,
         readOnly: true,
+        textOnly: true,
         prioritySlot: true,
         timeoutMs: 45_000,
       });
@@ -234,19 +270,41 @@ export class EngineeringRoomsService {
       );
       if (res.outcome === 'completed' && res.finalText.trim().length > 0) {
         replyMarkdown = res.finalText.trim();
+      } else {
+        failureDiagnostic = res.diagnostic;
       }
-    } catch {
+    } catch (err) {
       this.store.finishSession(sess.id, 'failed');
+      failureDiagnostic = err instanceof Error ? err.message : String(err);
     }
 
     if (!replyMarkdown) {
-      replyMarkdown = this.buildStructuredDomainReply(
-        scenario,
-        hub.name,
-        repos.map(r => `${r.name} (${r.boundedContext})`),
-        terms.map(t => t.canonicalTerm),
-        promptBody,
-      );
+      const memoryLines =
+        recalled.length > 0
+          ? [
+              '- **Grounded Hindsight Memories:**',
+              ...recalled.map(
+                h => `  - [${h.authorityTier}] ${h.title}: ${h.content}`,
+              ),
+            ]
+          : ['- **Grounded Hindsight Memories:** none matching query yet.'];
+
+      const sysMsg = this.store.appendRoomMessage({
+        roomId,
+        threadId,
+        authorKind: 'system',
+        authorId: 'forgeops_degraded',
+        authorLabel: 'ForgeOps Control Plane (Degraded Live Notice)',
+        bodyMarkdown: [
+          `### Live Agent Reply Unavailable (${scenario})`,
+          `- **Reason:** ${failureDiagnostic || 'No live API key or healthy external CLI agent configured.'}`,
+          `- **Repository Scope:** ${repos.map(r => `${r.name} (${r.boundedContext})`).join(', ') || 'none'}`,
+          ...memoryLines,
+          '- Configure a provider under Infra Providers or use a `simulation` Mission to run offline synthesis.',
+        ].join('\n'),
+      });
+      this.publish({type: 'room.message', roomId, message: sysMsg});
+      return;
     }
 
     const agentMsg = this.store.appendRoomMessage({
@@ -258,47 +316,5 @@ export class EngineeringRoomsService {
       bodyMarkdown: replyMarkdown,
     });
     this.publish({type: 'room.message', roomId, message: agentMsg});
-  }
-
-  private buildStructuredDomainReply(
-    scenario: string,
-    hubName: string,
-    repoSummaries: readonly string[],
-    canonicalTerms: readonly string[],
-    userPrompt: string,
-  ): string {
-    const termsNote =
-      canonicalTerms.length > 0
-        ? `Canonical DDD identifiers locked: \`${canonicalTerms.join('`, `')}\`.`
-        : 'No DDD terms locked yet; consider registering bounded-context terms in DDD Studio.';
-    const repoNote =
-      repoSummaries.length > 0
-        ? `Scoped repositories: ${repoSummaries.join(', ')}.`
-        : 'Register member repositories in Federation Hub to bind isolated worktrees.';
-
-    switch (scenario) {
-      case 'req-grill':
-        return [
-          `### Requirement Closure Assessment (${hubName})`,
-          `- **Input Analyzed:** "${userPrompt.slice(0, 140)}"`,
-          `- **Topology Alignment:** ${repoNote}`,
-          `- **Ubiquitous Language Check:** ${termsNote}`,
-          '- **Next Action:** Click **Promote Thread to Change** when scope is locked to compile the WBS & Twin Graph.',
-        ].join('\n');
-      case 'arch-council':
-        return [
-          '### Architecture Council Synthesis',
-          `- **Bounded Context Impact:** ${repoNote}`,
-          `- **Contract Invariants:** ${termsNote}`,
-          '- **Recommendation:** Isolate cross-service schema mutations behind explicit repository verify gates before downstream rollout.',
-        ].join('\n');
-      default:
-        return [
-          `### Control Plane Response (${hubName})`,
-          `- **Context:** ${repoNote}`,
-          `- **DDD Grounding:** ${termsNote}`,
-          '- **Ready:** Use `@steward` for Infra/Doctor actions or promote this thread directly into an executable Twin-Graph Change.',
-        ].join('\n');
-    }
   }
 }

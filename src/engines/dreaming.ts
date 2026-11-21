@@ -7,6 +7,7 @@ import {
   buildRehydrationCapsule,
   computeRetentionScore,
 } from '../core/cognitive.ts';
+import type {HindsightEngine} from '../memory/hindsight-engine.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import type {RehydrationCapsule} from '../shared/types.ts';
 import type {ForgeStore} from '../store/database.ts';
@@ -22,10 +23,16 @@ export interface DreamConsolidationReport {
 export class DreamingEngine {
   private readonly store: ForgeStore;
   private readonly worktrees: IGitWorktreeManager;
+  private readonly hindsight?: HindsightEngine;
 
-  constructor(store: ForgeStore, worktrees: IGitWorktreeManager) {
+  constructor(
+    store: ForgeStore,
+    worktrees: IGitWorktreeManager,
+    hindsight?: HindsightEngine,
+  ) {
     this.store = store;
     this.worktrees = worktrees;
+    this.hindsight = hindsight;
   }
 
   /**
@@ -33,6 +40,9 @@ export class DreamingEngine {
    * Federation Hubs so multi-project context switches take <30 seconds.
    */
   buildAllCapsules(nowMs = Date.now()): RehydrationCapsule[] {
+    if (this.hindsight) {
+      return this.hindsight.buildAllCapsules(nowMs);
+    }
     const hubs = this.store.listHubs(false);
     const openAttention = this.store.listAttentionItems(false);
 
@@ -127,6 +137,13 @@ export class DreamingEngine {
 
     try {
       for (const hub of this.store.listHubs(false)) {
+        if (this.hindsight) {
+          for (const mode of ['live', 'simulation'] as const) {
+            const report = this.hindsight.consolidatePendingFacts(hub.id, mode);
+            supersededDriftedMemories += report.supersededObservations;
+            this.hindsight.refreshStaleLivingDocs(hub.id, mode);
+          }
+        }
         const existingTitles = new Set(
           this.store
             .listSemanticMemories({hubId: hub.id, includeSuperseded: true})
@@ -173,11 +190,15 @@ export class DreamingEngine {
                       diff.changedFiles.some(f => f.includes(anchor)),
                     )
                   ) {
+                    const baseTitle = mem.title.replace(
+                      /\s*\(Refreshed post-[^)]+\)$/i,
+                      '',
+                    );
                     const replacement = this.store.recordSemanticMemory({
                       hubId: hub.id,
                       repoId: mem.repoId,
                       kind: mem.kind,
-                      title: `${mem.title} (Refreshed post-${chg.code})`,
+                      title: `${baseTitle} (Refreshed post-${chg.code})`,
                       summary: `${mem.summary} — Anchors updated in ${chg.code}.`,
                       pathAnchors: mem.pathAnchors,
                       supersedesMemoryId: mem.id,

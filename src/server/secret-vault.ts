@@ -1,11 +1,6 @@
-/**
- * Host-isolated Secret Vault:
- * Persists provider API keys outside SQLite transcripts and never returns raw
- * secret values to the Renderer or un-allowlisted child processes.
- */
-
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {dirname} from 'node:path';
+import {homedir} from 'node:os';
+import {dirname, join} from 'node:path';
 import type {ProviderSecretResolved} from '../adapters/contracts.ts';
 import type {ForgeStore} from '../store/database.ts';
 
@@ -13,11 +8,47 @@ interface VaultDiskPayload {
   readonly keys: Record<string, string>;
 }
 
+const CLEARED_SENTINEL = '__CLEARED__';
+
 const ENV_FALLBACK_BY_PROVIDER: Readonly<Record<string, string>> = {
+  'opencode-go': 'OPENCODE_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
 };
+
+function readOpencodeAuthKey(): string | null {
+  if (
+    process.env['FORGEOPS_OFFLINE_VERIFY'] === '1' ||
+    process.env['ORCH_OFFLINE_VERIFY'] === '1'
+  ) {
+    return null;
+  }
+  const dataRoot =
+    process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share');
+  const authPath = join(dataRoot, 'opencode', 'auth.json');
+  if (!existsSync(authPath)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(authPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const goEntry = parsed['opencode-go'] ?? parsed['opencode'];
+    if (goEntry && typeof goEntry === 'object') {
+      const key =
+        (goEntry as Record<string, unknown>)['key'] ??
+        (goEntry as Record<string, unknown>)['apiKey'];
+      if (typeof key === 'string' && key.trim().length > 0) {
+        return key.trim();
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 export class HostSecretVault {
   private readonly filePath: string;
@@ -56,7 +87,7 @@ export class HostSecretVault {
   setApiKey(providerId: string, rawKey: string): void {
     const trimmed = rawKey.trim();
     if (trimmed.length === 0) {
-      delete this.keys[providerId];
+      this.keys[providerId] = CLEARED_SENTINEL;
     } else {
       this.keys[providerId] = trimmed;
     }
@@ -81,12 +112,18 @@ export class HostSecretVault {
 
   getRawApiKey(providerId: string): string | null {
     const explicit = this.keys[providerId];
+    if (explicit === CLEARED_SENTINEL) {
+      return null;
+    }
     if (explicit && explicit.length > 0) {
       return explicit;
     }
     const envVar = ENV_FALLBACK_BY_PROVIDER[providerId];
     if (envVar && process.env[envVar]) {
       return process.env[envVar] ?? null;
+    }
+    if (providerId === 'opencode-go') {
+      return readOpencodeAuthKey();
     }
     return null;
   }
@@ -97,12 +134,16 @@ export class HostSecretVault {
   ): ProviderSecretResolved | null {
     const providers = store.listModelProviders(id => this.getKeyStatus(id));
     const matched =
+      providers.find(p => p.id === requestedModel) ??
       providers.find(p => p.models.some(m => m.id === requestedModel)) ??
       (requestedModel.startsWith('claude')
         ? providers.find(p => p.id === 'anthropic')
         : requestedModel.startsWith('gpt')
           ? providers.find(p => p.id === 'openai')
-          : providers.find(p => p.id === 'deepseek')) ??
+          : requestedModel.startsWith('glm') ||
+              requestedModel.startsWith('kimi')
+            ? providers.find(p => p.id === 'opencode-go')
+            : providers.find(p => p.id === 'deepseek')) ??
       providers[0];
     if (!matched) {
       return null;
@@ -112,6 +153,7 @@ export class HostSecretVault {
       protocol: matched.protocol,
       baseUrl: matched.baseUrl,
       apiKey: this.getRawApiKey(matched.id),
+      models: matched.models,
     };
   }
 }

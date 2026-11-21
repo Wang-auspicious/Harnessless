@@ -26,7 +26,10 @@ export interface ParsedCliStreamEvent {
   readonly isError: boolean;
 }
 
-export function buildCliInvocationArgs(req: AgentInvocationRequest): string[] {
+export function buildCliInvocationArgs(req: AgentInvocationRequest): {
+  readonly args: string[];
+  readonly stdinText?: string;
+} {
   const {adapter, permissionTier, mcpEndpointUrl, mcpAttemptToken} = req;
   const args: string[] = [
     ...adapter.baseArgs,
@@ -53,8 +56,13 @@ export function buildCliInvocationArgs(req: AgentInvocationRequest): string[] {
   }
 
   const combinedPrompt = `${req.systemPrompt}\n\n${req.userPrompt}`.trim();
+  const useStdin =
+    adapter.promptTransport === 'stdin' || combinedPrompt.length > 2048;
+  if (useStdin) {
+    return {args, stdinText: combinedPrompt};
+  }
   args.push(combinedPrompt);
-  return args;
+  return {args};
 }
 
 function numVal(obj: Record<string, unknown>, key: string): number {
@@ -268,7 +276,7 @@ export async function runCliStreamSession(
     };
   }
 
-  const args = buildCliInvocationArgs(req);
+  const {args, stdinText} = buildCliInvocationArgs(req);
   const extraEnv: Record<string, string> = {
     FORGEOPS_SESSION_ID: req.sessionId,
     FORGEOPS_MODEL: req.model || req.adapter.defaultModel,
@@ -327,8 +335,10 @@ export async function runCliStreamSession(
     cwd: req.cwd,
     envAllowlist: req.adapter.envAllowlist,
     extraEnv,
+    stdinText,
     timeoutMs: req.timeoutMs ?? 120_000,
     onStdoutLine,
+    signal: req.signal,
   });
 
   const durationSec = Number(
@@ -338,10 +348,12 @@ export async function runCliStreamSession(
   const diagText = [streamErrorText, runResult.stderr.trim()]
     .filter(Boolean)
     .join(' | ');
+  const failed = runResult.exitCode !== 0 || streamErrorText.length > 0;
 
   if (
-    RATE_LIMIT_PATTERN.test(diagText) ||
-    RATE_LIMIT_PATTERN.test(runResult.stdout)
+    failed &&
+    (RATE_LIMIT_PATTERN.test(diagText) ||
+      RATE_LIMIT_PATTERN.test(runResult.stdout))
   ) {
     return {
       outcome: 'rate_limited',

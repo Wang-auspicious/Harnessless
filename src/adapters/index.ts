@@ -24,11 +24,13 @@ import type {
   ProviderSecretLookup,
 } from './contracts.ts';
 import {runNativeApiSession} from './native-api.ts';
+import {ProviderRateLimiter} from './rate-limiter.ts';
 import {ResourceSlotBroker} from './resource-broker.ts';
 
 export * from './contracts.ts';
 export * from './mcp-station.ts';
 export * from './resource-broker.ts';
+export * from './rate-limiter.ts';
 export * from './acp-client.ts';
 export * from './cli-stream.ts';
 export * from './native-api.ts';
@@ -40,6 +42,7 @@ export class AgentAdapterHub implements IAgentAdapterHub {
   private readonly mcpStation: IMcpStationServer;
   private readonly lookupProvider: ProviderSecretLookup;
   private readonly broker: ResourceSlotBroker;
+  readonly rateLimiter = new ProviderRateLimiter();
 
   constructor(
     store: ForgeStore,
@@ -104,9 +107,13 @@ export class AgentAdapterHub implements IAgentAdapterHub {
   }
 
   async invoke(req: AgentInvocationRequest): Promise<AgentInvocationResult> {
+    if (req.providerId) {
+      await this.rateLimiter.waitIfCooling(req.providerId, req.signal);
+    }
+
     const releaseSlot = req.prioritySlot
-      ? await this.broker.acquireHumanPrioritySlot()
-      : await this.broker.acquireWorkerSlot();
+      ? await this.broker.acquireHumanPrioritySlot(req.signal)
+      : await this.broker.acquireWorkerSlot(req.signal);
 
     try {
       let result: AgentInvocationResult;
@@ -126,6 +133,13 @@ export class AgentAdapterHub implements IAgentAdapterHub {
           break;
         default:
           return assertNever(req.adapter.transport, 'Unsupported transport');
+      }
+
+      if (result.outcome === 'rate_limited' && req.providerId) {
+        this.rateLimiter.markRateLimited(
+          req.providerId,
+          result.retryAfterSeconds ?? 30,
+        );
       }
 
       if (!result.mcpSubmission && req.mcpAttemptToken) {

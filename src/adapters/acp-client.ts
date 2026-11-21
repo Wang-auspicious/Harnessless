@@ -317,6 +317,7 @@ export async function runAcpSession(
     stdinText: buildAcpRpcRequests(req),
     timeoutMs: req.timeoutMs ?? 120_000,
     onStdoutLine: parseJsonRpcLine,
+    signal: req.signal,
   });
 
   const durationSec = Number(
@@ -329,10 +330,15 @@ export async function runAcpSession(
   ]
     .filter(Boolean)
     .join(' | ');
+  const failed =
+    runResult.exitCode !== 0 ||
+    rpcErrorText.length > 0 ||
+    permissionDeniedReason.length > 0;
 
   if (
-    RATE_LIMIT_PATTERN.test(combinedDiag) ||
-    RATE_LIMIT_PATTERN.test(runResult.stdout)
+    failed &&
+    (RATE_LIMIT_PATTERN.test(combinedDiag) ||
+      RATE_LIMIT_PATTERN.test(runResult.stdout))
   ) {
     return {
       outcome: 'rate_limited',

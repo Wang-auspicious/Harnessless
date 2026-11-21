@@ -33,6 +33,7 @@ export interface ISandboxProcessRunner {
     cwd: string,
     timeoutMs?: number,
     blockedPatterns?: readonly string[],
+    signal?: AbortSignal,
   ): Promise<ProcessRunResult>;
 }
 
@@ -59,10 +60,22 @@ export interface WorktreeDiffSummary {
   readonly summary: string;
   readonly patch: string;
   readonly changedFiles: readonly string[];
+  readonly linesAdded?: number;
+  readonly linesDeleted?: number;
+}
+
+export interface RepoMergeReadinessResult {
+  readonly clean: boolean;
+  readonly conflictFiles: readonly string[];
+  readonly diagnostic: string;
 }
 
 export interface IGitWorktreeManager {
-  resolveInside(rootDir: string, candidatePath: string): string;
+  resolveInside(
+    rootDir: string,
+    candidatePath: string,
+    opts?: {readonly allowDotGit?: boolean},
+  ): string;
   ensureGitRepoInitialized(
     repoPath: string,
     defaultBranch?: string,
@@ -72,6 +85,7 @@ export interface IGitWorktreeManager {
     readonly worktreesRoot: string;
     readonly repoId: string;
     readonly changeCode: string;
+    readonly changeId?: string;
     readonly baseRef?: string;
   }): Promise<WorktreeHandle>;
   createCheckpoint(input: {
@@ -85,9 +99,20 @@ export interface IGitWorktreeManager {
     readonly changeCode: string;
     readonly targetCommitSha: string;
   }): Promise<RewindWorktreeResult>;
+  revertTaskScope(
+    worktreePath: string,
+    fileScope: readonly string[],
+  ): Promise<void>;
+  snapshotWorkingTree(worktreePath: string): Promise<readonly string[]>;
+  revertFiles(worktreePath: string, files: readonly string[]): Promise<void>;
   diffSinceCommit(
     worktreePath: string,
     fromCommitSha: string,
   ): Promise<WorktreeDiffSummary>;
+  checkMergeReadiness(
+    repoPath: string,
+    targetBranch: string,
+    changeBranch: string,
+  ): Promise<RepoMergeReadinessResult>;
   cleanupOrphanWorktrees(repoPath: string): Promise<readonly string[]>;
 }

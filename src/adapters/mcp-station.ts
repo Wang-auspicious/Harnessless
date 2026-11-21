@@ -27,6 +27,7 @@ import type {
 
 interface ActiveAttemptContext extends McpAttemptRegistrationInput {
   readonly attemptToken: string;
+  retainCallCount: number;
   revoked: boolean;
 }
 
@@ -75,6 +76,48 @@ const MCP_TOOL_DEFINITIONS = [
         limit: {type: 'number'},
       },
       required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'forge_memory_recall',
+    description:
+      'Recall grounded engineering memories using 4-channel Hindsight retrieval (FTS5, Vector, Entity Graph, Temporal).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {type: 'string'},
+        limit: {type: 'number'},
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'forge_memory_reflect',
+    description:
+      'Synthesize an engineering answer from Living Docs and Hindsight observations separating confirmed facts from inferences.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question: {type: 'string'},
+      },
+      required: ['question'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'forge_memory_retain',
+    description:
+      'Record a concise L1_observed engineering discovery or constraint (capped at 5 calls per slice).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: {type: 'string'},
+        claim: {type: 'string'},
+        subjectKey: {type: 'string'},
+      },
+      required: ['title', 'claim'],
       additionalProperties: false,
     },
   },
@@ -190,14 +233,20 @@ export class McpStationServer implements IMcpStationServer {
   }
 
   async stop(): Promise<void> {
+    this.attempts.clear();
+    this.submissions.clear();
     const srv = this.server;
     this.server = null;
     if (!srv) {
       return;
     }
-    await new Promise<void>(resolvePromise => {
-      srv.close(() => resolvePromise());
-    });
+    await Promise.race([
+      new Promise<void>(resolvePromise => {
+        srv.close(() => resolvePromise());
+        srv.closeAllConnections?.();
+      }),
+      new Promise<void>(resolvePromise => setTimeout(resolvePromise, 2_000)),
+    ]);
   }
 
   registerAttempt(input: McpAttemptRegistrationInput): McpAttemptRegistration {
@@ -205,6 +254,7 @@ export class McpStationServer implements IMcpStationServer {
     const ctx: ActiveAttemptContext = {
       ...input,
       attemptToken,
+      retainCallCount: 0,
       revoked: false,
     };
     this.attempts.set(attemptToken, ctx);
@@ -217,6 +267,8 @@ export class McpStationServer implements IMcpStationServer {
         if (existing) {
           existing.revoked = true;
         }
+        this.attempts.delete(attemptToken);
+        this.submissions.delete(attemptToken);
       },
     };
   }
@@ -400,13 +452,17 @@ export class McpStationServer implements IMcpStationServer {
         return {path: relPath, content};
       }
 
-      case 'forge_memory_search': {
+      case 'forge_memory_search':
+      case 'forge_memory_recall': {
         const query =
           typeof args['query'] === 'string' ? args['query'].trim() : '';
         const limit =
           typeof args['limit'] === 'number' && args['limit'] > 0
             ? Math.min(25, Math.floor(args['limit']))
             : 8;
+        if (ctx.hindsight) {
+          return ctx.hindsight.recall(query, limit);
+        }
         const memories = this.store.searchActiveSemanticMemories(
           query,
           ctx.hubId,
@@ -422,6 +478,65 @@ export class McpStationServer implements IMcpStationServer {
             pathAnchors: m.pathAnchors,
           })),
         };
+      }
+
+      case 'forge_memory_reflect': {
+        const question =
+          typeof args['question'] === 'string' ? args['question'].trim() : '';
+        if (!question) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'forge_memory_reflect requires a non-empty "question"',
+            400,
+          );
+        }
+        if (ctx.hindsight) {
+          return ctx.hindsight.reflect(question);
+        }
+        return {
+          question,
+          answerMarkdown:
+            'Hindsight reflection bridge unavailable in isolated mode.',
+          confirmedFacts: [],
+          inferences: [],
+          contradictions: [],
+        };
+      }
+
+      case 'forge_memory_retain': {
+        if (ctx.retainCallCount >= 5) {
+          throw new ForgeError(
+            'POLICY_DENIED',
+            'forge_memory_retain rate limit reached (max 5 calls per slice)',
+            429,
+          );
+        }
+        const title =
+          typeof args['title'] === 'string' ? args['title'].trim() : '';
+        const claim =
+          typeof args['claim'] === 'string' ? args['claim'].trim() : '';
+        const subjectKey =
+          typeof args['subjectKey'] === 'string'
+            ? args['subjectKey'].trim()
+            : undefined;
+        if (!title || !claim) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'forge_memory_retain requires non-empty "title" and "claim"',
+            400,
+          );
+        }
+        ctx.retainCallCount += 1;
+        if (ctx.hindsight) {
+          return ctx.hindsight.retainObserved(title, claim, subjectKey);
+        }
+        const mem = this.store.recordSemanticMemory({
+          hubId: ctx.hubId,
+          kind: 'convention',
+          title,
+          summary: claim,
+        });
+        return {retainedId: mem.id, authorityTier: 'L1_observed'};
       }
 
       case 'forge_report_progress': {
@@ -527,7 +642,16 @@ export class McpStationServer implements IMcpStationServer {
   private readBody(req: IncomingMessage): Promise<string> {
     return new Promise<string>((resolvePromise, rejectPromise) => {
       const chunks: Buffer[] = [];
+      let total = 0;
       req.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > 2_097_152) {
+          req.destroy();
+          rejectPromise(
+            new ForgeError('VALIDATION_ERROR', 'MCP payload > 2MB', 413),
+          );
+          return;
+        }
         chunks.push(chunk);
       });
       req.on('end', () => {

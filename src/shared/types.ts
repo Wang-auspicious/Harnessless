@@ -3,6 +3,8 @@
  * Contains zero Node, filesystem, or DOM dependencies.
  */
 
+import type {ExecutionMode, FailureForensicsCard} from './v3-types.ts';
+
 export type PermissionTier = 'turbo' | 'supervised' | 'strict';
 export type RepoTier = 'infra' | 'service';
 export type AdapterTransport = 'acp-stdio' | 'cli-stream' | 'native-api';
@@ -65,6 +67,7 @@ export type ChangeStatus =
   | 'paused_human'
   | 'auditing'
   | 'certified'
+  | 'stale_upstream'
   | 'failed'
   | 'archived';
 
@@ -108,6 +111,14 @@ export interface ChangeRecord {
   readonly maxOvernightHours: number;
   readonly prematureStopCount: number;
   readonly cooldownUntil: string | null;
+  readonly missionId?: string | null;
+  readonly executionMode?: ExecutionMode;
+  readonly executionEpoch?: number;
+  readonly version?: number;
+  readonly dependsOnChangeIds?: readonly string[];
+  readonly upstreamContractShas?: Readonly<Record<string, string>>;
+  readonly linesAdded?: number;
+  readonly linesDeleted?: number;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -161,6 +172,12 @@ export interface GraphNode {
   readonly height: number;
   readonly outputSummary: string;
   readonly restoreTargetCheckpointId: string | null;
+  readonly requirementRefs?: readonly string[];
+  readonly acceptanceRefs?: readonly string[];
+  readonly planningRationale?: string;
+  readonly inputContract?: string;
+  readonly outputContract?: string;
+  readonly forensics?: FailureForensicsCard | null;
   readonly updatedAt: string;
 }
 
@@ -276,6 +293,7 @@ export interface AgentAdapterManifest {
   readonly supportedRoles: readonly AgentRole[];
   readonly maxConcurrentSlots: number;
   readonly builtIn: boolean;
+  readonly promptTransport?: 'arg' | 'stdin';
 }
 
 export type AdapterHealthState =

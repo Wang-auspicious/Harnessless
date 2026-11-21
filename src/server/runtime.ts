@@ -1,10 +1,3 @@
-/**
- * ForgeOps Host Composition Root (`ForgeRuntime`):
- * Wires SQLite+FTS5 Store, Secret Vault, Sandbox Runner, Git Worktree Manager,
- * Scoped `forge_station` MCP Server, Universal Adapter Hub, Continuity/Dreaming/
- * Steward Engines, Engineering Rooms, and Loopback HTTP+SSE Server.
- */
-
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {AgentAdapterHub, McpStationServer} from '../adapters/index.ts';
@@ -13,8 +6,12 @@ import {
   ContinuityEngine,
   DreamingEngine,
   InfraStewardEngine,
+  MissionOrchestrator,
+  OutboxWorker,
   RequirementClosureEngine,
 } from '../engines/index.ts';
+import {HindsightEngine} from '../memory/hindsight-engine.ts';
+import {HamaEngine} from '../requirements/hama-engine.ts';
 import {GitWorktreeManager, SandboxProcessRunner} from '../sandbox/index.ts';
 import type {ForgeSseEvent} from '../shared/api.ts';
 import {ForgeStore} from '../store/database.ts';
@@ -31,17 +28,22 @@ export interface ForgeRuntimeOptions {
 export class ForgeRuntime {
   readonly dataDir: string;
   readonly worktreesRoot: string;
+  readonly rootAbortController = new AbortController();
   readonly store: ForgeStore;
   readonly vault: HostSecretVault;
   readonly runner: SandboxProcessRunner;
   readonly worktrees: GitWorktreeManager;
   readonly mcpStation: McpStationServer;
   readonly adapters: AgentAdapterHub;
+  readonly hindsight: HindsightEngine;
+  readonly hama: HamaEngine;
   readonly closure: RequirementClosureEngine;
   readonly certifier: CompletionCertifier;
   readonly steward: InfraStewardEngine;
   readonly dreaming: DreamingEngine;
   readonly continuity: ContinuityEngine;
+  readonly outboxWorker: OutboxWorker;
+  readonly missions: MissionOrchestrator;
   readonly rooms: EngineeringRoomsService;
   readonly httpServer: ForgeHttpServer;
 
@@ -72,6 +74,7 @@ export class ForgeRuntime {
       this.httpServer.broadcast(ev);
     };
 
+    this.hindsight = new HindsightEngine(this.store);
     this.closure = new RequirementClosureEngine(
       this.store,
       this.worktrees,
@@ -90,7 +93,11 @@ export class ForgeRuntime {
       this.adapters,
       this.closure,
     );
-    this.dreaming = new DreamingEngine(this.store, this.worktrees);
+    this.dreaming = new DreamingEngine(
+      this.store,
+      this.worktrees,
+      this.hindsight,
+    );
     this.continuity = new ContinuityEngine({
       store: this.store,
       worktrees: this.worktrees,
@@ -99,6 +106,39 @@ export class ForgeRuntime {
       certifier: this.certifier,
       steward: this.steward,
       publish,
+      hindsight: this.hindsight,
+      rootSignal: this.rootAbortController.signal,
+    });
+    this.hama = new HamaEngine({
+      store: this.store,
+      adapters: this.adapters,
+      memory: {
+        recall: q => this.hindsight.recall(q),
+        retain: inp => this.hindsight.retain(inp),
+      },
+      publish,
+    });
+    this.outboxWorker = new OutboxWorker({
+      store: this.store,
+      hindsight: this.hindsight,
+      steward: this.steward,
+      publish,
+      signal: this.rootAbortController.signal,
+    });
+    this.missions = new MissionOrchestrator({
+      store: this.store,
+      worktrees: this.worktrees,
+      adapters: this.adapters,
+      hindsight: this.hindsight,
+      hama: this.hama,
+      closure: this.closure,
+      continuity: this.continuity,
+      steward: this.steward,
+      lookupProvider: model =>
+        this.vault.resolveProviderForModel(this.store, model),
+      worktreesRoot: this.worktreesRoot,
+      publish,
+      rootSignal: this.rootAbortController.signal,
     });
     this.rooms = new EngineeringRoomsService({
       store: this.store,
@@ -106,6 +146,8 @@ export class ForgeRuntime {
       closure: this.closure,
       publish,
       worktreesRoot: this.worktreesRoot,
+      hindsight: this.hindsight,
+      hama: this.hama,
     });
     this.httpServer = new ForgeHttpServer({
       store: this.store,
@@ -117,6 +159,9 @@ export class ForgeRuntime {
       steward: this.steward,
       dreaming: this.dreaming,
       rooms: this.rooms,
+      hindsight: this.hindsight,
+      hama: this.hama,
+      missions: this.missions,
       worktreesRoot: this.worktreesRoot,
       sessionToken: options.sessionToken,
     });
@@ -126,12 +171,12 @@ export class ForgeRuntime {
     await this.mcpStation.start();
     await this.httpServer.start();
     this.continuity.recoverInterruptedState();
+    this.outboxWorker.start();
 
     if (this.seedDemoOnEmpty && this.store.listHubs(true).length === 0) {
       await this.seedEnterpriseWorkspace();
     }
 
-    // Background non-blocking daemon loops
     const watchdogTimer = setInterval(() => {
       const d = this.store
         .getDaemons()
@@ -160,6 +205,24 @@ export class ForgeRuntime {
       clearInterval(timer);
     }
     this.daemonTimers.length = 0;
+
+    if (!this.rootAbortController.signal.aborted) {
+      this.rootAbortController.abort('shutdown');
+    }
+    await Promise.race([
+      Promise.allSettled([
+        this.continuity.abortAll(),
+        this.outboxWorker.stop(),
+      ]),
+      new Promise<void>(resolve => setTimeout(resolve, 3_000)),
+    ]);
+
+    for (const sess of this.store.listSessions({limit: 200})) {
+      if (sess.status === 'running') {
+        this.store.finishSession(sess.id, 'interrupted');
+      }
+    }
+
     await this.httpServer.stop();
     await this.mcpStation.stop();
     this.store.close();
@@ -258,6 +321,7 @@ export class ForgeRuntime {
     const chg = await this.closure.createAndPlanChange({
       hubId: hub.id,
       repoId: settlementRepo.id,
+      executionMode: 'simulation',
       title: 'Enforce Idempotent SettlementVoucher Reconciliation',
       summary:
         'Ensure duplicate settlement callbacks resolve deterministically against canonical SettlementVoucher keys without double-posting.',

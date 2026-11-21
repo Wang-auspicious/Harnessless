@@ -21,6 +21,13 @@ export interface HumanEntropyInputs {
 /**
  * Unseen autonomous mutation entropy accelerating mental-model staleness.
  */
+export function computeLinesEntropyContribution(
+  linesAdded: number,
+  linesDeleted: number,
+): number {
+  return Math.max(0, linesAdded) + Math.max(0, linesDeleted);
+}
+
 export function computeMutationEntropy(inputs: HumanEntropyInputs): number {
   const tasks = Math.max(0, inputs.tasksCertifiedSinceAnchor);
   const ghosts = Math.max(0, inputs.ghostAmendmentsSinceAnchor);

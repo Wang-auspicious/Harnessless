@@ -11,17 +11,31 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
+import {verifyEvidenceBundle} from '../core/canonical-json.ts';
 import {rankAttentionQueue} from '../core/cognitive.ts';
 import type {IAgentAdapterHub} from '../adapters/contracts.ts';
+import type {HindsightEngine} from '../memory/hindsight-engine.ts';
+import type {HamaEngine} from '../requirements/hama-engine.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import type {
   BootstrapSnapshot,
   ChangeDetailSnapshot,
+  CreateMissionRequest,
   ForgeSseEvent,
   MemoryObservatorySnapshot,
 } from '../shared/api.ts';
+import {
+  CONTROL_SCHEMA_REGISTRY,
+  INTENT_PRESETS,
+} from '../shared/control-schema.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {RepoTier} from '../shared/types.ts';
+import type {
+  ExecutionMode,
+  IntentPresetId,
+  MissionConfigOverrides,
+  TriageTrack,
+} from '../shared/v3-types.ts';
 import {
   asRecord,
   optNumber,
@@ -31,11 +45,14 @@ import {
   reqEnum,
   reqString,
   validateAdapterManifest,
+  validateControlCommand,
+  validateDecisionInput,
 } from '../shared/validation.ts';
 import type {ForgeStore} from '../store/database.ts';
 import type {ContinuityEngine} from '../engines/continuity.ts';
 import type {DreamingEngine} from '../engines/dreaming.ts';
 import type {InfraStewardEngine} from '../engines/infra-steward.ts';
+import type {MissionOrchestrator} from '../engines/mission-orchestrator.ts';
 import type {RequirementClosureEngine} from '../engines/requirement-closure.ts';
 import type {EngineeringRoomsService} from './rooms-service.ts';
 import type {HostSecretVault} from './secret-vault.ts';
@@ -56,6 +73,9 @@ export class ForgeHttpServer {
   private readonly steward: InfraStewardEngine;
   private readonly dreaming: DreamingEngine;
   private readonly rooms: EngineeringRoomsService;
+  private readonly hindsight?: HindsightEngine;
+  private readonly hama?: HamaEngine;
+  private readonly missions?: MissionOrchestrator;
   private readonly worktreesRoot: string;
 
   constructor(deps: {
@@ -68,6 +88,9 @@ export class ForgeHttpServer {
     readonly steward: InfraStewardEngine;
     readonly dreaming: DreamingEngine;
     readonly rooms: EngineeringRoomsService;
+    readonly hindsight?: HindsightEngine;
+    readonly hama?: HamaEngine;
+    readonly missions?: MissionOrchestrator;
     readonly worktreesRoot: string;
     readonly sessionToken?: string;
   }) {
@@ -81,6 +104,9 @@ export class ForgeHttpServer {
     this.steward = deps.steward;
     this.dreaming = deps.dreaming;
     this.rooms = deps.rooms;
+    this.hindsight = deps.hindsight;
+    this.hama = deps.hama;
+    this.missions = deps.missions;
     this.worktreesRoot = deps.worktreesRoot;
   }
 
@@ -128,7 +154,13 @@ export class ForgeHttpServer {
     }
     const srv = this.server;
     this.server = null;
-    await new Promise<void>(resolve => srv.close(() => resolve()));
+    await Promise.race([
+      new Promise<void>(resolve => {
+        srv.close(() => resolve());
+        srv.closeAllConnections?.();
+      }),
+      new Promise<void>(resolve => setTimeout(resolve, 2_000)),
+    ]);
   }
 
   broadcast(event: ForgeSseEvent): void {
@@ -156,7 +188,15 @@ export class ForgeHttpServer {
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const origin = req.headers.origin;
+    if (
+      origin &&
+      (origin === 'null' ||
+        /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(origin))
+    ) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.setHeader(
       'Access-Control-Allow-Headers',
       'Authorization, Content-Type',
@@ -795,6 +835,539 @@ export class ForgeHttpServer {
           enabled: Boolean(body['enabled']),
         });
         this.sendJson(res, 200, daemons);
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/schema/controls') {
+        this.sendJson(res, 200, {
+          presets: ['autopilot', 'guided', 'strict_audit'] as const,
+          controls: CONTROL_SCHEMA_REGISTRY,
+          policies: INTENT_PRESETS,
+        });
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/infra/outbox') {
+        const limit = Number.parseInt(
+          url.searchParams.get('limit') ?? '100',
+          10,
+        );
+        this.sendJson(
+          res,
+          200,
+          this.store.listOutboxEffects(
+            Number.isFinite(limit) && limit > 0 ? Math.min(limit, 250) : 100,
+          ),
+        );
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/missions') {
+        const hubId = url.searchParams.get('hubId') ?? undefined;
+        const includeArchived =
+          url.searchParams.get('includeArchived') === '1' ||
+          url.searchParams.get('includeArchived') === 'true';
+        this.sendJson(
+          res,
+          200,
+          this.store.missions.listMissions(hubId, includeArchived),
+        );
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/missions') {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const rawDocs = Array.isArray(body['documents'])
+          ? body['documents']
+          : [];
+        const documents = rawDocs.map((d, idx) => {
+          const rec = asRecord(d, `documents[${idx}]`);
+          return {
+            title: reqString(rec, 'title', 200),
+            content: reqString(rec, 'content', 65_536),
+          };
+        });
+        const cfgRaw =
+          body['configOverrides'] !== undefined
+            ? asRecord(body['configOverrides'], 'configOverrides')
+            : undefined;
+        const configOverrides: MissionConfigOverrides | undefined = cfgRaw
+          ? {
+              budgetUsdLimit:
+                cfgRaw['budgetUsdLimit'] !== undefined
+                  ? optNumber(cfgRaw, 'budgetUsdLimit', 25, 0.1, 10_000)
+                  : undefined,
+              maxOvernightHours:
+                cfgRaw['maxOvernightHours'] !== undefined
+                  ? optNumber(cfgRaw, 'maxOvernightHours', 8, 0.25, 72)
+                  : undefined,
+              maxParallelSlots:
+                cfgRaw['maxParallelSlots'] !== undefined
+                  ? Math.trunc(optNumber(cfgRaw, 'maxParallelSlots', 3, 1, 8))
+                  : undefined,
+              maxDiscussionRounds:
+                cfgRaw['maxDiscussionRounds'] !== undefined
+                  ? Math.trunc(
+                      optNumber(cfgRaw, 'maxDiscussionRounds', 3, 1, 6),
+                    )
+                  : undefined,
+              maxRevisions:
+                cfgRaw['maxRevisions'] !== undefined
+                  ? Math.trunc(optNumber(cfgRaw, 'maxRevisions', 3, 1, 10))
+                  : undefined,
+              maxLocalPrdEdits:
+                cfgRaw['maxLocalPrdEdits'] !== undefined
+                  ? Math.trunc(optNumber(cfgRaw, 'maxLocalPrdEdits', 5, 1, 20))
+                  : undefined,
+              leadAdapterId:
+                optString(cfgRaw, 'leadAdapterId', '') || undefined,
+              leadModel: optString(cfgRaw, 'leadModel', '') || undefined,
+              workerAdapterId:
+                optString(cfgRaw, 'workerAdapterId', '') || undefined,
+              workerModel: optString(cfgRaw, 'workerModel', '') || undefined,
+            }
+          : undefined;
+
+        const createReq: CreateMissionRequest = {
+          hubId: optString(body, 'hubId', '') || undefined,
+          repoIds: optStringArray(body, 'repoIds', 32),
+          repoPaths: optStringArray(body, 'repoPaths', 32),
+          projectId: optString(body, 'projectId', '') || undefined,
+          title: optString(body, 'title', '') || undefined,
+          rawIntent: reqString(body, 'rawIntent', 32_768),
+          documents,
+          preset:
+            body['preset'] !== undefined
+              ? reqEnum<IntentPresetId>(body, 'preset', [
+                  'autopilot',
+                  'guided',
+                  'strict_audit',
+                ])
+              : undefined,
+          executionMode:
+            body['executionMode'] !== undefined
+              ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                  'live',
+                  'simulation',
+                ])
+              : undefined,
+          triageTrack:
+            body['triageTrack'] !== undefined
+              ? reqEnum<TriageTrack>(body, 'triageTrack', [
+                  'express',
+                  'standard',
+                  'full_hama',
+                ])
+              : undefined,
+          parentBaselineId:
+            optString(body, 'parentBaselineId', '') || undefined,
+          configOverrides,
+        };
+        const created = await this.missions.createMission(createReq);
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'missions',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 201, created);
+        return;
+      }
+
+      const missionDetailMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
+      if (method === 'GET' && missionDetailMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        this.sendJson(
+          res,
+          200,
+          this.missions.getMissionDetail(missionDetailMatch[1]!),
+        );
+        return;
+      }
+
+      const missionFocusMatch = /^\/api\/missions\/([^/]+)\/focus$/.exec(path);
+      if (method === 'GET' && missionFocusMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        this.sendJson(
+          res,
+          200,
+          this.missions.getFocusProjection(missionFocusMatch[1]!),
+        );
+        return;
+      }
+
+      const missionDecisionMatch = /^\/api\/missions\/([^/]+)\/decisions$/.exec(
+        path,
+      );
+      if (method === 'POST' && missionDecisionMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const parsed = validateDecisionInput(await this.readJsonBody(req));
+        const out = await this.missions.resolveDecision(
+          missionDecisionMatch[1]!,
+          parsed,
+        );
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'missions',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, out);
+        return;
+      }
+
+      const missionControlMatch = /^\/api\/missions\/([^/]+)\/controls$/.exec(
+        path,
+      );
+      if (method === 'POST' && missionControlMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const parsed = validateControlCommand(await this.readJsonBody(req));
+        const out = await this.missions.executeControl(
+          missionControlMatch[1]!,
+          parsed,
+        );
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'missions',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, out);
+        return;
+      }
+
+      const missionHamaMatch = /^\/api\/missions\/([^/]+)\/hama$/.exec(path);
+      if (method === 'GET' && missionHamaMatch) {
+        if (!this.hama) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'HAMA engine unavailable',
+            500,
+          );
+        }
+        this.sendJson(res, 200, this.hama.getDetail(missionHamaMatch[1]!));
+        return;
+      }
+
+      const missionCommentMatch = /^\/api\/missions\/([^/]+)\/comments$/.exec(
+        path,
+      );
+      if (method === 'POST' && missionCommentMatch) {
+        if (!this.hama) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'HAMA engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const comment = this.hama.addComment(missionCommentMatch[1]!, {
+          scopeKey: reqString(body, 'scopeKey', 120),
+          paragraphRef: optString(body, 'paragraphRef', '', 160) || undefined,
+          authorKind:
+            body['authorKind'] !== undefined
+              ? reqEnum(body, 'authorKind', ['human', 'agent'] as const)
+              : 'human',
+          authorLabel: optString(body, 'authorLabel', 'operator', 120),
+          severity:
+            body['severity'] !== undefined
+              ? reqEnum(body, 'severity', ['blocking', 'advisory'] as const)
+              : 'advisory',
+          body: reqString(body, 'body', 8192),
+        });
+        this.sendJson(res, 201, comment);
+        return;
+      }
+
+      const resolveCommentMatch =
+        /^\/api\/missions\/([^/]+)\/comments\/([^/]+)\/disposition$/.exec(path);
+      if (method === 'POST' && resolveCommentMatch) {
+        if (!this.hama) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'HAMA engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const updated = this.hama.resolveComment(
+          resolveCommentMatch[1]!,
+          resolveCommentMatch[2]!,
+          {
+            disposition: reqEnum(body, 'disposition', [
+              'open',
+              'accepted',
+              'changed',
+              'rejected',
+              'deferred',
+            ] as const),
+            resolutionNote: optString(body, 'resolutionNote', '', 2048),
+            resolvedBy: optString(body, 'resolvedBy', 'human_operator', 120),
+            actorKind:
+              body['actorKind'] !== undefined
+                ? reqEnum(body, 'actorKind', ['human', 'agent'] as const)
+                : 'human',
+          },
+        );
+        this.sendJson(res, 200, updated);
+        return;
+      }
+
+      const readinessMatch = /^\/api\/missions\/([^/]+)\/readiness$/.exec(path);
+      if (method === 'GET' && readinessMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        this.sendJson(
+          res,
+          200,
+          await this.missions.checkDeliveryReadiness(readinessMatch[1]!),
+        );
+        return;
+      }
+
+      const evidenceMatch = /^\/api\/missions\/([^/]+)\/evidence$/.exec(path);
+      if (method === 'GET' && evidenceMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const bundle = await this.missions.exportEvidenceBundle(
+          evidenceMatch[1]!,
+        );
+        this.sendJson(res, 200, {
+          bundle,
+          verification: verifyEvidenceBundle(bundle),
+        });
+        return;
+      }
+
+      const baselineImpactMatch = /^\/api\/baselines\/([^/]+)\/impact$/.exec(
+        path,
+      );
+      if (method === 'GET' && baselineImpactMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const compareTo = url.searchParams.get('compareTo') ?? '';
+        if (!compareTo) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'Query parameter "compareTo" is required',
+          );
+        }
+        this.sendJson(
+          res,
+          200,
+          this.missions.compareBaselines(baselineImpactMatch[1]!, compareTo),
+        );
+        return;
+      }
+
+      const baselineMatch = /^\/api\/baselines\/([^/]+)$/.exec(path);
+      if (method === 'GET' && baselineMatch) {
+        const b = this.store.hama.getBaseline(baselineMatch[1]!);
+        if (!b) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Baseline "${baselineMatch[1]!}" not found`,
+            404,
+          );
+        }
+        this.sendJson(res, 200, b);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/memory/retain') {
+        if (!this.hindsight) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Hindsight engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const resRetain = this.hindsight.retain({
+          hubId: reqString(body, 'hubId', 80),
+          repoId: optString(body, 'repoId', '') || null,
+          missionId: optString(body, 'missionId', '') || null,
+          executionMode:
+            body['executionMode'] !== undefined
+              ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                  'live',
+                  'simulation',
+                ])
+              : 'live',
+          sourceType: reqString(body, 'sourceType', 80),
+          occurredAt: optString(body, 'occurredAt', '') || undefined,
+          rawText: reqString(body, 'rawText', 131_072),
+          authorityTier:
+            body['authorityTier'] !== undefined
+              ? reqEnum(body, 'authorityTier', [
+                  'L3_locked',
+                  'L2_verified',
+                  'L1_observed',
+                ] as const)
+              : undefined,
+        });
+        this.sendJson(res, 201, resRetain);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/memory/recall') {
+        if (!this.hindsight) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Hindsight engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const resRecall = this.hindsight.recall({
+          hubId: reqString(body, 'hubId', 80),
+          executionMode:
+            body['executionMode'] !== undefined
+              ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                  'live',
+                  'simulation',
+                ])
+              : 'live',
+          query: reqString(body, 'query', 2048),
+          limit:
+            body['limit'] !== undefined
+              ? Math.trunc(optNumber(body, 'limit', 8, 1, 50))
+              : undefined,
+          sinceIso: optString(body, 'sinceIso', '') || undefined,
+          untilIso: optString(body, 'untilIso', '') || undefined,
+          includeRejected: Boolean(body['includeRejected']),
+        });
+        this.sendJson(res, 200, resRecall);
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/memory/reflect') {
+        if (!this.hindsight) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Hindsight engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const resReflect = this.hindsight.reflect({
+          hubId: reqString(body, 'hubId', 80),
+          executionMode:
+            body['executionMode'] !== undefined
+              ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                  'live',
+                  'simulation',
+                ])
+              : 'live',
+          question: reqString(body, 'question', 2048),
+          limit:
+            body['limit'] !== undefined
+              ? Math.trunc(optNumber(body, 'limit', 8, 1, 50))
+              : undefined,
+        });
+        this.sendJson(res, 200, resReflect);
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/memory/living-docs') {
+        const hubId =
+          url.searchParams.get('hubId') ??
+          this.store.listHubs(false)[0]?.id ??
+          '';
+        const mode: ExecutionMode =
+          url.searchParams.get('executionMode') === 'simulation'
+            ? 'simulation'
+            : 'live';
+        this.sendJson(
+          res,
+          200,
+          hubId ? this.store.memory.listLivingDocs(hubId, mode) : [],
+        );
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/memory/observations') {
+        const hubId =
+          url.searchParams.get('hubId') ??
+          this.store.listHubs(false)[0]?.id ??
+          '';
+        const mode: ExecutionMode =
+          url.searchParams.get('executionMode') === 'simulation'
+            ? 'simulation'
+            : 'live';
+        const includeRetired = url.searchParams.get('includeRetired') === '1';
+        this.sendJson(
+          res,
+          200,
+          hubId
+            ? this.store.memory.listObservations(hubId, mode, includeRetired)
+            : [],
+        );
+        return;
+      }
+
+      if (method === 'GET' && path === '/api/memory/graph') {
+        const hubId =
+          url.searchParams.get('hubId') ??
+          this.store.listHubs(false)[0]?.id ??
+          '';
+        const mode: ExecutionMode =
+          url.searchParams.get('executionMode') === 'simulation'
+            ? 'simulation'
+            : 'live';
+        this.sendJson(
+          res,
+          200,
+          hubId
+            ? {
+                entities: this.store.memory.listEntities(hubId, mode),
+                edges: this.store.memory.listEdges(hubId, mode),
+              }
+            : {entities: [], edges: []},
+        );
         return;
       }
 

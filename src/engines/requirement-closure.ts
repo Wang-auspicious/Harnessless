@@ -13,6 +13,7 @@ import {
 } from '../core/ddd.ts';
 import {canAutoAdvanceGate} from '../core/policy.ts';
 import {compileTwinGraph, type PhaseBlueprint} from '../core/twin-graph.ts';
+import type {ChangeBlueprint} from '../core/spec-compiler.ts';
 import type {IAgentAdapterHub} from '../adapters/contracts.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import {ForgeError} from '../shared/errors.ts';
@@ -24,6 +25,7 @@ import type {
   PermissionTier,
   RepositoryEntry,
 } from '../shared/types.ts';
+import type {ExecutionMode} from '../shared/v3-types.ts';
 import {asRecord, optStringArray} from '../shared/validation.ts';
 import type {ForgeStore} from '../store/database.ts';
 
@@ -31,6 +33,10 @@ export interface CreateAndPlanChangeInput {
   readonly hubId: string;
   readonly repoId: string;
   readonly crossRepoEpicId?: string | null;
+  readonly missionId?: string | null;
+  readonly executionMode?: ExecutionMode;
+  readonly dependsOnChangeIds?: readonly string[];
+  readonly precompiledBlueprint?: ChangeBlueprint;
   readonly title: string;
   readonly summary: string;
   readonly permissionTier: PermissionTier;
@@ -77,14 +83,17 @@ export class RequirementClosureEngine {
       );
     }
 
-    const changeSeq = this.store.listChanges(hub.id, true).length + 1;
+    const changeSeq = this.store.nextSequence('change_code_seq');
     const code = `CHG-${String(changeSeq).padStart(3, '0')}`;
+    const changeId = `chg-${randomUUID().slice(0, 8)}`;
+    const executionMode: ExecutionMode = input.executionMode ?? 'live';
 
     const handle = await this.worktrees.provisionWorktree({
       repoPath: repo.localPath,
       worktreesRoot: input.worktreesRoot,
       repoId: repo.id,
       changeCode: code,
+      changeId,
       baseRef: repo.defaultBranch,
     });
 
@@ -116,23 +125,34 @@ export class RequirementClosureEngine {
       repo.boundedContext,
     );
 
-    const synthesized = await this.synthesizeSpecAndPhases({
-      hub,
-      repo,
-      siblingRepos,
-      dddMarkdown: renderUbiquitousLanguageSection(repoTerms),
-      title: input.title,
-      summary: input.summary,
-      team,
-      permissionTier: input.permissionTier,
-      cwd: handle.worktreePath,
-    });
+    const synthesized = input.precompiledBlueprint
+      ? {
+          specMarkdown: input.precompiledBlueprint.specMarkdown,
+          acceptanceCriteria: input.precompiledBlueprint.acceptanceCriteria,
+          phases: input.precompiledBlueprint.phases,
+        }
+      : await this.synthesizeSpecAndPhases({
+          hub,
+          repo,
+          siblingRepos,
+          dddMarkdown: renderUbiquitousLanguageSection(repoTerms),
+          title: input.title,
+          summary: input.summary,
+          team,
+          permissionTier: input.permissionTier,
+          executionMode,
+          cwd: handle.worktreePath,
+        });
 
     const nowIso = new Date().toISOString();
     const change = this.store.createChange({
+      id: changeId,
       hubId: hub.id,
       repoId: repo.id,
       crossRepoEpicId: input.crossRepoEpicId ?? null,
+      missionId: input.missionId ?? null,
+      executionMode,
+      dependsOnChangeIds: input.dependsOnChangeIds ?? [],
       code,
       title: input.title,
       summary: input.summary,
@@ -159,7 +179,9 @@ export class RequirementClosureEngine {
     this.store.saveTwinGraph(change.id, compiled.nodes, compiled.edges);
 
     const qualityScore = 0.91;
-    const autoG1 = canAutoAdvanceGate(input.permissionTier, 'G1', qualityScore);
+    const autoG1 =
+      Boolean(input.missionId) ||
+      canAutoAdvanceGate(input.permissionTier, 'G1', qualityScore);
     const finalStatus = autoG1 ? 'planned' : 'paused_human';
     const updated = this.store.updateChange(change.id, {
       qualityScore,
@@ -244,6 +266,7 @@ export class RequirementClosureEngine {
     readonly summary: string;
     readonly team: ChangeTeamConfig;
     readonly permissionTier: PermissionTier;
+    readonly executionMode: ExecutionMode;
     readonly cwd: string;
   }): Promise<{
     readonly specMarkdown: string;
@@ -268,7 +291,7 @@ export class RequirementClosureEngine {
       .listAdapterProfiles()
       .find(a => a.manifest.id === ctx.team.leadAdapterId)?.manifest;
 
-    if (leadAdapter) {
+    if (ctx.executionMode === 'live' && leadAdapter) {
       const sess = this.store.startSession({
         hubId: ctx.hub.id,
         adapterId: leadAdapter.id,
@@ -338,7 +361,15 @@ export class RequirementClosureEngine {
       }
     }
 
-    // Deterministic Hub-grounded specification & WBS blueprint fallback.
+    if (ctx.executionMode === 'live') {
+      throw new ForgeError(
+        'SETUP_REQUIRED',
+        'Live specification planning failed: configure a healthy Lead model provider or switch to simulation mode.',
+        412,
+      );
+    }
+
+    // Deterministic Hub-grounded specification & WBS blueprint fallback (simulation only).
     const specMarkdown = [
       `# Engineering Specification — ${ctx.title}`,
       '',

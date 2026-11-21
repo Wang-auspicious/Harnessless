@@ -3,6 +3,43 @@
  */
 
 import type {
+  ApprovedRequirementsBaseline,
+  BaselineImpactReport,
+  CommentDisposition,
+  ControlAvailability,
+  ControlCommandInput,
+  DecisionInput,
+  DecisionPacketSummary,
+  EvidenceBundle,
+  EvidenceVerificationResult,
+  ExecutionMode,
+  FocusExplainability,
+  FocusProgressivePanels,
+  HamaArtifactRecord,
+  HamaCommentRecord,
+  IntentPresetId,
+  MemoryEntityRecord,
+  MemoryEdgeRecord,
+  MemoryLivingDocRecord,
+  MemoryObservationRecord,
+  MemoryRecallQuery,
+  MemoryRecallResult,
+  MemoryReflectResult,
+  MergeReadinessReport,
+  MissionConfigOverrides,
+  MissionDecisionRecord,
+  MissionEventRecord,
+  MissionGateRecord,
+  MissionHealth,
+  MissionRecord,
+  MissionStage,
+  MissionStageStepSummary,
+  TrialSimulationReport,
+  TriageTrack,
+  ValidationReport,
+} from './v3-types.ts';
+import type {ControlSettingDescriptor} from './control-schema.ts';
+import type {
   AdapterOperationalProfile,
   AgentAdapterManifest,
   AttentionItem,
@@ -193,7 +230,163 @@ export type ForgeSseEvent =
   | {
       readonly type: 'audit.logged';
       readonly entry: AuditLedgerEntry;
+    }
+  | {
+      readonly type: 'mission.updated';
+      readonly missionId: string;
+      readonly status: string;
+      readonly stage: string;
+      readonly at: string;
+    }
+  | {
+      readonly type: 'gate.opened';
+      readonly missionId: string;
+      readonly gateId: string;
+      readonly kind: string;
+      readonly at: string;
+    }
+  | {
+      readonly type: 'gate.resolved';
+      readonly missionId: string;
+      readonly gateId: string;
+      readonly action: string;
+      readonly at: string;
+    }
+  | {
+      readonly type: 'memory.consolidated';
+      readonly hubId: string;
+      readonly executionMode: ExecutionMode;
+      readonly at: string;
     };
+
+export interface CreateMissionRequest {
+  readonly hubId?: string;
+  readonly repoIds?: readonly string[];
+  readonly repoPaths?: readonly string[];
+  readonly projectId?: string;
+  readonly title?: string;
+  readonly rawIntent: string;
+  readonly documents?: readonly {
+    readonly title: string;
+    readonly content: string;
+  }[];
+  readonly preset?: IntentPresetId;
+  readonly executionMode?: ExecutionMode;
+  readonly triageTrack?: TriageTrack;
+  readonly parentBaselineId?: string;
+  readonly configOverrides?: MissionConfigOverrides;
+}
+
+export interface FocusProjection {
+  readonly mission: MissionRecord;
+  readonly stage: MissionStage;
+  readonly stageSteps: readonly MissionStageStepSummary[];
+  readonly stageProgress?: {
+    readonly currentStepIndex: number;
+    readonly totalSteps: number;
+    readonly percentComplete: number;
+    readonly activeChangeCount: number;
+    readonly certifiedChangeCount: number;
+  };
+  readonly health: MissionHealth;
+  readonly rehydration: RehydrationCapsule | null;
+  readonly primaryAction: MissionGateRecord | null;
+  readonly pendingActionCount: number;
+  readonly secondaryActions: readonly DecisionPacketSummary[];
+  readonly availableControls: readonly ControlAvailability[];
+  readonly explainability: FocusExplainability;
+  readonly progressivePanels: FocusProgressivePanels;
+}
+
+export interface MissionDetailSnapshot {
+  readonly mission: MissionRecord;
+  readonly focus: FocusProjection;
+  readonly gates: readonly MissionGateRecord[];
+  readonly decisions: readonly MissionDecisionRecord[];
+  readonly changes: readonly ChangeRecord[];
+  readonly baseline: ApprovedRequirementsBaseline | null;
+  readonly validation: ValidationReport | null;
+  readonly trial: TrialSimulationReport | null;
+}
+
+export interface HamaDetailSnapshot {
+  readonly missionId: string;
+  readonly stage: string;
+  readonly proposalReworkCount: number;
+  readonly prdLocalEditCount: number;
+  readonly artifacts: readonly HamaArtifactRecord[];
+  readonly comments: readonly HamaCommentRecord[];
+  readonly prdMarkdown: string | null;
+  readonly baseline: ApprovedRequirementsBaseline | null;
+}
+
+export interface AddCommentRequest {
+  readonly scopeKey: string;
+  readonly paragraphRef?: string;
+  readonly authorKind?: 'human' | 'agent';
+  readonly authorLabel?: string;
+  readonly severity?: 'blocking' | 'advisory';
+  readonly body: string;
+}
+
+export interface ResolveCommentDispositionRequest {
+  readonly disposition: CommentDisposition;
+  readonly resolutionNote: string;
+  readonly resolvedBy: string;
+  readonly actorKind?: 'human' | 'agent';
+}
+
+export interface MemoryRetainRequest {
+  readonly hubId: string;
+  readonly repoId?: string | null;
+  readonly missionId?: string | null;
+  readonly executionMode?: ExecutionMode;
+  readonly sourceType: string;
+  readonly occurredAt?: string;
+  readonly rawText: string;
+  readonly authorityTier?: 'L3_locked' | 'L2_verified' | 'L1_observed';
+}
+
+export interface MemoryGraphSnapshot {
+  readonly entities: readonly MemoryEntityRecord[];
+  readonly edges: readonly MemoryEdgeRecord[];
+}
+
+export interface ControlSchemaResponse {
+  readonly presets: readonly IntentPresetId[];
+  readonly controls: readonly ControlSettingDescriptor[];
+  readonly policies?: Readonly<Record<IntentPresetId, unknown>>;
+}
+
+export interface BaselineImpactRequest {
+  readonly compareToBaselineId?: string;
+  readonly nextBaselineId?: string;
+}
+
+export interface MissionEvidenceResponse {
+  readonly bundle: EvidenceBundle;
+  readonly verification: EvidenceVerificationResult;
+}
+
+export interface MissionTraceabilityResponse {
+  readonly missionId: string;
+  readonly baseline: ApprovedRequirementsBaseline | null;
+  readonly changes: readonly ChangeRecord[];
+  readonly readiness: MergeReadinessReport | null;
+  readonly impact: BaselineImpactReport | null;
+}
+
+export type {
+  BaselineImpactReport,
+  ControlCommandInput,
+  DecisionInput,
+  MemoryLivingDocRecord,
+  MemoryObservationRecord,
+  MemoryRecallQuery,
+  MemoryRecallResult,
+  MemoryReflectResult,
+  MissionEventRecord,
+};
 
 export interface ForgePreloadBridge {
   readonly apiBaseUrl: string;

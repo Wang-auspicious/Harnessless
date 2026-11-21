@@ -170,6 +170,19 @@ export class InfraStewardEngine {
     ].join('\n');
 
     this.store.updateHubWiki(hub.id, compressedWiki);
+    this.store.memory.upsertLivingDoc({
+      hubId: hub.id,
+      repoId: repo.id,
+      executionMode: change.executionMode ?? 'live',
+      docKind: 'agent_wiki',
+      slug: 'agent-wiki',
+      title: `${hub.name} Agent-Wiki`,
+      standingQuestion: 'What is the current repository topology and DDD map?',
+      scopeEntities: allRepos.map(r => r.name),
+      contentMarkdown: compressedWiki,
+      citedObservationIds: [],
+      stale: false,
+    });
 
     // Record reusable architectural memory from this certified change.
     this.store.recordSemanticMemory({

@@ -4,6 +4,13 @@
 
 import {ForgeError} from './errors.ts';
 import type {
+  ControlAction,
+  ControlCommandInput,
+  DecisionAction,
+  DecisionInput,
+  IntentPresetId,
+} from './v3-types.ts';
+import type {
   AdapterTransport,
   AgentAdapterManifest,
   AgentRole,
@@ -277,17 +284,48 @@ export interface ValidatedAuditVerdict {
   readonly dddViolations: readonly string[];
 }
 
-/**
- * Fail-closed JSON audit parser: invalid, missing, or unparseable JSON
- * ALWAYS returns `{passed: false}` rather than silently passing.
- */
+export function extractBalancedJsonObject(raw: string): string | null {
+  const fenced = /```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```/i.exec(raw);
+  const text = (fenced?.[1] ?? raw).trim();
+  for (
+    let start = text.indexOf('{');
+    start >= 0;
+    start = text.indexOf('{', start + 1)
+  ) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i]!;
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+      } else if (ch === '{') {
+        depth += 1;
+      } else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return text.slice(start, i + 1);
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export function parseFailClosedAuditJson(text: string): ValidatedAuditVerdict {
   try {
-    const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-    const candidate = fenced?.[1]?.trim() ?? text.trim();
-    const start = candidate.indexOf('{');
-    const end = candidate.lastIndexOf('}');
-    if (start < 0 || end <= start) {
+    const jsonSlice = extractBalancedJsonObject(text);
+    if (!jsonSlice) {
       return {
         passed: false,
         score: 0,
@@ -295,7 +333,7 @@ export function parseFailClosedAuditJson(text: string): ValidatedAuditVerdict {
         dddViolations: [],
       };
     }
-    const parsed = asRecord(JSON.parse(candidate.slice(start, end + 1)));
+    const parsed = asRecord(JSON.parse(jsonSlice));
     if (typeof parsed['passed'] !== 'boolean') {
       return {
         passed: false,
@@ -327,4 +365,93 @@ export function parseFailClosedAuditJson(text: string): ValidatedAuditVerdict {
       dddViolations: [],
     };
   }
+}
+
+const DECISION_ACTIONS: readonly DecisionAction[] = [
+  'confirm_triage',
+  'clarify',
+  'resolve_issue',
+  'approve',
+  'conditional_approve',
+  'release_conditions',
+  'request_changes',
+  'confirm',
+  'reject',
+  'escalate',
+  'retry_review',
+  'approve_plan',
+  'approve_ghost',
+  'waive_ghost',
+  'resume',
+  'resync_upstream',
+  'extend_budget',
+  'hold',
+  'approve_delivery',
+  'switch_simulation',
+];
+
+const CONTROL_ACTIONS: readonly ControlAction[] = [
+  'start',
+  'pause',
+  'resume',
+  'retry_node',
+  'rewind_checkpoint',
+  'resync_upstream',
+  'amend_ghost',
+  'switch_preset',
+  'escalate_triage',
+  'evolve_baseline',
+  'abort',
+];
+
+const INTENT_PRESET_IDS: readonly IntentPresetId[] = [
+  'autopilot',
+  'guided',
+  'strict_audit',
+];
+
+export function validateDecisionInput(raw: unknown): DecisionInput {
+  const rec = asRecord(raw, 'decision');
+  return {
+    gateId: reqString(rec, 'gateId', 120),
+    targetId: reqString(rec, 'targetId', 120),
+    targetHash: reqString(rec, 'targetHash', 128),
+    idempotencyKey: reqString(rec, 'idempotencyKey', 128),
+    actor: optString(rec, 'actor', 'human_operator', 120),
+    action: reqEnum(rec, 'action', DECISION_ACTIONS),
+    feedback: optString(rec, 'feedback', '', 8192),
+    scope:
+      rec['scope'] !== undefined
+        ? reqEnum(rec, 'scope', ['local', 'proposal'] as const)
+        : 'proposal',
+    issueIds: optStringArray(rec, 'issueIds', 64),
+  };
+}
+
+export function validateControlCommand(raw: unknown): ControlCommandInput {
+  const rec = asRecord(raw, 'control command');
+  const action = reqEnum(rec, 'action', CONTROL_ACTIONS);
+  const expectedVersion =
+    rec['expectedVersion'] !== undefined
+      ? optNumber(rec, 'expectedVersion', 1, 1, 1_000_000)
+      : undefined;
+  const preset =
+    rec['preset'] !== undefined
+      ? reqEnum(rec, 'preset', INTENT_PRESET_IDS)
+      : undefined;
+  return {
+    action,
+    expectedVersion,
+    actor: optString(rec, 'actor', 'human_operator', 120),
+    nodeId: optString(rec, 'nodeId', '', 120) || undefined,
+    checkpointId: optString(rec, 'checkpointId', '', 120) || undefined,
+    changeId: optString(rec, 'changeId', '', 120) || undefined,
+    preset,
+    ghostTitle: optString(rec, 'ghostTitle', '', 160) || undefined,
+    ghostDescription: optString(rec, 'ghostDescription', '', 2048) || undefined,
+    insertBeforeNodeId:
+      optString(rec, 'insertBeforeNodeId', '', 120) || undefined,
+    gateCommand: optString(rec, 'gateCommand', '', 512) || undefined,
+    feedback: optString(rec, 'feedback', '', 4096) || undefined,
+  };
 }

@@ -13,6 +13,12 @@ export type ForgeErrorCode =
   | 'ADAPTER_UNAVAILABLE'
   | 'GATE_FAILED'
   | 'CONFLICT'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'MIGRATION_ERROR'
+  | 'SETUP_REQUIRED'
+  | 'BUDGET_EXCEEDED'
+  | 'STALE_EPOCH'
+  | 'ABORTED'
   | 'INTERNAL_ERROR';
 
 export class ForgeError extends Error {

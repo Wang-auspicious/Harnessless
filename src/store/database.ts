@@ -52,15 +52,29 @@ import {
   DEFAULT_DAEMONS,
   DEFAULT_MODEL_PROVIDERS,
   DEFAULT_SKILLS_BANK,
-  INITIAL_SCHEMA_SQL,
   SCHEMA_VERSION,
+  runSchemaMigrations,
 } from './schema.ts';
+import type {
+  EpistemicItemRecord,
+  ExecutionMode,
+  FailureForensicsCard,
+} from '../shared/v3-types.ts';
+import {HamaRepository} from './hama-repo.ts';
+import {MemoryRepository} from './memory-repo.ts';
+import {MissionRepository} from './mission-repo.ts';
+import type {StoreContext} from './repo-helpers.ts';
 
 export interface OutboxEffectRow {
   readonly id: string;
   readonly kind: string;
   readonly dedupeKey: string;
   readonly payloadJson: string;
+  readonly status: 'pending' | 'leased' | 'dead_letter';
+  readonly leaseToken: string | null;
+  readonly leasedUntil: string | null;
+  readonly payloadVersion: number;
+  readonly maxAttempts: number;
   readonly attempts: number;
   readonly nextDueAt: string;
   readonly lastError: string;
@@ -97,16 +111,30 @@ function parseJson<T>(raw: string, fallback: T): T {
 }
 
 export class ForgeStore {
-  private readonly db: DatabaseSync;
+  readonly db: DatabaseSync;
+  readonly missions: MissionRepository;
+  readonly hama: HamaRepository;
+  readonly memory: MemoryRepository;
   private txDepth = 0;
   private postCommitQueue: Array<() => void> = [];
+  private outboxWakeup: (() => void) | null = null;
 
   constructor(dbPath: string) {
     if (dbPath !== ':memory:') {
       mkdirSync(dirname(dbPath), {recursive: true});
     }
     this.db = new DatabaseSync(dbPath);
-    this.db.exec(INITIAL_SCHEMA_SQL);
+    runSchemaMigrations(this.db);
+
+    const ctx: StoreContext = {
+      db: this.db,
+      atomic: fn => this.atomic(fn),
+      afterCommit: cb => this.afterCommit(cb),
+      nextSequence: key => this.nextSequence(key),
+    };
+    this.missions = new MissionRepository(ctx);
+    this.hama = new HamaRepository(ctx);
+    this.memory = new MemoryRepository(ctx);
     this.seedDefaults();
   }
 
@@ -114,11 +142,11 @@ export class ForgeStore {
     this.db.close();
   }
 
-  /**
-   * Executes `fn` inside an atomic SQLite transaction (or nested savepoint).
-   * Registered `afterCommit` callbacks fire strictly after outermost commit.
-   */
-  atomic<T>(fn: () => T): T {
+  registerOutboxWakeup(cb: () => void): void {
+    this.outboxWakeup = cb;
+  }
+
+  atomic<T>(fn: () => T extends PromiseLike<unknown> ? never : T): T {
     const depth = this.txDepth;
     const sp = `sp_${depth}`;
     if (depth === 0) {
@@ -129,6 +157,17 @@ export class ForgeStore {
     this.txDepth += 1;
     try {
       const result = fn();
+      if (
+        result !== null &&
+        typeof result === 'object' &&
+        typeof (result as {readonly then?: unknown}).then === 'function'
+      ) {
+        throw new ForgeError(
+          'INTERNAL_ERROR',
+          'store.atomic() forbids async callbacks',
+          500,
+        );
+      }
       this.txDepth -= 1;
       if (this.txDepth === 0) {
         this.db.exec('COMMIT');
@@ -160,6 +199,15 @@ export class ForgeStore {
       }
       throw err;
     }
+  }
+
+  nextSequence(key: string): number {
+    return this.atomic(() => {
+      const cur = this.getMeta<number>(key) ?? 0;
+      const next = cur + 1;
+      this.setMeta(key, next);
+      return next;
+    });
   }
 
   afterCommit(cb: () => void): void {
@@ -627,6 +675,9 @@ export class ForgeStore {
     hubId: string;
     repoId: string;
     crossRepoEpicId?: string | null;
+    missionId?: string | null;
+    executionMode?: ExecutionMode;
+    dependsOnChangeIds?: readonly string[];
     code: string;
     title: string;
     summary: string;
@@ -647,14 +698,17 @@ export class ForgeStore {
     this.db
       .prepare(
         `INSERT INTO changes
-         (id, hub_id, repo_id, cross_repo_epic_id, code, title, summary, spec_markdown, status, permission_tier, worktree_path, git_branch, base_commit_sha, verify_command, acceptance_json, team_json, quality_score, budget_usd_limit, spent_usd, max_overnight_hours, premature_stop_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, 0, ?, ?)`,
+         (id, hub_id, repo_id, cross_repo_epic_id, mission_id, execution_mode, execution_epoch, version, depends_on_change_ids_json, upstream_contract_shas_json, lines_added, lines_deleted, code, title, summary, spec_markdown, status, permission_tier, worktree_path, git_branch, base_commit_sha, verify_command, acceptance_json, team_json, quality_score, budget_usd_limit, spent_usd, max_overnight_hours, premature_stop_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, '{}', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, 0, ?, ?)`,
       )
       .run(
         id,
         input.hubId,
         input.repoId,
         input.crossRepoEpicId ?? null,
+        input.missionId ?? null,
+        input.executionMode ?? 'live',
+        JSON.stringify(input.dependsOnChangeIds ?? []),
         input.code,
         input.title,
         input.summary,
@@ -695,6 +749,168 @@ export class ForgeStore {
     sql += ' ORDER BY updated_at DESC';
     const rows = this.db.prepare(sql).all(...params) as SqlRow[];
     return rows.map(r => this.mapChange(r));
+  }
+
+  listChangesForMission(missionId: string): ChangeRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM changes WHERE mission_id = ? AND status != 'archived' ORDER BY created_at ASC",
+      )
+      .all(missionId) as SqlRow[];
+    return rows.map(r => this.mapChange(r));
+  }
+
+  addChangeCostAtomic(
+    changeId: string,
+    deltaUsd: number,
+    linesAdded = 0,
+    linesDeleted = 0,
+  ): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE changes SET
+           spent_usd = ROUND(spent_usd + ?, 6),
+           lines_added = CASE WHEN ? > 0 THEN ? ELSE lines_added END,
+           lines_deleted = CASE WHEN ? > 0 THEN ? ELSE lines_deleted END,
+           version = version + 1,
+           updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        Math.max(0, deltaUsd),
+        linesAdded,
+        linesAdded,
+        linesDeleted,
+        linesDeleted,
+        now,
+        changeId,
+      );
+  }
+
+  updateChangeDiffStatsAtomic(
+    changeId: string,
+    linesAdded: number,
+    linesDeleted: number,
+  ): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        'UPDATE changes SET lines_added = ?, lines_deleted = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(Math.max(0, linesAdded), Math.max(0, linesDeleted), now, changeId);
+  }
+
+  incrementPrematureStopAtomic(changeId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        'UPDATE changes SET premature_stop_count = premature_stop_count + 1, version = version + 1, updated_at = ? WHERE id = ?',
+      )
+      .run(now, changeId);
+  }
+
+  bumpChangeQualityMaxAtomic(changeId: string, score: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        'UPDATE changes SET quality_score = MAX(quality_score, ?), version = version + 1, updated_at = ? WHERE id = ?',
+      )
+      .run(score, now, changeId);
+  }
+
+  updateChangeStatusCas(
+    changeId: string,
+    expectedEpoch: number,
+    patch: {
+      readonly status: ChangeStatus;
+      readonly cooldownUntil?: string | null;
+      readonly qualityScore?: number;
+      readonly acceptanceCriteria?: readonly AcceptanceCriterion[];
+    },
+  ): boolean {
+    return this.atomic(() => {
+      const cur = this.getChange(changeId);
+      if (!cur || (cur.executionEpoch ?? 1) !== expectedEpoch) {
+        return false;
+      }
+      const now = new Date().toISOString();
+      const res = this.db
+        .prepare(
+          `UPDATE changes SET
+             status = ?,
+             cooldown_until = ?,
+             quality_score = ?,
+             acceptance_json = ?,
+             version = version + 1,
+             updated_at = ?
+           WHERE id = ? AND execution_epoch = ?`,
+        )
+        .run(
+          patch.status,
+          patch.cooldownUntil !== undefined
+            ? patch.cooldownUntil
+            : cur.cooldownUntil,
+          patch.qualityScore !== undefined
+            ? Math.max(cur.qualityScore, patch.qualityScore)
+            : cur.qualityScore,
+          JSON.stringify(patch.acceptanceCriteria ?? cur.acceptanceCriteria),
+          now,
+          changeId,
+          expectedEpoch,
+        );
+      return res.changes === 1;
+    });
+  }
+
+  bumpChangeEpochAtomic(changeId: string): number {
+    return this.atomic(() => {
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          'UPDATE changes SET execution_epoch = execution_epoch + 1, version = version + 1, updated_at = ? WHERE id = ?',
+        )
+        .run(now, changeId);
+      return this.getChange(changeId)?.executionEpoch ?? 1;
+    });
+  }
+
+  updateChangeUpstreamShas(
+    changeId: string,
+    upstreamContractShas: Readonly<Record<string, string>>,
+  ): void {
+    this.db
+      .prepare(
+        'UPDATE changes SET upstream_contract_shas_json = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(
+        JSON.stringify(upstreamContractShas),
+        new Date().toISOString(),
+        changeId,
+      );
+  }
+
+  getTotalChangeLinesForHub(
+    hubId: string,
+    executionMode?: ExecutionMode,
+  ): {readonly linesAdded: number; readonly linesDeleted: number} {
+    const row = (
+      executionMode
+        ? this.db
+            .prepare(
+              "SELECT COALESCE(SUM(lines_added), 0) AS add_sum, COALESCE(SUM(lines_deleted), 0) AS del_sum FROM changes WHERE hub_id = ? AND execution_mode = ? AND status != 'archived'",
+            )
+            .get(hubId, executionMode)
+        : this.db
+            .prepare(
+              "SELECT COALESCE(SUM(lines_added), 0) AS add_sum, COALESCE(SUM(lines_deleted), 0) AS del_sum FROM changes WHERE hub_id = ? AND status != 'archived'",
+            )
+            .get(hubId)
+    ) as SqlRow;
+    return {
+      linesAdded: num(row, 'add_sum'),
+      linesDeleted: num(row, 'del_sum'),
+    };
   }
 
   updateChange(
@@ -800,6 +1016,21 @@ export class ForgeStore {
       maxOvernightHours: num(row, 'max_overnight_hours'),
       prematureStopCount: num(row, 'premature_stop_count'),
       cooldownUntil: nullableStr(row, 'cooldown_until'),
+      missionId: nullableStr(row, 'mission_id'),
+      executionMode: (nullableStr(row, 'execution_mode') ??
+        'live') as ExecutionMode,
+      executionEpoch: row['execution_epoch'] ? num(row, 'execution_epoch') : 1,
+      version: row['version'] ? num(row, 'version') : 1,
+      dependsOnChangeIds: parseJson<string[]>(
+        str(row, 'depends_on_change_ids_json') || '[]',
+        [],
+      ),
+      upstreamContractShas: parseJson<Record<string, string>>(
+        str(row, 'upstream_contract_shas_json') || '{}',
+        {},
+      ),
+      linesAdded: num(row, 'lines_added'),
+      linesDeleted: num(row, 'lines_deleted'),
       createdAt: str(row, 'created_at'),
       updatedAt: str(row, 'updated_at'),
     };
@@ -820,8 +1051,8 @@ export class ForgeStore {
 
       const insNode = this.db.prepare(`
         INSERT INTO graph_nodes
-        (id, change_id, code, parent_wbs_id, container_node_id, kind, title, description, file_scope_json, gate_command, assigned_role, assigned_adapter_id, assigned_model, status, attempt_count, max_attempts, collapsed, position_x, position_y, width, height, output_summary, restore_target_checkpoint_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, change_id, code, parent_wbs_id, container_node_id, kind, title, description, file_scope_json, gate_command, assigned_role, assigned_adapter_id, assigned_model, status, attempt_count, max_attempts, collapsed, position_x, position_y, width, height, output_summary, restore_target_checkpoint_id, requirement_refs_json, acceptance_refs_json, planning_rationale, input_contract, output_contract, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const n of nodes) {
         insNode.run(
@@ -848,6 +1079,11 @@ export class ForgeStore {
           n.height,
           n.outputSummary,
           n.restoreTargetCheckpointId,
+          JSON.stringify(n.requirementRefs ?? []),
+          JSON.stringify(n.acceptanceRefs ?? []),
+          n.planningRationale ?? '',
+          n.inputContract ?? '',
+          n.outputContract ?? '',
           n.updatedAt,
         );
       }
@@ -866,6 +1102,70 @@ export class ForgeStore {
           e.label,
         );
       }
+    });
+  }
+
+  spliceGhostNodeAtomic(
+    changeId: string,
+    ghostNode: GraphNode,
+    targetNodeId: string,
+    linkKind: GraphEdge['kind'],
+  ): void {
+    this.atomic(() => {
+      this.db
+        .prepare(
+          `INSERT INTO graph_nodes
+           (id, change_id, code, parent_wbs_id, container_node_id, kind, title, description, file_scope_json, gate_command, assigned_role, assigned_adapter_id, assigned_model, status, attempt_count, max_attempts, collapsed, position_x, position_y, width, height, output_summary, restore_target_checkpoint_id, requirement_refs_json, acceptance_refs_json, planning_rationale, input_contract, output_contract, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          ghostNode.id,
+          changeId,
+          ghostNode.code,
+          ghostNode.parentWbsId,
+          ghostNode.containerNodeId,
+          ghostNode.kind,
+          ghostNode.title,
+          ghostNode.description,
+          JSON.stringify(ghostNode.fileScope),
+          ghostNode.gateCommand,
+          ghostNode.assignedRole,
+          ghostNode.assignedAdapterId,
+          ghostNode.assignedModel,
+          ghostNode.status,
+          ghostNode.attemptCount,
+          ghostNode.maxAttempts,
+          ghostNode.collapsed ? 1 : 0,
+          ghostNode.positionX,
+          ghostNode.positionY,
+          ghostNode.width,
+          ghostNode.height,
+          ghostNode.outputSummary,
+          ghostNode.restoreTargetCheckpointId,
+          JSON.stringify(ghostNode.requirementRefs ?? []),
+          JSON.stringify(ghostNode.acceptanceRefs ?? []),
+          ghostNode.planningRationale ?? '',
+          ghostNode.inputContract ?? '',
+          ghostNode.outputContract ?? '',
+          ghostNode.updatedAt,
+        );
+      this.db
+        .prepare(
+          "UPDATE graph_edges SET target_node_id = ? WHERE change_id = ? AND kind != 'fail' AND target_node_id = ?",
+        )
+        .run(ghostNode.id, changeId, targetNodeId);
+      this.db
+        .prepare(
+          'INSERT INTO graph_edges (id, change_id, source_node_id, target_node_id, kind, label) VALUES (?, ?, ?, ?, ?, ?)',
+        )
+        .run(
+          `edge-${randomUUID().slice(0, 12)}`,
+          changeId,
+          ghostNode.id,
+          targetNodeId,
+          linkKind,
+          'AMEND',
+        );
     });
   }
 
@@ -899,7 +1199,100 @@ export class ForgeStore {
       height: num(rowOrEmpty(r), 'height'),
       outputSummary: str(r, 'output_summary'),
       restoreTargetCheckpointId: nullableStr(r, 'restore_target_checkpoint_id'),
+      requirementRefs: parseJson<string[]>(
+        str(r, 'requirement_refs_json') || '[]',
+        [],
+      ),
+      acceptanceRefs: parseJson<string[]>(
+        str(r, 'acceptance_refs_json') || '[]',
+        [],
+      ),
+      planningRationale: str(r, 'planning_rationale'),
+      inputContract: str(r, 'input_contract'),
+      outputContract: str(r, 'output_contract'),
       updatedAt: str(r, 'updated_at'),
+    }));
+  }
+
+  updateNodeForensics(
+    nodeId: string,
+    forensics: FailureForensicsCard | null,
+  ): void {
+    this.db
+      .prepare(
+        'UPDATE graph_nodes SET forensics_json = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(
+        forensics ? JSON.stringify(forensics) : null,
+        new Date().toISOString(),
+        nodeId,
+      );
+  }
+
+  appendEpistemicItem(input: {
+    changeId: string;
+    nodeId?: string | null;
+    executionEpoch: number;
+    kind: EpistemicItemRecord['kind'];
+    content: string;
+    evidenceRef?: string | null;
+  }): EpistemicItemRecord {
+    const id = `epi-${randomUUID().slice(0, 10)}`;
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO change_epistemic_items
+         (id, change_id, node_id, execution_epoch, kind, content, evidence_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.changeId,
+        input.nodeId ?? null,
+        input.executionEpoch,
+        input.kind,
+        input.content,
+        input.evidenceRef ?? null,
+        now,
+      );
+    return {
+      id,
+      changeId: input.changeId,
+      nodeId: input.nodeId ?? null,
+      executionEpoch: input.executionEpoch,
+      kind: input.kind,
+      content: input.content,
+      evidenceRef: input.evidenceRef ?? null,
+      createdAt: now,
+    };
+  }
+
+  listEpistemicItems(
+    changeId: string,
+    executionEpoch?: number,
+  ): EpistemicItemRecord[] {
+    const rows = (
+      executionEpoch !== undefined
+        ? this.db
+            .prepare(
+              'SELECT * FROM change_epistemic_items WHERE change_id = ? AND execution_epoch = ? ORDER BY created_at ASC',
+            )
+            .all(changeId, executionEpoch)
+        : this.db
+            .prepare(
+              'SELECT * FROM change_epistemic_items WHERE change_id = ? ORDER BY created_at ASC',
+            )
+            .all(changeId)
+    ) as SqlRow[];
+    return rows.map(r => ({
+      id: str(r, 'id'),
+      changeId: str(r, 'change_id'),
+      nodeId: nullableStr(r, 'node_id'),
+      executionEpoch: num(r, 'execution_epoch'),
+      kind: str(r, 'kind') as EpistemicItemRecord['kind'],
+      content: str(r, 'content'),
+      evidenceRef: nullableStr(r, 'evidence_ref'),
+      createdAt: str(r, 'created_at'),
     }));
   }
 
@@ -1888,51 +2281,105 @@ export class ForgeStore {
     dedupeKey: string,
     payload: unknown,
     delayMs = 0,
+    maxAttempts = 5,
   ): void {
     const nowMs = Date.now();
     const dueIso = new Date(nowMs + Math.max(0, delayMs)).toISOString();
     const nowIso = new Date(nowMs).toISOString();
     this.db
       .prepare(
-        `INSERT INTO effects_outbox (id, kind, dedupe_key, payload_json, attempts, next_due_at, last_error, created_at)
-         VALUES (?, ?, ?, ?, 0, ?, '', ?)
+        `INSERT INTO effects_outbox (id, kind, dedupe_key, payload_json, status, lease_token, leased_until, payload_version, max_attempts, attempts, next_due_at, last_error, created_at)
+         VALUES (?, ?, ?, ?, 'pending', NULL, NULL, 1, ?, 0, ?, '', ?)
          ON CONFLICT(dedupe_key) DO UPDATE SET
            payload_json = excluded.payload_json,
-           next_due_at = excluded.next_due_at`,
+           payload_version = effects_outbox.payload_version + 1,
+           next_due_at = excluded.next_due_at,
+           max_attempts = excluded.max_attempts,
+           status = CASE WHEN effects_outbox.status = 'dead_letter' THEN 'pending' ELSE effects_outbox.status END,
+           attempts = CASE WHEN effects_outbox.status = 'dead_letter' THEN 0 ELSE effects_outbox.attempts END`,
       )
       .run(
         `eff-${randomUUID().slice(0, 10)}`,
         kind,
         dedupeKey,
         JSON.stringify(payload),
+        maxAttempts,
         dueIso,
         nowIso,
       );
+    if (this.outboxWakeup) {
+      const wake = this.outboxWakeup;
+      this.afterCommit(() => wake());
+    }
   }
 
   claimDueEffects(
     nowIso = new Date().toISOString(),
     limit = 10,
+    leaseMs = 60_000,
   ): OutboxEffectRow[] {
-    const rows = this.db
-      .prepare(
-        'SELECT * FROM effects_outbox WHERE next_due_at <= ? ORDER BY next_due_at ASC LIMIT ?',
-      )
-      .all(nowIso, limit) as SqlRow[];
-    return rows.map(r => ({
-      id: str(r, 'id'),
-      kind: str(r, 'kind'),
-      dedupeKey: str(r, 'dedupe_key'),
-      payloadJson: str(r, 'payload_json'),
-      attempts: num(r, 'attempts'),
-      nextDueAt: str(r, 'next_due_at'),
-      lastError: str(r, 'last_error'),
-      createdAt: str(r, 'created_at'),
-    }));
+    return this.atomic(() => {
+      const candidates = this.db
+        .prepare(
+          `SELECT * FROM effects_outbox
+           WHERE (status = 'pending' AND next_due_at <= ?)
+              OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?)
+           ORDER BY next_due_at ASC LIMIT ?`,
+        )
+        .all(nowIso, nowIso, limit) as SqlRow[];
+      if (candidates.length === 0) {
+        return [];
+      }
+      const leasedUntil = new Date(Date.parse(nowIso) + leaseMs).toISOString();
+      const upd = this.db.prepare(
+        "UPDATE effects_outbox SET status = 'leased', lease_token = ?, leased_until = ? WHERE id = ?",
+      );
+      return candidates.map(r => {
+        const id = str(r, 'id');
+        const leaseToken = `lease-${randomUUID().slice(0, 10)}`;
+        upd.run(leaseToken, leasedUntil, id);
+        return {
+          id,
+          kind: str(r, 'kind'),
+          dedupeKey: str(r, 'dedupe_key'),
+          payloadJson: str(r, 'payload_json'),
+          status: 'leased',
+          leaseToken,
+          leasedUntil,
+          payloadVersion: r['payload_version'] ? num(r, 'payload_version') : 1,
+          maxAttempts: r['max_attempts'] ? num(r, 'max_attempts') : 5,
+          attempts: num(r, 'attempts'),
+          nextDueAt: str(r, 'next_due_at'),
+          lastError: str(r, 'last_error'),
+          createdAt: str(r, 'created_at'),
+        };
+      });
+    });
   }
 
-  completeEffect(id: string): void {
-    this.db.prepare('DELETE FROM effects_outbox WHERE id = ?').run(id);
+  completeEffect(
+    id: string,
+    leaseToken?: string,
+    expectedVersion?: number,
+  ): void {
+    if (!leaseToken || expectedVersion === undefined) {
+      this.db.prepare('DELETE FROM effects_outbox WHERE id = ?').run(id);
+      return;
+    }
+    this.atomic(() => {
+      const del = this.db
+        .prepare(
+          'DELETE FROM effects_outbox WHERE id = ? AND lease_token = ? AND payload_version = ?',
+        )
+        .run(id, leaseToken, expectedVersion);
+      if (del.changes === 0) {
+        this.db
+          .prepare(
+            "UPDATE effects_outbox SET status = 'pending', lease_token = NULL, leased_until = NULL, next_due_at = ? WHERE id = ? AND lease_token = ?",
+          )
+          .run(new Date().toISOString(), id, leaseToken);
+      }
+    });
   }
 
   rescheduleEffect(
@@ -1940,13 +2387,55 @@ export class ForgeStore {
     attempts: number,
     backoffMs: number,
     errorMsg: string,
+    leaseToken?: string,
   ): void {
+    const row = this.db
+      .prepare(
+        'SELECT max_attempts, lease_token FROM effects_outbox WHERE id = ?',
+      )
+      .get(id) as SqlRow | undefined;
+    if (!row) {
+      return;
+    }
+    if (leaseToken && nullableStr(row, 'lease_token') !== leaseToken) {
+      return;
+    }
+    const maxAttempts = row['max_attempts'] ? num(row, 'max_attempts') : 5;
+    const isDead = attempts >= maxAttempts;
     const nextIso = new Date(Date.now() + backoffMs).toISOString();
     this.db
       .prepare(
-        'UPDATE effects_outbox SET attempts = ?, next_due_at = ?, last_error = ? WHERE id = ?',
+        'UPDATE effects_outbox SET status = ?, lease_token = NULL, leased_until = NULL, attempts = ?, next_due_at = ?, last_error = ? WHERE id = ?',
       )
-      .run(attempts, nextIso, errorMsg.slice(0, 1024), id);
+      .run(
+        isDead ? 'dead_letter' : 'pending',
+        attempts,
+        nextIso,
+        errorMsg.slice(0, 1024),
+        id,
+      );
+  }
+
+  listOutboxEffects(limit = 50): OutboxEffectRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM effects_outbox ORDER BY created_at DESC LIMIT ?')
+      .all(limit) as SqlRow[];
+    return rows.map(r => ({
+      id: str(r, 'id'),
+      kind: str(r, 'kind'),
+      dedupeKey: str(r, 'dedupe_key'),
+      payloadJson: str(r, 'payload_json'),
+      status: (nullableStr(r, 'status') ??
+        'pending') as OutboxEffectRow['status'],
+      leaseToken: nullableStr(r, 'lease_token'),
+      leasedUntil: nullableStr(r, 'leased_until'),
+      payloadVersion: r['payload_version'] ? num(r, 'payload_version') : 1,
+      maxAttempts: r['max_attempts'] ? num(r, 'max_attempts') : 5,
+      attempts: num(r, 'attempts'),
+      nextDueAt: str(r, 'next_due_at'),
+      lastError: str(r, 'last_error'),
+      createdAt: str(r, 'created_at'),
+    }));
   }
 
   appendAudit(input: {

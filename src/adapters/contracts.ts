@@ -9,9 +9,11 @@ import type {
   AgentRole,
   AttentionItem,
   GraphNode,
+  ModelCatalogEntry,
   PermissionTier,
   SlotLoadSnapshot,
 } from '../shared/types.ts';
+import type {ExecutionMode} from '../shared/v3-types.ts';
 
 export interface McpSubmissionPayload {
   readonly summary: string;
@@ -21,12 +23,21 @@ export interface McpSubmissionPayload {
   readonly certifiedCriteriaIds: readonly string[];
 }
 
+export interface McpHindsightBridge {
+  recall(query: string, limit?: number): unknown;
+  reflect(question: string): unknown;
+  retainObserved(title: string, claim: string, subjectKey?: string): unknown;
+}
+
 export interface McpAttemptRegistrationInput {
   readonly hubId: string;
   readonly changeId: string;
   readonly nodeId: string;
   readonly worktreePath: string;
   readonly contractMarkdown: string;
+  readonly executionMode?: ExecutionMode;
+  readonly fileScope?: readonly string[];
+  readonly hindsight?: McpHindsightBridge;
   readonly onProgress?: (summary: string) => void;
   readonly onAskHuman?: (
     question: string,
@@ -60,6 +71,7 @@ export interface ProviderSecretResolved {
   readonly protocol: 'openai-compatible' | 'anthropic-messages';
   readonly baseUrl: string;
   readonly apiKey: string | null;
+  readonly models?: readonly ModelCatalogEntry[];
 }
 
 export type ProviderSecretLookup = (
@@ -74,15 +86,22 @@ export interface AgentInvocationRequest {
   readonly role: AgentRole;
   readonly adapter: AgentAdapterManifest;
   readonly model: string;
+  readonly providerId?: string;
   readonly permissionTier: PermissionTier;
   readonly cwd: string;
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly readOnly: boolean;
+  readonly textOnly?: boolean;
+  readonly maxOutputTokens?: number;
+  readonly maxToolTurns?: number;
+  readonly fileScope?: readonly string[];
+  readonly cacheStablePrefix?: boolean;
   readonly mcpEndpointUrl?: string;
   readonly mcpAttemptToken?: string;
   readonly timeoutMs?: number;
   readonly prioritySlot?: boolean;
+  readonly signal?: AbortSignal;
   readonly onChunk?: (
     role: 'assistant' | 'tool',
     content: string,

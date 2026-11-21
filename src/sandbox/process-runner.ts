@@ -4,8 +4,21 @@
  */
 
 import {spawn} from 'node:child_process';
-import {accessSync, constants, statSync} from 'node:fs';
-import {delimiter, extname, isAbsolute, join, resolve} from 'node:path';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
+import {
+  delimiter,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  resolve,
+} from 'node:path';
 import {findBlockedCommandViolation} from '../core/policy.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {
@@ -32,6 +45,21 @@ function isExecutableFile(filePath: string): boolean {
   }
 }
 
+function unwrapWindowsNpmCmdTarget(cmdPath: string): string | null {
+  try {
+    const content = readFileSync(cmdPath, 'utf8');
+    const match =
+      /"%(?:dp0|~dp0)%[\\/]([^"\r\n]+?\.(?:c?m?js))"/i.exec(content) ??
+      /"%~dp0([^"\r\n]+?\.(?:c?m?js))"/i.exec(content);
+    if (!match?.[1]) {
+      return null;
+    }
+    const candidate = resolve(dirname(cmdPath), match[1]);
+    return existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
 function getWindowsPathExts(): string[] {
   const raw = process.env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD';
   const exts = raw
@@ -303,17 +331,23 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
     let spawnArgs: string[] = [...options.args];
 
     if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolved)) {
-      for (const part of [resolved, ...options.args]) {
-        if (/[\r\n\0]/.test(part)) {
-          throw new ForgeError(
-            'POLICY_DENIED',
-            'POLICY_BLOCKED: Control characters rejected in batch command invocation',
-            403,
-          );
+      const nodeScript = unwrapWindowsNpmCmdTarget(resolved);
+      if (nodeScript) {
+        spawnFile = process.execPath;
+        spawnArgs = [nodeScript, ...options.args];
+      } else {
+        for (const part of [resolved, ...options.args]) {
+          if (/[&|<>^%!\r\n\0]/.test(part)) {
+            throw new ForgeError(
+              'POLICY_DENIED',
+              'POLICY_BLOCKED: Shell metacharacters rejected in batch invocation',
+              403,
+            );
+          }
         }
+        spawnFile = process.env['ComSpec'] || 'cmd.exe';
+        spawnArgs = ['/d', '/s', '/c', resolved, ...options.args];
       }
-      spawnFile = process.env['ComSpec'] || 'cmd.exe';
-      spawnArgs = ['/d', '/s', '/c', resolved, ...options.args];
     }
 
     const env = buildScrubbedEnvironment(
@@ -433,6 +467,7 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
     cwd: string,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     blockedPatterns: readonly string[] = [],
+    signal?: AbortSignal,
   ): Promise<ProcessRunResult> {
     const rawViolation = findBlockedCommandViolation(
       [commandLine],
@@ -470,6 +505,7 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
         cwd,
         timeoutMs: remainingTimeout,
         blockedCommandPatterns: blockedPatterns,
+        signal,
       });
 
       if (res.stdout) {

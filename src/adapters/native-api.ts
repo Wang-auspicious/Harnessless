@@ -1,12 +1,6 @@
-/**
- * Zero-CLI Commercial API Direct Tool-Call Loop Runner (`openai-compatible`
- * `/chat/completions` and `anthropic-messages` `/v1/messages`).
- * Enforces worktree path confinement via `worktrees.resolveInside` and
- * tracks prompt-cache hit metrics (`cached_tokens` / `cache_read_input_tokens`).
- */
-
 import {mkdirSync, readdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {dirname} from 'node:path';
+import {isFileInsideScope, normalizeRepoPath} from '../core/glob-scope.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import type {
   AgentInvocationRequest,
@@ -15,46 +9,76 @@ import type {
   ProviderSecretLookup,
   ProviderSecretResolved,
 } from './contracts.ts';
-
-const MAX_TOOL_TURNS = 6;
+import {parseRetryAfterSeconds} from './rate-limiter.ts';
 
 function inferProviderCandidates(model: string): string[] {
   const lower = model.toLowerCase();
   if (lower.includes('/')) {
     const prefix = lower.split('/')[0]!;
-    return [prefix, 'deepseek', 'openai', 'anthropic'];
+    return [prefix, 'opencode-go', 'deepseek', 'openai', 'anthropic'];
+  }
+  if (
+    lower.includes('v4.1-flash') ||
+    lower === 'glm-5' ||
+    lower === 'kimi-k2.5'
+  ) {
+    return ['opencode-go', 'deepseek', 'openai', 'anthropic'];
   }
   if (lower.startsWith('claude')) {
-    return ['anthropic', 'openai', 'deepseek'];
+    return ['anthropic', 'opencode-go', 'openai', 'deepseek'];
   }
   if (
     lower.startsWith('gpt') ||
     lower.startsWith('o1') ||
     lower.startsWith('o3')
   ) {
-    return ['openai', 'deepseek', 'anthropic'];
+    return ['openai', 'opencode-go', 'deepseek', 'anthropic'];
   }
-  return ['deepseek', 'openai', 'anthropic'];
+  return ['deepseek', 'opencode-go', 'openai', 'anthropic'];
 }
 
 function resolveProviderConfig(
-  model: string,
+  req: AgentInvocationRequest,
   lookupProvider: ProviderSecretLookup,
 ): ProviderSecretResolved | null {
-  const candidates = inferProviderCandidates(model);
-  let firstResolved: ProviderSecretResolved | null = null;
-  for (const id of candidates) {
-    const found = lookupProvider(id);
-    if (found) {
-      if (!firstResolved) {
-        firstResolved = found;
-      }
-      if (found.apiKey && found.apiKey.trim().length > 0) {
-        return found;
-      }
+  if (req.providerId) {
+    const explicit = lookupProvider(req.providerId);
+    if (explicit) {
+      return explicit;
     }
   }
-  return firstResolved;
+  const direct = lookupProvider(req.model);
+  if (direct) {
+    return direct;
+  }
+  const candidates = inferProviderCandidates(req.model);
+  for (const id of candidates) {
+    const found = lookupProvider(id);
+    if (found && found.models?.some(m => m.id === req.model)) {
+      return found;
+    }
+  }
+  return candidates.length > 0 ? lookupProvider(candidates[0]!) : null;
+}
+
+function computeCatalogCostUsd(
+  provider: ProviderSecretResolved,
+  modelId: string,
+  inputTokens: number,
+  cachedTokens: number,
+  outputTokens: number,
+): number {
+  const catalogEntry = provider.models?.find(m => m.id === modelId);
+  const inPrice = catalogEntry?.inputUsdPerMillion ?? 0.5;
+  const cachedPrice = catalogEntry?.cachedInputUsdPerMillion ?? 0.1;
+  const outPrice = catalogEntry?.outputUsdPerMillion ?? 1.5;
+  const uncachedIn = Math.max(0, inputTokens - cachedTokens);
+  const total =
+    (uncachedIn * inPrice +
+      cachedTokens * cachedPrice +
+      outputTokens * outPrice) /
+    1_000_000;
+  return Number(Math.max(0, total).toFixed(6));
 }
 
 function asStringList(val: unknown): string[] {
@@ -107,6 +131,24 @@ function executeConfinedTool(
           typeof args['path'] === 'string' ? args['path'].trim() : '';
         if (!relPath) {
           return {output: 'Missing file path', isError: true};
+        }
+        const normRel = normalizeRepoPath(relPath);
+        if (normRel === '.forgeops' || normRel.startsWith('.forgeops/')) {
+          return {
+            output:
+              'POLICY_DENIED: Workers cannot write inside host-reserved .forgeops/',
+            isError: true,
+          };
+        }
+        if (
+          req.fileScope &&
+          req.fileScope.length > 0 &&
+          !isFileInsideScope(normRel, req.fileScope)
+        ) {
+          return {
+            output: `POLICY_DENIED: "${normRel}" is outside declared task fileScope [${req.fileScope.join(', ')}]`,
+            isError: true,
+          };
         }
         const content =
           typeof args['content'] === 'string' ? args['content'] : '';
@@ -209,13 +251,60 @@ const ANTHROPIC_TOOLS_SCHEMA = OPENAI_TOOLS_SCHEMA.map(t => ({
   input_schema: t.function.parameters,
 }));
 
+function buildTurnSignal(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): AbortSignal {
+  const timeoutSig = AbortSignal.timeout(Math.max(2000, timeoutMs));
+  return parentSignal
+    ? AbortSignal.any([parentSignal, timeoutSig])
+    : timeoutSig;
+}
+
+async function fetchWithTransientRetry(
+  url: string,
+  init: RequestInit,
+  parentSignal: AbortSignal | undefined,
+  turnTimeoutMs: number,
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (parentSignal?.aborted) {
+      throw new Error('Aborted');
+    }
+    try {
+      const res = await fetch(url, {
+        ...init,
+        signal: buildTurnSignal(parentSignal, turnTimeoutMs),
+      });
+      if (res.status >= 500 && res.status < 600 && attempt < 2) {
+        await new Promise(r =>
+          setTimeout(r, 350 * (attempt + 1) + Math.floor(Math.random() * 250)),
+        );
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (parentSignal?.aborted || attempt === 2) {
+        throw err;
+      }
+      await new Promise(r =>
+        setTimeout(r, 350 * (attempt + 1) + Math.floor(Math.random() * 250)),
+      );
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 export async function runNativeApiSession(
   req: AgentInvocationRequest,
   worktrees: IGitWorktreeManager,
   lookupProvider: ProviderSecretLookup,
 ): Promise<AgentInvocationResult> {
   const startedAt = Date.now();
-  const provider = resolveProviderConfig(req.model, lookupProvider);
+  const provider = resolveProviderConfig(req, lookupProvider);
+  const modelId = req.model || req.adapter.defaultModel;
 
   if (!provider || !provider.apiKey || provider.apiKey.trim().length === 0) {
     return {
@@ -232,6 +321,11 @@ export async function runNativeApiSession(
     };
   }
 
+  const maxTurns =
+    req.maxToolTurns ?? (req.textOnly ? 1 : req.readOnly ? 8 : 16);
+  const turnTimeoutMs = Math.min(90_000, req.timeoutMs ?? 60_000);
+  const maxTokens = req.maxOutputTokens ?? (req.readOnly ? 2048 : 4096);
+
   let inputTokens = 0;
   let cachedTokens = 0;
   let firstTurnCachedTokens = 0;
@@ -239,6 +333,15 @@ export async function runNativeApiSession(
   let outputTokens = 0;
   let mcpSubmission: McpSubmissionPayload | null = null;
   const assistantTexts: string[] = [];
+
+  const finalizeCost = (): number =>
+    computeCatalogCostUsd(
+      provider,
+      modelId,
+      inputTokens,
+      cachedTokens,
+      outputTokens,
+    );
 
   try {
     if (provider.protocol === 'openai-compatible') {
@@ -252,25 +355,36 @@ export async function runNativeApiSession(
         {role: 'user', content: req.userPrompt},
       ];
 
-      for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${provider.apiKey}`,
+      for (let turn = 0; turn < maxTurns; turn += 1) {
+        const bodyPayload: Record<string, unknown> = {
+          model: modelId,
+          messages,
+          max_tokens: maxTokens,
+        };
+        if (!req.textOnly) {
+          bodyPayload['tools'] = req.readOnly
+            ? OPENAI_TOOLS_SCHEMA.filter(t => t.function.name !== 'write_file')
+            : OPENAI_TOOLS_SCHEMA;
+        }
+
+        const res = await fetchWithTransientRetry(
+          endpoint,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${provider.apiKey}`,
+            },
+            body: JSON.stringify(bodyPayload),
           },
-          body: JSON.stringify({
-            model: req.model || req.adapter.defaultModel,
-            messages,
-            tools: req.readOnly
-              ? OPENAI_TOOLS_SCHEMA.filter(
-                  t => t.function.name !== 'write_file',
-                )
-              : OPENAI_TOOLS_SCHEMA,
-          }),
-        });
+          req.signal,
+          turnTimeoutMs,
+        );
 
         if (res.status === 429) {
+          const retryAfterSeconds = parseRetryAfterSeconds(
+            res.headers.get('retry-after'),
+          );
           return {
             outcome: 'rate_limited',
             finalText: assistantTexts.join('\n').trim(),
@@ -279,10 +393,10 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: 'OpenAI-compatible endpoint returned HTTP 429',
-            retryAfterSeconds: 30,
+            retryAfterSeconds,
           };
         }
 
@@ -295,7 +409,7 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: `Provider authentication failed (HTTP ${res.status})`,
           };
@@ -311,7 +425,7 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: `HTTP ${res.status}: ${errBody.slice(0, 300)}`,
           };
@@ -382,7 +496,7 @@ export async function runNativeApiSession(
         const toolCalls = Array.isArray(msg['tool_calls'])
           ? msg['tool_calls']
           : [];
-        if (toolCalls.length === 0) {
+        if (toolCalls.length === 0 || req.textOnly) {
           break;
         }
 
@@ -436,7 +550,6 @@ export async function runNativeApiSession(
         }
       }
     } else {
-      // anthropic-messages protocol
       const base = provider.baseUrl.replace(/\/+$/, '');
       const endpoint = base.endsWith('/messages')
         ? base
@@ -448,26 +561,48 @@ export async function runNativeApiSession(
         {role: 'user', content: req.userPrompt},
       ];
 
-      for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-api-key': provider.apiKey,
-            'anthropic-version': '2023-06-01',
+      const systemField = req.cacheStablePrefix
+        ? [
+            {
+              type: 'text',
+              text: req.systemPrompt,
+              cache_control: {type: 'ephemeral'},
+            },
+          ]
+        : req.systemPrompt;
+
+      for (let turn = 0; turn < maxTurns; turn += 1) {
+        const bodyPayload: Record<string, unknown> = {
+          model: modelId,
+          max_tokens: maxTokens,
+          system: systemField,
+          messages,
+        };
+        if (!req.textOnly) {
+          bodyPayload['tools'] = req.readOnly
+            ? ANTHROPIC_TOOLS_SCHEMA.filter(t => t.name !== 'write_file')
+            : ANTHROPIC_TOOLS_SCHEMA;
+        }
+
+        const res = await fetchWithTransientRetry(
+          endpoint,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-api-key': provider.apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify(bodyPayload),
           },
-          body: JSON.stringify({
-            model: req.model || req.adapter.defaultModel,
-            max_tokens: 4096,
-            system: req.systemPrompt,
-            messages,
-            tools: req.readOnly
-              ? ANTHROPIC_TOOLS_SCHEMA.filter(t => t.name !== 'write_file')
-              : ANTHROPIC_TOOLS_SCHEMA,
-          }),
-        });
+          req.signal,
+          turnTimeoutMs,
+        );
 
         if (res.status === 429) {
+          const retryAfterSeconds = parseRetryAfterSeconds(
+            res.headers.get('retry-after'),
+          );
           return {
             outcome: 'rate_limited',
             finalText: assistantTexts.join('\n').trim(),
@@ -476,10 +611,10 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: 'Anthropic endpoint returned HTTP 429',
-            retryAfterSeconds: 30,
+            retryAfterSeconds,
           };
         }
 
@@ -492,7 +627,7 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: `Anthropic authentication failed (HTTP ${res.status})`,
           };
@@ -508,7 +643,7 @@ export async function runNativeApiSession(
             cachedTokens,
             firstTurnCachedTokens,
             outputTokens,
-            costUsd: 0,
+            costUsd: finalizeCost(),
             durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
             diagnostic: `HTTP ${res.status}: ${errBody.slice(0, 300)}`,
           };
@@ -548,6 +683,7 @@ export async function runNativeApiSession(
             assistantTexts.push(b['text']);
             req.onChunk?.('assistant', b['text'], null);
           } else if (
+            !req.textOnly &&
             b['type'] === 'tool_use' &&
             typeof b['name'] === 'string'
           ) {
@@ -576,7 +712,7 @@ export async function runNativeApiSession(
           }
         }
 
-        if (toolResults.length === 0 || mcpSubmission) {
+        if (toolResults.length === 0 || mcpSubmission || req.textOnly) {
           break;
         }
 
@@ -594,21 +730,13 @@ export async function runNativeApiSession(
       cachedTokens,
       firstTurnCachedTokens,
       outputTokens,
-      costUsd: 0,
+      costUsd: finalizeCost(),
       durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
       diagnostic: `Native API transport error: ${msg}`,
     };
   }
 
   const finalText = assistantTexts.join('\n').trim();
-  const costUsd = Number(
-    (
-      ((inputTokens - cachedTokens) * 0.5 +
-        cachedTokens * 0.1 +
-        outputTokens * 1.5) /
-      1_000_000
-    ).toFixed(6),
-  );
 
   return {
     outcome: 'completed',
@@ -618,7 +746,7 @@ export async function runNativeApiSession(
     cachedTokens,
     firstTurnCachedTokens,
     outputTokens,
-    costUsd: Math.max(0, costUsd),
+    costUsd: finalizeCost(),
     durationSec: Number(
       Math.max(0.01, (Date.now() - startedAt) / 1000).toFixed(3),
     ),

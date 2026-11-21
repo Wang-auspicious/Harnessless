@@ -19,6 +19,11 @@ export interface TaskBlueprint {
   readonly description: string;
   readonly fileScope?: readonly string[];
   readonly dependsOnCodes?: readonly string[];
+  readonly requirementRefs?: readonly string[];
+  readonly acceptanceRefs?: readonly string[];
+  readonly planningRationale?: string;
+  readonly inputContract?: string;
+  readonly outputContract?: string;
 }
 
 export interface PhaseBlueprint {
@@ -227,6 +232,11 @@ export function compileTwinGraph(
           title: task.title,
           description: task.description,
           fileScope: task.fileScope ?? [],
+          requirementRefs: task.requirementRefs ?? [],
+          acceptanceRefs: task.acceptanceRefs ?? [],
+          planningRationale: task.planningRationale ?? '',
+          inputContract: task.inputContract ?? '',
+          outputContract: task.outputContract ?? '',
           assignedRole: 'worker',
           assignedAdapterId: team.workerAdapterId,
           assignedModel: team.workerModel,
@@ -259,6 +269,13 @@ export function compileTwinGraph(
       }
     });
 
+    const allTasksScoped =
+      phase.tasks.length > 0 &&
+      phase.tasks.every(t => (t.fileScope ?? []).length > 0);
+    const phaseFileScope = allTasksScoped
+      ? Array.from(new Set(phase.tasks.flatMap(t => t.fileScope ?? [])))
+      : [];
+
     const gateX = 80 + containerWidth + 76;
     const gateY =
       cursorY + Math.max(0, Math.round((containerHeight - 168) / 2));
@@ -272,6 +289,7 @@ export function compileTwinGraph(
       kind: 'gates',
       title: 'Gates (Lint/Test)',
       description: 'Deterministic lint, typecheck, build, and DDD drift gate.',
+      fileScope: phaseFileScope,
       gateCommand: phase.gateCommand ?? defaultVerifyCommand,
       assignedRole: 'evaluator',
       assignedAdapterId: null,
@@ -328,6 +346,7 @@ export function compileTwinGraph(
       kind: 'selfcheck',
       title: 'Pre-QA Selfcheck',
       description: 'Verify deliverable artifacts and file scope boundaries.',
+      fileScope: phaseFileScope,
       assignedRole: 'evaluator',
       assignedAdapterId: null,
       assignedModel: null,
@@ -648,6 +667,43 @@ export function computeRewindSet(
   }
 
   // Include nested tasks belonging to any rewound PhaseContainer.
+  for (const node of nodes) {
+    if (node.containerNodeId && rewindIds.has(node.containerNodeId)) {
+      rewindIds.add(node.id);
+    }
+  }
+  rewindIds.delete(checkpointNodeId);
+  return rewindIds;
+}
+
+export function computePhaseBarrierRewindSet(
+  nodes: readonly GraphNode[],
+  edges: readonly GraphEdge[],
+  checkpointNodeId: string,
+): Set<string> {
+  const forwardAdj = new Map<string, string[]>();
+  for (const edge of edges) {
+    if (edge.kind === 'fail') {
+      continue;
+    }
+    const fwd = forwardAdj.get(edge.sourceNodeId) ?? [];
+    fwd.push(edge.targetNodeId);
+    forwardAdj.set(edge.sourceNodeId, fwd);
+  }
+
+  const rewindIds = new Set<string>();
+  const queue = [...(forwardAdj.get(checkpointNodeId) ?? [])];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (cur === checkpointNodeId || rewindIds.has(cur)) {
+      continue;
+    }
+    rewindIds.add(cur);
+    for (const nxt of forwardAdj.get(cur) ?? []) {
+      queue.push(nxt);
+    }
+  }
+
   for (const node of nodes) {
     if (node.containerNodeId && rewindIds.has(node.containerNodeId)) {
       rewindIds.add(node.id);
