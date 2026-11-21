@@ -1,6 +1,6 @@
 import type {ChangeRecord, GraphEdge, GraphNode} from '../shared/types.ts';
 import type {TrialSimulationReport, TrialWave} from '../shared/v3-types.ts';
-import {scopesOverlap} from './glob-scope.ts';
+import {isFileInsideScope, scopesOverlap} from './glob-scope.ts';
 import {computeNextExecutableNodes} from './twin-graph.ts';
 
 const EXEC_KINDS = new Set<GraphNode['kind']>([
@@ -27,6 +27,26 @@ const BARRIER_KINDS = new Set<GraphNode['kind']>([
   'end',
 ]);
 
+function hasReadWriteConflict(
+  scopeA: readonly string[],
+  scopeB: readonly string[],
+  readDependenciesByFile?: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  if (!readDependenciesByFile || scopeA.length === 0 || scopeB.length === 0) {
+    return false;
+  }
+  for (const [fileKey, relatedFiles] of readDependenciesByFile.entries()) {
+    const keyInA = isFileInsideScope(fileKey, scopeA);
+    const keyInB = isFileInsideScope(fileKey, scopeB);
+    if (!keyInA && !keyInB) continue;
+    for (const rel of relatedFiles) {
+      if (keyInA && isFileInsideScope(rel, scopeB)) return true;
+      if (keyInB && isFileInsideScope(rel, scopeA)) return true;
+    }
+  }
+  return false;
+}
+
 function selectWaveForChange(
   ready: readonly GraphNode[],
   maxSlots: number,
@@ -36,6 +56,7 @@ function selectWaveForChange(
     readonly reason: string;
   }>,
   codePrefix = '',
+  readDependenciesByFile?: ReadonlyMap<string, readonly string[]>,
 ): GraphNode[] {
   if (ready.length === 0 || maxSlots <= 0) {
     return [];
@@ -51,14 +72,29 @@ function selectWaveForChange(
     if (BARRIER_KINDS.has(candidate.kind)) {
       continue;
     }
-    const conflict = waveNodes.find(chosen =>
+    const writeConflict = waveNodes.find(chosen =>
       scopesOverlap(chosen.fileScope, candidate.fileScope),
     );
-    if (conflict) {
+    if (writeConflict) {
       contendedNodePairs.push({
-        nodeA: `${codePrefix}${conflict.code}`,
+        nodeA: `${codePrefix}${writeConflict.code}`,
         nodeB: `${codePrefix}${candidate.code}`,
         reason: 'Serialized due to overlapping or unrestricted fileScope',
+      });
+      continue;
+    }
+    const readConflict = waveNodes.find(chosen =>
+      hasReadWriteConflict(
+        chosen.fileScope,
+        candidate.fileScope,
+        readDependenciesByFile,
+      ),
+    );
+    if (readConflict) {
+      contendedNodePairs.push({
+        nodeA: `${codePrefix}${readConflict.code}`,
+        nodeB: `${codePrefix}${candidate.code}`,
+        reason: 'Serialized due to import/read dependency on modified file',
       });
       continue;
     }
@@ -74,6 +110,7 @@ export function simulateTwinGraphTrial(
   nodes: readonly GraphNode[],
   edges: readonly GraphEdge[],
   maxParallelSlots = 3,
+  readDependenciesByFile?: ReadonlyMap<string, readonly string[]>,
 ): TrialSimulationReport {
   const simNodes: GraphNode[] = nodes.map(n => ({
     ...n,
@@ -98,7 +135,13 @@ export function simulateTwinGraphTrial(
       break;
     }
 
-    const waveNodes = selectWaveForChange(ready, slotCap, contendedNodePairs);
+    const waveNodes = selectWaveForChange(
+      ready,
+      slotCap,
+      contendedNodePairs,
+      '',
+      readDependenciesByFile,
+    );
 
     for (const n of waveNodes) {
       const idx = simNodes.findIndex(x => x.id === n.id);
@@ -134,6 +177,7 @@ export function simulateMissionTrial(
   nodesByChangeId: ReadonlyMap<string, readonly GraphNode[]>,
   edgesByChangeId: ReadonlyMap<string, readonly GraphEdge[]>,
   maxParallelSlots = 3,
+  readDependenciesByFile?: ReadonlyMap<string, readonly string[]>,
 ): TrialSimulationReport {
   if (changes.length === 0) {
     return {
@@ -217,6 +261,7 @@ export function simulateMissionTrial(
         remainingSlots,
         contendedNodePairs,
         multiChange ? `${chg.code}:` : '',
+        readDependenciesByFile,
       );
       for (const node of picked) {
         waveEntries.push({chg, node});

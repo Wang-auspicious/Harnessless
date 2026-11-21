@@ -470,6 +470,20 @@ export interface EpistemicItemRecord {
   readonly createdAt: string;
 }
 
+export type FailureCategory =
+  'infra_env' | 'test_tampering' | 'spec_gap' | 'logic_bug';
+
+export interface FailureDiagnosis {
+  readonly category: FailureCategory;
+  readonly fingerprint: string;
+  readonly plainTitleZh: string;
+  readonly plainTitleEn: string;
+  readonly plainAdviceZh: string;
+  readonly plainAdviceEn: string;
+  readonly shouldRetryCoder: boolean;
+  readonly evidenceLines: readonly string[];
+}
+
 export interface FailureForensicsCard {
   readonly failedNodeId: string;
   readonly failedNodeCode: string;
@@ -479,6 +493,10 @@ export interface FailureForensicsCard {
   readonly targetCheckpointLabel: string;
   readonly rescueRef: string;
   readonly failedAt: string;
+  readonly category?: FailureCategory;
+  readonly errorFingerprint?: string;
+  readonly spinDetected?: boolean;
+  readonly suggestedAction?: string;
 }
 
 export interface EvidenceBundle {
@@ -706,4 +724,149 @@ export interface MemoryReflectResult {
   readonly citedChunkIds: readonly string[];
   readonly citedObservationIds: readonly string[];
   readonly usedLivingDocIds: readonly string[];
+}
+
+export interface CodebaseProbeFileHit {
+  readonly repoId: string;
+  readonly repoName: string;
+  readonly filePath: string;
+  readonly score: number;
+  readonly lineCount: number;
+  readonly matchedKeywords: readonly string[];
+  readonly exports: readonly string[];
+  readonly importers: readonly string[];
+  readonly excerpt: string;
+}
+
+export interface CodebaseImportEdge {
+  readonly repoId: string;
+  readonly fromFile: string;
+  readonly toFile: string;
+  readonly specifier: string;
+}
+
+export interface CodebaseRealityNote {
+  readonly level: 'info' | 'warning' | 'challenge';
+  readonly titleZh: string;
+  readonly titleEn: string;
+  readonly detailZh: string;
+  readonly detailEn: string;
+  readonly relatedFiles: readonly string[];
+}
+
+export interface CodebaseProbeReport {
+  readonly probedAt: string;
+  readonly repoCount: number;
+  readonly scannedFilesCount: number;
+  readonly matchedFiles: readonly CodebaseProbeFileHit[];
+  readonly importEdges: readonly CodebaseImportEdge[];
+  readonly detectedVerifyCommands: readonly {
+    readonly repoId: string;
+    readonly repoName: string;
+    readonly command: string;
+  }[];
+  readonly recentHotspots: readonly {
+    readonly repoId: string;
+    readonly filePath: string;
+    readonly commitCount: number;
+    readonly lastSubject: string;
+  }[];
+  readonly recentReverts: readonly {
+    readonly repoId: string;
+    readonly sha: string;
+    readonly subject: string;
+    readonly files: readonly string[];
+  }[];
+  readonly realityNotes: readonly CodebaseRealityNote[];
+  readonly blastRadius: 'low' | 'medium' | 'high';
+  readonly recommendedTrack: TriageTrack;
+  readonly plainRationaleZh: string;
+  readonly plainRationaleEn: string;
+  readonly estimatedCostRangeUsd: readonly [number, number];
+  readonly recalledMemories: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly authorityTier: MemoryAuthorityTier;
+    readonly rejectedWarning: string | null;
+  }[];
+}
+
+export interface TakeoverStatusSnapshot {
+  readonly changeId: string;
+  readonly changeCode: string;
+  readonly changeStatus: string;
+  readonly nodeId: string;
+  readonly nodeCode: string;
+  readonly nodeTitle: string;
+  readonly nodeStatus: string;
+  readonly worktreePath: string;
+  readonly gitBranch: string;
+  readonly verifyCommand: string;
+  readonly modifiedFiles: readonly string[];
+  readonly diffSummary: string;
+  readonly diffPatch: string;
+  readonly forensics: FailureForensicsCard | null;
+}
+
+export interface ResumeHandoverInput {
+  readonly runVerify?: boolean;
+  readonly handoverNote?: string;
+  readonly saveAsMemory?: boolean;
+  readonly memoryTitle?: string;
+  readonly autoResume?: boolean;
+  readonly actor?: string;
+}
+
+export interface ResumeHandoverResult {
+  readonly ok: boolean;
+  readonly verifyPassed: boolean;
+  readonly verifyOutput: string;
+  readonly checkpointSha: string | null;
+  readonly checkpointTag: string | null;
+  readonly changedFiles: readonly string[];
+  readonly memoryRetained: boolean;
+  readonly resumedExecution: boolean;
+  readonly message: string;
+}
+
+export interface CausalDiffFile {
+  readonly filePath: string;
+  readonly patch: string;
+  readonly addedLines: number;
+  readonly deletedLines: number;
+}
+
+export interface CausalDiffGroup {
+  readonly nodeId: string | null;
+  readonly nodeCode: string;
+  readonly nodeTitle: string;
+  readonly nodeStatus: string;
+  readonly phaseLabel: string;
+  readonly files: readonly CausalDiffFile[];
+}
+
+export interface CausalDiffReport {
+  readonly changeId: string;
+  readonly changeCode: string;
+  readonly gitBranch: string;
+  readonly totalFiles: number;
+  readonly groups: readonly CausalDiffGroup[];
+}
+
+export interface GitReconcileResult {
+  readonly checkedRepos: number;
+  readonly contestedObservationIds: readonly string[];
+  readonly detectedReverts: readonly {
+    readonly repoId: string;
+    readonly sha: string;
+    readonly subject: string;
+  }[];
+  readonly retainedPitfalls: number;
+  readonly checkedAt: string;
+}
+
+export interface ReconcileObservationInput {
+  readonly resolution: 'adopt_code' | 'keep_rule' | 'retire';
+  readonly newStatement?: string;
+  readonly note?: string;
 }

@@ -5,6 +5,13 @@
 import type {
   ApprovedRequirementsBaseline,
   BaselineImpactReport,
+  CausalDiffFile,
+  CausalDiffGroup,
+  CausalDiffReport,
+  CodebaseImportEdge,
+  CodebaseProbeFileHit,
+  CodebaseProbeReport,
+  CodebaseRealityNote,
   CommentDisposition,
   ControlAvailability,
   ControlCommandInput,
@@ -13,8 +20,12 @@ import type {
   EvidenceBundle,
   EvidenceVerificationResult,
   ExecutionMode,
+  FailureCategory,
+  FailureDiagnosis,
+  FailureForensicsCard,
   FocusExplainability,
   FocusProgressivePanels,
+  GitReconcileResult,
   HamaArtifactRecord,
   HamaCommentRecord,
   IntentPresetId,
@@ -34,6 +45,10 @@ import type {
   MissionRecord,
   MissionStage,
   MissionStageStepSummary,
+  ReconcileObservationInput,
+  ResumeHandoverInput,
+  ResumeHandoverResult,
+  TakeoverStatusSnapshot,
   TrialSimulationReport,
   TriageTrack,
   ValidationReport,
@@ -298,6 +313,20 @@ export interface FocusProjection {
   readonly progressivePanels: FocusProgressivePanels;
 }
 
+export interface ProbeMissionRequest {
+  readonly hubId?: string;
+  readonly repoIds?: readonly string[];
+  readonly repoPaths?: readonly string[];
+  readonly rawIntent: string;
+  readonly executionMode?: ExecutionMode;
+}
+
+export interface CreateMissionResponse {
+  readonly mission: MissionRecord;
+  readonly focus: FocusProjection;
+  readonly probe?: CodebaseProbeReport;
+}
+
 export interface MissionDetailSnapshot {
   readonly mission: MissionRecord;
   readonly focus: FocusProjection;
@@ -307,6 +336,7 @@ export interface MissionDetailSnapshot {
   readonly baseline: ApprovedRequirementsBaseline | null;
   readonly validation: ValidationReport | null;
   readonly trial: TrialSimulationReport | null;
+  readonly probe?: CodebaseProbeReport | null;
 }
 
 export interface HamaDetailSnapshot {
@@ -378,14 +408,29 @@ export interface MissionTraceabilityResponse {
 
 export type {
   BaselineImpactReport,
+  CausalDiffFile,
+  CausalDiffGroup,
+  CausalDiffReport,
+  CodebaseImportEdge,
+  CodebaseProbeFileHit,
+  CodebaseProbeReport,
+  CodebaseRealityNote,
   ControlCommandInput,
   DecisionInput,
+  FailureCategory,
+  FailureDiagnosis,
+  FailureForensicsCard,
+  GitReconcileResult,
   MemoryLivingDocRecord,
   MemoryObservationRecord,
   MemoryRecallQuery,
   MemoryRecallResult,
   MemoryReflectResult,
   MissionEventRecord,
+  ReconcileObservationInput,
+  ResumeHandoverInput,
+  ResumeHandoverResult,
+  TakeoverStatusSnapshot,
 };
 
 export interface ForgePreloadBridge {
@@ -394,4 +439,8 @@ export interface ForgePreloadBridge {
   readonly hasNativeTitlebarOverlay?: boolean;
   pickDirectory(): Promise<string | null>;
   openExternal?(url: string): Promise<boolean>;
+  openPath?(targetPath: string): Promise<boolean>;
+  openInEditor?(
+    targetPath: string,
+  ): Promise<{readonly ok: boolean; readonly editor: string}>;
 }

@@ -4,7 +4,7 @@
  */
 
 import type {EpistemicHandoff, PermissionTier} from '../shared/types.ts';
-import type {TriageTrack} from '../shared/v3-types.ts';
+import type {CodebaseProbeReport, TriageTrack} from '../shared/v3-types.ts';
 
 export function canAutoAdvanceGate(
   tier: PermissionTier,
@@ -104,6 +104,7 @@ export function triageMissionIntent(input: {
   readonly documentCount: number;
   readonly requestedTrack?: TriageTrack;
   readonly defaultTrack?: TriageTrack;
+  readonly probe?: CodebaseProbeReport;
 }): {
   readonly track: TriageTrack;
   readonly rationale: string;
@@ -129,16 +130,37 @@ export function triageMissionIntent(input: {
   if (/[?？]|或者|待定|TBD|unclear|ambiguous/i.test(input.rawIntent)) {
     triggers.push('unresolved_ambiguity');
   }
+  if (input.probe && input.probe.scannedFilesCount > 0) {
+    if (input.probe.blastRadius === 'high') {
+      triggers.push('probe_high_blast_radius');
+    } else if (input.probe.blastRadius === 'medium') {
+      triggers.push('probe_medium_blast_radius');
+    }
+  }
 
   if (
     triggers.includes('multi_repo_epic') ||
     triggers.includes('sensitive_domain') ||
+    triggers.includes('probe_high_blast_radius') ||
     triggers.length >= 2
   ) {
     return {
       track: 'full_hama',
       rationale: `Escalated to full_hama due to: ${triggers.join(', ')}.`,
       triggers,
+    };
+  }
+  if (
+    input.probe &&
+    input.probe.scannedFilesCount > 0 &&
+    input.probe.blastRadius === 'low' &&
+    triggers.length === 0 &&
+    input.rawIntent.length <= 220
+  ) {
+    return {
+      track: 'express',
+      rationale: `Codebase probe confirmed low blast radius (${input.probe.matchedFiles.length} matched file(s)); fast-tracked to express.`,
+      triggers: ['probe_low_blast_radius'],
     };
   }
   if (

@@ -6,6 +6,8 @@ export * from './ddd.ts';
 export * from './cognitive.ts';
 export * from './telemetry.ts';
 export * from './policy.ts';
+export * from './codebase-probe.ts';
+export * from './failure-guard.ts';
 export * from './spec-compiler.ts';
 export * from './spec-validator.ts';
 export * from './trial-simulator.ts';
