@@ -54,14 +54,13 @@ export function embedTextLocal(
 }
 
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  const len = Math.min(a.length, b.length);
-  if (len === 0) {
+  if (a.length === 0 || a.length !== b.length) {
     return 0;
   }
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  for (let i = 0; i < len; i += 1) {
+  for (let i = 0; i < a.length; i += 1) {
     const va = a[i]!;
     const vb = b[i]!;
     dot += va * vb;

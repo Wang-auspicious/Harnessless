@@ -118,6 +118,7 @@ export class ForgeStore {
   private txDepth = 0;
   private postCommitQueue: Array<() => void> = [];
   private outboxWakeup: (() => void) | null = null;
+  private closed = false;
 
   constructor(dbPath: string) {
     if (dbPath !== ':memory:') {
@@ -138,7 +139,15 @@ export class ForgeStore {
     this.seedDefaults();
   }
 
+  get isOpen(): boolean {
+    return !this.closed;
+  }
+
   close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
     this.db.close();
   }
 
@@ -149,14 +158,18 @@ export class ForgeStore {
   atomic<T>(fn: () => T extends PromiseLike<unknown> ? never : T): T {
     const depth = this.txDepth;
     const sp = `sp_${depth}`;
+    const queueBookmark = this.postCommitQueue.length;
     if (depth === 0) {
       this.db.exec('BEGIN IMMEDIATE');
     } else {
       this.db.exec(`SAVEPOINT ${sp}`);
     }
     this.txDepth += 1;
+    let result: T;
+    let committedOuter = false;
+    let callbacks: Array<() => void> = [];
     try {
-      const result = fn();
+      result = fn();
       if (
         result !== null &&
         typeof result === 'object' &&
@@ -168,22 +181,19 @@ export class ForgeStore {
           500,
         );
       }
-      this.txDepth -= 1;
-      if (this.txDepth === 0) {
+      if (depth === 0) {
         this.db.exec('COMMIT');
-        const callbacks = this.postCommitQueue;
+        callbacks = this.postCommitQueue;
         this.postCommitQueue = [];
-        for (const cb of callbacks) {
-          cb();
-        }
+        committedOuter = true;
       } else {
         this.db.exec(`RELEASE SAVEPOINT ${sp}`);
       }
-      return result;
+      this.txDepth = depth;
     } catch (err) {
-      this.txDepth -= 1;
-      if (this.txDepth === 0) {
-        this.postCommitQueue = [];
+      this.txDepth = depth;
+      this.postCommitQueue.length = queueBookmark;
+      if (depth === 0) {
         try {
           this.db.exec('ROLLBACK');
         } catch {
@@ -199,6 +209,12 @@ export class ForgeStore {
       }
       throw err;
     }
+    if (committedOuter) {
+      for (const cb of callbacks) {
+        cb();
+      }
+    }
+    return result;
   }
 
   nextSequence(key: string): number {
@@ -605,35 +621,51 @@ export class ForgeStore {
       (existing ? str(existing, 'id') : `ddd-${randomUUID().slice(0, 8)}`);
     const createdAt = existing ? str(existing, 'created_at') : now;
 
-    this.db
-      .prepare(
-        `INSERT INTO domain_terms
-         (id, hub_id, bounded_context, owning_repo_ids_json, canonical_term, local_label, definition, forbidden_aliases_json, schema_anchors_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           bounded_context = excluded.bounded_context,
-           owning_repo_ids_json = excluded.owning_repo_ids_json,
-           canonical_term = excluded.canonical_term,
-           local_label = excluded.local_label,
-           definition = excluded.definition,
-           forbidden_aliases_json = excluded.forbidden_aliases_json,
-           schema_anchors_json = excluded.schema_anchors_json,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        id,
-        input.hubId,
-        input.boundedContext,
-        JSON.stringify(input.owningRepoIds),
-        input.canonicalTerm,
-        input.localLabel,
-        input.definition,
-        JSON.stringify(input.forbiddenAliases),
-        JSON.stringify(input.schemaAnchors),
-        createdAt,
-        now,
-      );
-    return this.listDomainTerms(input.hubId).find(t => t.id === id)!;
+    return this.atomic(() => {
+      this.db
+        .prepare(
+          `INSERT INTO domain_terms
+           (id, hub_id, bounded_context, owning_repo_ids_json, canonical_term, local_label, definition, forbidden_aliases_json, schema_anchors_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             bounded_context = excluded.bounded_context,
+             owning_repo_ids_json = excluded.owning_repo_ids_json,
+             canonical_term = excluded.canonical_term,
+             local_label = excluded.local_label,
+             definition = excluded.definition,
+             forbidden_aliases_json = excluded.forbidden_aliases_json,
+             schema_anchors_json = excluded.schema_anchors_json,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          id,
+          input.hubId,
+          input.boundedContext,
+          JSON.stringify(input.owningRepoIds),
+          input.canonicalTerm,
+          input.localLabel,
+          input.definition,
+          JSON.stringify(input.forbiddenAliases),
+          JSON.stringify(input.schemaAnchors),
+          createdAt,
+          now,
+        );
+      for (const mode of ['live', 'simulation'] as const) {
+        const staleDocs = this.memory.markLivingDocsStaleByKinds(
+          input.hubId,
+          mode,
+          ['ddd_map'],
+        );
+        if (staleDocs.length > 0) {
+          this.enqueueEffect(
+            'memory.refresh_docs',
+            `refresh_docs:${input.hubId}:${mode}`,
+            {hubId: input.hubId, executionMode: mode},
+          );
+        }
+      }
+      return this.listDomainTerms(input.hubId).find(t => t.id === id)!;
+    });
   }
 
   listDomainTerms(hubId?: string): DomainTermEntry[] {
@@ -824,6 +856,7 @@ export class ForgeStore {
     expectedEpoch: number,
     patch: {
       readonly status: ChangeStatus;
+      readonly expectedStatuses?: readonly ChangeStatus[];
       readonly cooldownUntil?: string | null;
       readonly qualityScore?: number;
       readonly acceptanceCriteria?: readonly AcceptanceCriterion[];
@@ -834,31 +867,39 @@ export class ForgeStore {
       if (!cur || (cur.executionEpoch ?? 1) !== expectedEpoch) {
         return false;
       }
+      if (
+        patch.expectedStatuses &&
+        !patch.expectedStatuses.includes(cur.status)
+      ) {
+        return false;
+      }
       const now = new Date().toISOString();
-      const res = this.db
-        .prepare(
-          `UPDATE changes SET
+      let sql = `UPDATE changes SET
              status = ?,
              cooldown_until = ?,
              quality_score = ?,
              acceptance_json = ?,
              version = version + 1,
              updated_at = ?
-           WHERE id = ? AND execution_epoch = ?`,
-        )
-        .run(
-          patch.status,
-          patch.cooldownUntil !== undefined
-            ? patch.cooldownUntil
-            : cur.cooldownUntil,
-          patch.qualityScore !== undefined
-            ? Math.max(cur.qualityScore, patch.qualityScore)
-            : cur.qualityScore,
-          JSON.stringify(patch.acceptanceCriteria ?? cur.acceptanceCriteria),
-          now,
-          changeId,
-          expectedEpoch,
-        );
+           WHERE id = ? AND execution_epoch = ?`;
+      const params: Array<string | number | null> = [
+        patch.status,
+        patch.cooldownUntil !== undefined
+          ? patch.cooldownUntil
+          : cur.cooldownUntil,
+        patch.qualityScore !== undefined
+          ? Math.max(cur.qualityScore, patch.qualityScore)
+          : cur.qualityScore,
+        JSON.stringify(patch.acceptanceCriteria ?? cur.acceptanceCriteria),
+        now,
+        changeId,
+        expectedEpoch,
+      ];
+      if (patch.expectedStatuses && patch.expectedStatuses.length > 0) {
+        sql += ` AND status IN (${patch.expectedStatuses.map(() => '?').join(', ')})`;
+        params.push(...patch.expectedStatuses);
+      }
+      const res = this.db.prepare(sql).run(...params);
       return res.changes === 1;
     });
   }
@@ -893,20 +934,20 @@ export class ForgeStore {
   getTotalChangeLinesForHub(
     hubId: string,
     executionMode?: ExecutionMode,
+    sinceIso?: string,
   ): {readonly linesAdded: number; readonly linesDeleted: number} {
-    const row = (
-      executionMode
-        ? this.db
-            .prepare(
-              "SELECT COALESCE(SUM(lines_added), 0) AS add_sum, COALESCE(SUM(lines_deleted), 0) AS del_sum FROM changes WHERE hub_id = ? AND execution_mode = ? AND status != 'archived'",
-            )
-            .get(hubId, executionMode)
-        : this.db
-            .prepare(
-              "SELECT COALESCE(SUM(lines_added), 0) AS add_sum, COALESCE(SUM(lines_deleted), 0) AS del_sum FROM changes WHERE hub_id = ? AND status != 'archived'",
-            )
-            .get(hubId)
-    ) as SqlRow;
+    let sql =
+      "SELECT COALESCE(SUM(lines_added), 0) AS add_sum, COALESCE(SUM(lines_deleted), 0) AS del_sum FROM changes WHERE hub_id = ? AND status != 'archived'";
+    const params: string[] = [hubId];
+    if (executionMode) {
+      sql += ' AND execution_mode = ?';
+      params.push(executionMode);
+    }
+    if (sinceIso) {
+      sql += ' AND updated_at >= ?';
+      params.push(sinceIso);
+    }
+    const row = this.db.prepare(sql).get(...params) as SqlRow;
     return {
       linesAdded: num(row, 'add_sum'),
       linesDeleted: num(row, 'del_sum'),
@@ -1175,43 +1216,52 @@ export class ForgeStore {
         'SELECT * FROM graph_nodes WHERE change_id = ? ORDER BY position_y ASC, position_x ASC',
       )
       .all(changeId) as SqlRow[];
-    return rows.map(r => ({
-      id: str(r, 'id'),
-      changeId: str(r, 'change_id'),
-      code: str(r, 'code'),
-      parentWbsId: nullableStr(r, 'parent_wbs_id'),
-      containerNodeId: nullableStr(r, 'container_node_id'),
-      kind: str(r, 'kind') as GraphNode['kind'],
-      title: str(r, 'title'),
-      description: str(r, 'description'),
-      fileScope: parseJson<string[]>(str(r, 'file_scope_json'), []),
-      gateCommand: nullableStr(r, 'gate_command'),
-      assignedRole: str(r, 'assigned_role') as AgentRole,
-      assignedAdapterId: nullableStr(r, 'assigned_adapter_id'),
-      assignedModel: nullableStr(r, 'assigned_model'),
-      status: str(r, 'status') as GraphNodeStatus,
-      attemptCount: num(rowOrEmpty(r), 'attempt_count'),
-      maxAttempts: num(rowOrEmpty(r), 'max_attempts'),
-      collapsed: num(rowOrEmpty(r), 'collapsed') === 1,
-      positionX: num(rowOrEmpty(r), 'position_x'),
-      positionY: num(rowOrEmpty(r), 'position_y'),
-      width: num(rowOrEmpty(r), 'width'),
-      height: num(rowOrEmpty(r), 'height'),
-      outputSummary: str(r, 'output_summary'),
-      restoreTargetCheckpointId: nullableStr(r, 'restore_target_checkpoint_id'),
-      requirementRefs: parseJson<string[]>(
-        str(r, 'requirement_refs_json') || '[]',
-        [],
-      ),
-      acceptanceRefs: parseJson<string[]>(
-        str(r, 'acceptance_refs_json') || '[]',
-        [],
-      ),
-      planningRationale: str(r, 'planning_rationale'),
-      inputContract: str(r, 'input_contract'),
-      outputContract: str(r, 'output_contract'),
-      updatedAt: str(r, 'updated_at'),
-    }));
+    return rows.map(r => {
+      const forensicsRaw = nullableStr(r, 'forensics_json');
+      return {
+        id: str(r, 'id'),
+        changeId: str(r, 'change_id'),
+        code: str(r, 'code'),
+        parentWbsId: nullableStr(r, 'parent_wbs_id'),
+        containerNodeId: nullableStr(r, 'container_node_id'),
+        kind: str(r, 'kind') as GraphNode['kind'],
+        title: str(r, 'title'),
+        description: str(r, 'description'),
+        fileScope: parseJson<string[]>(str(r, 'file_scope_json'), []),
+        gateCommand: nullableStr(r, 'gate_command'),
+        assignedRole: str(r, 'assigned_role') as AgentRole,
+        assignedAdapterId: nullableStr(r, 'assigned_adapter_id'),
+        assignedModel: nullableStr(r, 'assigned_model'),
+        status: str(r, 'status') as GraphNodeStatus,
+        attemptCount: num(rowOrEmpty(r), 'attempt_count'),
+        maxAttempts: num(rowOrEmpty(r), 'max_attempts'),
+        collapsed: num(rowOrEmpty(r), 'collapsed') === 1,
+        positionX: num(rowOrEmpty(r), 'position_x'),
+        positionY: num(rowOrEmpty(r), 'position_y'),
+        width: num(rowOrEmpty(r), 'width'),
+        height: num(rowOrEmpty(r), 'height'),
+        outputSummary: str(r, 'output_summary'),
+        restoreTargetCheckpointId: nullableStr(
+          r,
+          'restore_target_checkpoint_id',
+        ),
+        requirementRefs: parseJson<string[]>(
+          str(r, 'requirement_refs_json') || '[]',
+          [],
+        ),
+        acceptanceRefs: parseJson<string[]>(
+          str(r, 'acceptance_refs_json') || '[]',
+          [],
+        ),
+        planningRationale: str(r, 'planning_rationale'),
+        inputContract: str(r, 'input_contract'),
+        outputContract: str(r, 'output_contract'),
+        forensics: forensicsRaw
+          ? parseJson<FailureForensicsCard | null>(forensicsRaw, null)
+          : null,
+        updatedAt: str(r, 'updated_at'),
+      };
+    });
   }
 
   updateNodeForensics(
@@ -1319,6 +1369,7 @@ export class ForgeStore {
       outputSummary: string;
       assignedAdapterId: string | null;
       assignedModel: string | null;
+      forensics: FailureForensicsCard | null;
     }>,
   ): void {
     const row = this.db
@@ -1332,6 +1383,12 @@ export class ForgeStore {
       );
     }
     const now = new Date().toISOString();
+    const nextForensics =
+      patch.forensics !== undefined
+        ? patch.forensics
+          ? JSON.stringify(patch.forensics)
+          : null
+        : nullableStr(row, 'forensics_json');
     this.db
       .prepare(
         `UPDATE graph_nodes SET
@@ -1341,6 +1398,7 @@ export class ForgeStore {
            output_summary = ?,
            assigned_adapter_id = ?,
            assigned_model = ?,
+           forensics_json = ?,
            updated_at = ?
          WHERE id = ?`,
       )
@@ -1359,6 +1417,7 @@ export class ForgeStore {
         patch.assignedModel !== undefined
           ? patch.assignedModel
           : nullableStr(row, 'assigned_model'),
+        nextForensics,
         now,
         nodeId,
       );
@@ -1403,7 +1462,7 @@ export class ForgeStore {
   listCheckpoints(changeId: string): CheckpointRecord[] {
     const rows = this.db
       .prepare(
-        'SELECT * FROM checkpoints WHERE change_id = ? ORDER BY created_at ASC',
+        'SELECT * FROM checkpoints WHERE change_id = ? ORDER BY created_at ASC, rowid ASC',
       )
       .all(changeId) as SqlRow[];
     return rows.map(r => ({
@@ -1418,6 +1477,26 @@ export class ForgeStore {
       totalTaskCount: num(r, 'total_task_count'),
       createdAt: str(r, 'created_at'),
     }));
+  }
+
+  pruneCheckpointsAfter(changeId: string, keepCheckpointId: string): void {
+    const keep = this.db
+      .prepare(
+        'SELECT rowid, created_at FROM checkpoints WHERE id = ? AND change_id = ?',
+      )
+      .get(keepCheckpointId, changeId) as SqlRow | undefined;
+    if (!keep) {
+      return;
+    }
+    const keepRowId = num(keep, 'rowid');
+    const keepCreatedAt = str(keep, 'created_at');
+    this.db
+      .prepare(
+        `DELETE FROM checkpoints
+         WHERE change_id = ?
+           AND (created_at > ? OR (created_at = ? AND rowid > ?))`,
+      )
+      .run(changeId, keepCreatedAt, keepCreatedAt, keepRowId);
   }
 
   updateCheckpointRescueRef(checkpointId: string, rescueRef: string): void {
@@ -2044,7 +2123,13 @@ export class ForgeStore {
   // --- Live Operational Telemetry, Adapters, Providers & Skills ---
 
   recordTelemetry(
-    input: Omit<ExecutionTelemetryRecord, 'id' | 'createdAt'>,
+    input: Omit<
+      ExecutionTelemetryRecord,
+      'id' | 'createdAt' | 'changeId' | 'nodeId'
+    > & {
+      readonly changeId: string | null;
+      readonly nodeId: string | null;
+    },
   ): ExecutionTelemetryRecord {
     const now = new Date().toISOString();
     const id = `tel-${randomUUID().slice(0, 10)}`;
@@ -2057,8 +2142,8 @@ export class ForgeStore {
       .run(
         id,
         input.hubId,
-        input.changeId,
-        input.nodeId,
+        input.changeId ?? null,
+        input.nodeId ?? null,
         input.adapterId,
         input.model,
         input.role,
@@ -2074,7 +2159,13 @@ export class ForgeStore {
         input.diagnostic,
         now,
       );
-    return {...input, id, createdAt: now};
+    return {
+      ...input,
+      changeId: input.changeId ?? '',
+      nodeId: input.nodeId ?? '',
+      id,
+      createdAt: now,
+    };
   }
 
   listTelemetryForAdapter(
@@ -2331,14 +2422,26 @@ export class ForgeStore {
         return [];
       }
       const leasedUntil = new Date(Date.parse(nowIso) + leaseMs).toISOString();
-      const upd = this.db.prepare(
-        "UPDATE effects_outbox SET status = 'leased', lease_token = ?, leased_until = ? WHERE id = ?",
+      const updLease = this.db.prepare(
+        "UPDATE effects_outbox SET status = 'leased', lease_token = ?, leased_until = ?, attempts = ? WHERE id = ?",
       );
-      return candidates.map(r => {
+      const updDead = this.db.prepare(
+        "UPDATE effects_outbox SET status = 'dead_letter', lease_token = NULL, leased_until = NULL, last_error = ? WHERE id = ?",
+      );
+      const claimed: OutboxEffectRow[] = [];
+      for (const r of candidates) {
         const id = str(r, 'id');
+        const currentAttempts = num(r, 'attempts');
+        const maxAttempts = r['max_attempts'] ? num(r, 'max_attempts') : 5;
+        if (currentAttempts >= maxAttempts) {
+          const prevErr = str(r, 'last_error');
+          updDead.run(prevErr || `Exceeded max_attempts (${maxAttempts})`, id);
+          continue;
+        }
+        const nextAttempts = currentAttempts + 1;
         const leaseToken = `lease-${randomUUID().slice(0, 10)}`;
-        upd.run(leaseToken, leasedUntil, id);
-        return {
+        updLease.run(leaseToken, leasedUntil, nextAttempts, id);
+        claimed.push({
           id,
           kind: str(r, 'kind'),
           dedupeKey: str(r, 'dedupe_key'),
@@ -2347,13 +2450,14 @@ export class ForgeStore {
           leaseToken,
           leasedUntil,
           payloadVersion: r['payload_version'] ? num(r, 'payload_version') : 1,
-          maxAttempts: r['max_attempts'] ? num(r, 'max_attempts') : 5,
-          attempts: num(r, 'attempts'),
+          maxAttempts,
+          attempts: nextAttempts,
           nextDueAt: str(r, 'next_due_at'),
           lastError: str(r, 'last_error'),
           createdAt: str(r, 'created_at'),
-        };
-      });
+        });
+      }
+      return claimed;
     });
   }
 
@@ -2388,16 +2492,28 @@ export class ForgeStore {
     backoffMs: number,
     errorMsg: string,
     leaseToken?: string,
+    expectedVersion?: number,
   ): void {
     const row = this.db
       .prepare(
-        'SELECT max_attempts, lease_token FROM effects_outbox WHERE id = ?',
+        'SELECT max_attempts, lease_token, payload_version FROM effects_outbox WHERE id = ?',
       )
       .get(id) as SqlRow | undefined;
     if (!row) {
       return;
     }
     if (leaseToken && nullableStr(row, 'lease_token') !== leaseToken) {
+      return;
+    }
+    const actualVersion = row['payload_version']
+      ? num(row, 'payload_version')
+      : 1;
+    if (expectedVersion !== undefined && actualVersion !== expectedVersion) {
+      this.db
+        .prepare(
+          "UPDATE effects_outbox SET status = 'pending', lease_token = NULL, leased_until = NULL, attempts = 0, next_due_at = ?, last_error = ? WHERE id = ?",
+        )
+        .run(new Date().toISOString(), errorMsg.slice(0, 1024), id);
       return;
     }
     const maxAttempts = row['max_attempts'] ? num(row, 'max_attempts') : 5;
@@ -2416,11 +2532,53 @@ export class ForgeStore {
       );
   }
 
+  requeueOutboxEffect(id: string): OutboxEffectRow {
+    const nowIso = new Date().toISOString();
+    const res = this.db
+      .prepare(
+        "UPDATE effects_outbox SET status = 'pending', lease_token = NULL, leased_until = NULL, attempts = 0, next_due_at = ?, last_error = '' WHERE id = ?",
+      )
+      .run(nowIso, id);
+    if (res.changes === 0) {
+      throw new ForgeError('NOT_FOUND', `Outbox effect "${id}" not found`, 404);
+    }
+    const row = this.db
+      .prepare('SELECT * FROM effects_outbox WHERE id = ?')
+      .get(id) as SqlRow;
+    if (this.outboxWakeup) {
+      const wake = this.outboxWakeup;
+      this.afterCommit(() => wake());
+    }
+    return this.mapOutboxEffect(row);
+  }
+
+  countOutboxEffects(): {
+    readonly pending: number;
+    readonly deadLetter: number;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN status IN ('pending', 'leased') THEN 1 ELSE 0 END), 0) AS pending_cnt,
+           COALESCE(SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END), 0) AS dead_cnt
+         FROM effects_outbox`,
+      )
+      .get() as SqlRow;
+    return {
+      pending: num(row, 'pending_cnt'),
+      deadLetter: num(row, 'dead_cnt'),
+    };
+  }
+
   listOutboxEffects(limit = 50): OutboxEffectRow[] {
     const rows = this.db
       .prepare('SELECT * FROM effects_outbox ORDER BY created_at DESC LIMIT ?')
       .all(limit) as SqlRow[];
-    return rows.map(r => ({
+    return rows.map(r => this.mapOutboxEffect(r));
+  }
+
+  private mapOutboxEffect(r: SqlRow): OutboxEffectRow {
+    return {
       id: str(r, 'id'),
       kind: str(r, 'kind'),
       dedupeKey: str(r, 'dedupe_key'),
@@ -2435,7 +2593,7 @@ export class ForgeStore {
       nextDueAt: str(r, 'next_due_at'),
       lastError: str(r, 'last_error'),
       createdAt: str(r, 'created_at'),
-    }));
+    };
   }
 
   appendAudit(input: {

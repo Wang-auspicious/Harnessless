@@ -48,7 +48,7 @@ export class OutboxWorker {
   }
 
   wake(): void {
-    if (this.stopped || this.signal?.aborted) {
+    if (this.stopped || this.signal?.aborted || !this.store.isOpen) {
       return;
     }
     if (this.inFlight) {
@@ -57,9 +57,19 @@ export class OutboxWorker {
     }
     this.inFlight = this.drainOnce()
       .then(() => undefined)
+      .catch(err => {
+        if (!this.isDbClosedError(err)) {
+          throw err;
+        }
+      })
       .finally(() => {
         this.inFlight = null;
-        if (this.pendingWake && !this.stopped && !this.signal?.aborted) {
+        if (
+          this.pendingWake &&
+          !this.stopped &&
+          !this.signal?.aborted &&
+          this.store.isOpen
+        ) {
           this.pendingWake = false;
           queueMicrotask(() => this.wake());
         }
@@ -82,54 +92,90 @@ export class OutboxWorker {
   }
 
   async drainOnce(): Promise<number> {
-    if (this.stopped || this.signal?.aborted) {
+    if (this.stopped || this.signal?.aborted || !this.store.isOpen) {
       return 0;
     }
-    const effects = this.store.claimDueEffects(
-      new Date().toISOString(),
-      10,
-      60_000,
-    );
+    let effects;
+    try {
+      effects = this.store.claimDueEffects(
+        new Date().toISOString(),
+        10,
+        60_000,
+      );
+    } catch (err) {
+      if (this.isDbClosedError(err)) {
+        return 0;
+      }
+      throw err;
+    }
     let processed = 0;
 
     for (const eff of effects) {
-      if (this.stopped || this.signal?.aborted) {
-        this.store.rescheduleEffect(
-          eff.id,
-          eff.attempts,
-          1_000,
-          'Worker shutting down',
-          eff.leaseToken ?? undefined,
-        );
+      if (this.stopped || this.signal?.aborted || !this.store.isOpen) {
+        if (this.store.isOpen) {
+          try {
+            this.store.rescheduleEffect(
+              eff.id,
+              Math.max(0, eff.attempts - 1),
+              1_000,
+              'Worker shutting down',
+              eff.leaseToken ?? undefined,
+              eff.payloadVersion,
+            );
+          } catch (err) {
+            if (!this.isDbClosedError(err)) {
+              throw err;
+            }
+          }
+        }
         continue;
       }
 
       try {
         const payload = JSON.parse(eff.payloadJson) as Record<string, unknown>;
-        this.dispatchEffect(eff.kind, payload);
-        this.store.completeEffect(
-          eff.id,
-          eff.leaseToken ?? undefined,
-          eff.payloadVersion,
-        );
+        await this.dispatchEffect(eff.kind, payload);
+        if (this.store.isOpen) {
+          this.store.completeEffect(
+            eff.id,
+            eff.leaseToken ?? undefined,
+            eff.payloadVersion,
+          );
+        }
         processed += 1;
       } catch (err) {
+        if (this.isDbClosedError(err)) {
+          return processed;
+        }
         const msg = err instanceof Error ? err.message : String(err);
-        const backoffMs = Math.min(300_000, 2_000 * 2 ** eff.attempts);
-        this.store.rescheduleEffect(
-          eff.id,
-          eff.attempts + 1,
-          backoffMs,
-          msg,
-          eff.leaseToken ?? undefined,
+        const backoffMs = Math.min(
+          300_000,
+          2_000 * 2 ** Math.max(0, eff.attempts - 1),
         );
+        try {
+          this.store.rescheduleEffect(
+            eff.id,
+            eff.attempts,
+            backoffMs,
+            msg,
+            eff.leaseToken ?? undefined,
+            eff.payloadVersion,
+          );
+        } catch (reschedErr) {
+          if (!this.isDbClosedError(reschedErr)) {
+            throw reschedErr;
+          }
+          return processed;
+        }
       }
     }
 
     return processed;
   }
 
-  private dispatchEffect(kind: string, payload: Record<string, unknown>): void {
+  private async dispatchEffect(
+    kind: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     const hubId = typeof payload['hubId'] === 'string' ? payload['hubId'] : '';
     const executionMode: ExecutionMode =
       payload['executionMode'] === 'simulation' ? 'simulation' : 'live';
@@ -142,7 +188,7 @@ export class OutboxWorker {
             'memory.consolidate requires hubId',
           );
         }
-        this.hindsight.consolidatePendingFacts(hubId, executionMode);
+        await this.hindsight.consolidatePendingFactsAsync(hubId, executionMode);
         this.publish({
           type: 'memory.consolidated',
           hubId,
@@ -158,7 +204,7 @@ export class OutboxWorker {
             'memory.refresh_docs requires hubId',
           );
         }
-        this.hindsight.refreshStaleLivingDocs(hubId, executionMode);
+        await this.hindsight.refreshStaleLivingDocsAsync(hubId, executionMode);
         return;
       }
       case 'memory.git_drift': {
@@ -197,5 +243,13 @@ export class OutboxWorker {
           `Unknown outbox effect kind "${kind}"`,
         );
     }
+  }
+
+  private isDbClosedError(err: unknown): boolean {
+    if (!this.store.isOpen) {
+      return true;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return /database is not open|not open|closed/i.test(msg);
   }
 }

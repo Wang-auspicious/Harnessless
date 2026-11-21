@@ -273,6 +273,7 @@ export class MemoryRepository {
     hubId: string;
     repoId?: string | null;
     executionMode: ExecutionMode;
+    kind?: MemoryFactKind;
     subjectKey: string;
     title: string;
     statement: string;
@@ -285,15 +286,19 @@ export class MemoryRepository {
     entityIds: readonly string[];
     pathAnchors: readonly string[];
     stabilityHours: number;
+    staleSuspect?: boolean;
   }): MemoryObservationRecord {
     const id = input.id ?? `mobs-${randomUUID().slice(0, 10)}`;
     const now = new Date().toISOString();
+    const kind: MemoryFactKind = input.kind ?? 'world';
+    const staleSuspect = input.staleSuspect ? 1 : 0;
     this.ctx.db
       .prepare(
         `INSERT INTO memory_observations
-         (id, hub_id, repo_id, execution_mode, subject_key, title, statement, fts_tokens, belief_status, authority_tier, history_json, supporting_fact_ids_json, contradicting_fact_ids_json, entity_ids_json, path_anchors_json, stability_hours, recall_count, last_recalled_at, stale_suspect, updated_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)
+         (id, hub_id, repo_id, execution_mode, kind, subject_key, title, statement, fts_tokens, belief_status, authority_tier, history_json, supporting_fact_ids_json, contradicting_fact_ids_json, entity_ids_json, path_anchors_json, stability_hours, recall_count, last_recalled_at, stale_suspect, updated_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
+           kind = excluded.kind,
            title = excluded.title,
            statement = excluded.statement,
            fts_tokens = excluded.fts_tokens,
@@ -305,7 +310,7 @@ export class MemoryRepository {
            entity_ids_json = excluded.entity_ids_json,
            path_anchors_json = excluded.path_anchors_json,
            stability_hours = excluded.stability_hours,
-           stale_suspect = 0,
+           stale_suspect = excluded.stale_suspect,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -313,6 +318,7 @@ export class MemoryRepository {
         input.hubId,
         input.repoId ?? null,
         input.executionMode,
+        kind,
         input.subjectKey,
         input.title,
         input.statement,
@@ -326,6 +332,7 @@ export class MemoryRepository {
         JSON.stringify(input.pathAnchors),
         input.stabilityHours,
         now,
+        staleSuspect,
         now,
         now,
       );
@@ -348,7 +355,13 @@ export class MemoryRepository {
       .prepare(
         `SELECT * FROM memory_observations
          WHERE hub_id = ? AND execution_mode = ? AND subject_key = ? AND belief_status IN ('active', 'contested')
-         ORDER BY updated_at DESC`,
+         ORDER BY
+           CASE authority_tier
+             WHEN 'L3_locked' THEN 3
+             WHEN 'L2_verified' THEN 2
+             ELSE 1
+           END DESC,
+           updated_at DESC`,
       )
       .all(hubId, executionMode, subjectKey) as SqlRow[];
     return rows.map(r => this.mapObservation(r));
@@ -374,8 +387,11 @@ export class MemoryRepository {
       .run(new Date().toISOString(), obsId);
   }
 
-  touchObservationRecall(obsId: string, nextStabilityHours?: number): void {
-    const now = new Date().toISOString();
+  touchObservationRecall(
+    obsId: string,
+    nextStabilityHours?: number,
+    nowIso = new Date().toISOString(),
+  ): void {
     this.ctx.db
       .prepare(
         `UPDATE memory_observations SET
@@ -384,15 +400,27 @@ export class MemoryRepository {
            stability_hours = COALESCE(?, stability_hours)
          WHERE id = ?`,
       )
-      .run(now, nextStabilityHours ?? null, obsId);
+      .run(nowIso, nextStabilityHours ?? null, obsId);
   }
 
-  touchFactRecall(factId: string): void {
+  touchFactRecall(factId: string, nowIso = new Date().toISOString()): void {
     this.ctx.db
       .prepare(
         'UPDATE memory_facts SET recall_count = recall_count + 1, last_recalled_at = ? WHERE id = ?',
       )
-      .run(new Date().toISOString(), factId);
+      .run(nowIso, factId);
+  }
+
+  touchVectorRecall(
+    targetKind: 'observation' | 'fact' | 'chunk',
+    targetId: string,
+    nowIso = new Date().toISOString(),
+  ): void {
+    this.ctx.db
+      .prepare(
+        'UPDATE memory_vectors SET last_recalled_at = ? WHERE target_kind = ? AND target_id = ?',
+      )
+      .run(nowIso, targetKind, targetId);
   }
 
   upsertVector(input: {
@@ -411,8 +439,7 @@ export class MemoryRepository {
         `INSERT INTO memory_vectors
          (id, hub_id, execution_mode, target_kind, target_id, embedding_space, dims, vector_blob, active, last_recalled_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-         ON CONFLICT(target_kind, target_id, embedding_space) DO UPDATE SET
-           dims = excluded.dims,
+         ON CONFLICT(target_kind, target_id, embedding_space, dims) DO UPDATE SET
            vector_blob = excluded.vector_blob,
            active = 1,
            updated_at = excluded.updated_at`,
@@ -436,15 +463,27 @@ export class MemoryRepository {
     executionMode: ExecutionMode,
     embeddingSpace: string,
     limit = 2000,
+    dims?: number,
   ): VectorRow[] {
-    const rows = this.ctx.db
-      .prepare(
-        `SELECT id, target_kind, target_id, embedding_space, dims, vector_blob
-         FROM memory_vectors
-         WHERE hub_id = ? AND execution_mode = ? AND embedding_space = ? AND active = 1
-         ORDER BY last_recalled_at DESC LIMIT ?`,
-      )
-      .all(hubId, executionMode, embeddingSpace, limit) as SqlRow[];
+    const rows = (
+      dims !== undefined
+        ? this.ctx.db
+            .prepare(
+              `SELECT id, target_kind, target_id, embedding_space, dims, vector_blob
+               FROM memory_vectors
+               WHERE hub_id = ? AND execution_mode = ? AND embedding_space = ? AND dims = ? AND active = 1
+               ORDER BY last_recalled_at DESC LIMIT ?`,
+            )
+            .all(hubId, executionMode, embeddingSpace, dims, limit)
+        : this.ctx.db
+            .prepare(
+              `SELECT id, target_kind, target_id, embedding_space, dims, vector_blob
+               FROM memory_vectors
+               WHERE hub_id = ? AND execution_mode = ? AND embedding_space = ? AND active = 1
+               ORDER BY last_recalled_at DESC LIMIT ?`,
+            )
+            .all(hubId, executionMode, embeddingSpace, limit)
+    ) as SqlRow[];
     return rows.map(r => ({
       id: str(r, 'id'),
       targetKind: str(r, 'target_kind') as VectorRow['targetKind'],
@@ -598,6 +637,26 @@ export class MemoryRepository {
     }));
   }
 
+  hasActiveEdge(
+    hubId: string,
+    executionMode: ExecutionMode,
+    sourceEntityId: string,
+    targetEntityId: string,
+    relation: string,
+  ): boolean {
+    const row = this.ctx.db
+      .prepare(
+        `SELECT 1 AS present FROM memory_edges
+         WHERE hub_id = ? AND execution_mode = ?
+           AND source_entity_id = ? AND target_entity_id = ?
+           AND relation = ? AND valid_until IS NULL
+         LIMIT 1`,
+      )
+      .get(hubId, executionMode, sourceEntityId, targetEntityId, relation) as
+      SqlRow | undefined;
+    return Boolean(row);
+  }
+
   listFactsByEntityIds(
     hubId: string,
     executionMode: ExecutionMode,
@@ -607,18 +666,20 @@ export class MemoryRepository {
     if (entityIds.length === 0) {
       return [];
     }
+    const placeholders = entityIds.map(() => '?').join(', ');
     const rows = this.ctx.db
       .prepare(
-        `SELECT * FROM memory_facts
-         WHERE hub_id = ? AND execution_mode = ? AND valid_until IS NULL
-         ORDER BY ingested_at DESC LIMIT 200`,
+        `SELECT DISTINCT f.*
+         FROM memory_facts f, json_each(f.entity_ids_json) je
+         WHERE f.hub_id = ?
+           AND f.execution_mode = ?
+           AND f.valid_until IS NULL
+           AND je.value IN (${placeholders})
+         ORDER BY f.ingested_at DESC
+         LIMIT ?`,
       )
-      .all(hubId, executionMode) as SqlRow[];
-    const target = new Set(entityIds);
-    return rows
-      .map(r => this.mapFact(r))
-      .filter(f => f.entityIds.some(eid => target.has(eid)))
-      .slice(0, limit);
+      .all(hubId, executionMode, ...entityIds, limit) as SqlRow[];
+    return rows.map(r => this.mapFact(r));
   }
 
   searchFtsObservations(
@@ -775,6 +836,31 @@ export class MemoryRepository {
     return docs.map(d => d.id);
   }
 
+  markLivingDocsStaleByKinds(
+    hubId: string,
+    executionMode: ExecutionMode,
+    docKinds: readonly LivingDocKind[],
+  ): string[] {
+    if (docKinds.length === 0) {
+      return [];
+    }
+    const kindSet = new Set(docKinds);
+    const docs = this.listLivingDocs(hubId, executionMode).filter(d =>
+      kindSet.has(d.docKind),
+    );
+    if (docs.length === 0) {
+      return [];
+    }
+    const placeholders = docKinds.map(() => '?').join(', ');
+    this.ctx.db
+      .prepare(
+        `UPDATE memory_living_docs SET stale = 1, updated_at = ?
+         WHERE hub_id = ? AND execution_mode = ? AND doc_kind IN (${placeholders})`,
+      )
+      .run(new Date().toISOString(), hubId, executionMode, ...docKinds);
+    return docs.map(d => d.id);
+  }
+
   countRevisedObservationsSince(
     hubId: string,
     executionMode: ExecutionMode,
@@ -854,6 +940,7 @@ export class MemoryRepository {
       hubId: str(r, 'hub_id'),
       repoId: nullableStr(r, 'repo_id'),
       executionMode: str(r, 'execution_mode') as ExecutionMode,
+      kind: (nullableStr(r, 'kind') ?? 'world') as MemoryFactKind,
       subjectKey: str(r, 'subject_key'),
       title: str(r, 'title'),
       statement: str(r, 'statement'),
