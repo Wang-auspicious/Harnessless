@@ -387,6 +387,79 @@ export class MemoryRepository {
       .run(new Date().toISOString(), obsId);
   }
 
+  markObservationContested(
+    obsId: string,
+    historyEntry: ObservationHistoryEntry,
+  ): MemoryObservationRecord | null {
+    const existing = this.getObservation(obsId);
+    if (!existing) {
+      return null;
+    }
+    const nextHistory = [...existing.history, historyEntry];
+    this.ctx.db
+      .prepare(
+        `UPDATE memory_observations
+         SET belief_status = 'contested', stale_suspect = 1, history_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(JSON.stringify(nextHistory), new Date().toISOString(), obsId);
+    return this.getObservation(obsId);
+  }
+
+  reconcileObservation(
+    obsId: string,
+    input: {
+      readonly beliefStatus: ObservationBeliefStatus;
+      readonly staleSuspect: boolean;
+      readonly statement?: string;
+      readonly ftsTokens?: string;
+      readonly historyEntry: ObservationHistoryEntry;
+    },
+  ): MemoryObservationRecord | null {
+    const existing = this.getObservation(obsId);
+    if (!existing) {
+      return null;
+    }
+    const now = new Date().toISOString();
+    const nextHistory = [...existing.history, input.historyEntry];
+    const nextStatement = input.statement ?? existing.statement;
+    const nextFts = input.ftsTokens;
+
+    if (nextFts !== undefined) {
+      this.ctx.db
+        .prepare(
+          `UPDATE memory_observations
+           SET belief_status = ?, stale_suspect = ?, statement = ?, fts_tokens = ?, history_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.beliefStatus,
+          input.staleSuspect ? 1 : 0,
+          nextStatement,
+          nextFts,
+          JSON.stringify(nextHistory),
+          now,
+          obsId,
+        );
+    } else {
+      this.ctx.db
+        .prepare(
+          `UPDATE memory_observations
+           SET belief_status = ?, stale_suspect = ?, statement = ?, history_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.beliefStatus,
+          input.staleSuspect ? 1 : 0,
+          nextStatement,
+          JSON.stringify(nextHistory),
+          now,
+          obsId,
+        );
+    }
+    return this.getObservation(obsId);
+  }
+
   touchObservationRecall(
     obsId: string,
     nextStabilityHours?: number,

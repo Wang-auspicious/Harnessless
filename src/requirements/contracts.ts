@@ -12,6 +12,7 @@ import {
 } from '../core/schema-dsl.ts';
 import type {
   ArtifactRef,
+  CodebaseProbeReport,
   ExecutionMode,
   MemoryAuthorityTier,
   MemoryFactKind,
@@ -366,6 +367,7 @@ export interface HamaStartInput {
     readonly content: string;
   }[];
   readonly parentPrd?: PrdDocument | null;
+  readonly codebaseProbe?: CodebaseProbeReport;
 }
 
 export interface HamaMemoryBridge {

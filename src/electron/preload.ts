@@ -24,6 +24,10 @@ const bridge: ForgePreloadBridge = {
   pickDirectory: () => ipcRenderer.invoke('forgeops:pick-directory'),
   openExternal: (url: string) =>
     ipcRenderer.invoke('forgeops:open-external', url),
+  openPath: (targetPath: string) =>
+    ipcRenderer.invoke('forgeops:open-path', targetPath),
+  openInEditor: (targetPath: string) =>
+    ipcRenderer.invoke('forgeops:open-in-editor', targetPath),
 };
 
 contextBridge.exposeInMainWorld('forgeops', bridge);

@@ -6,10 +6,17 @@ import {
 } from '../core/cognitive.ts';
 import {sha256Text} from '../core/canonical-json.ts';
 import {isFileInsideScope} from '../core/glob-scope.ts';
+import type {ISandboxProcessRunner} from '../sandbox/contracts.ts';
+import {readRecentGitCommits} from '../sandbox/repo-scanner.ts';
 import {ForgeError} from '../shared/errors.ts';
-import type {DomainTermEntry, RehydrationCapsule} from '../shared/types.ts';
+import type {
+  DomainTermEntry,
+  RehydrationCapsule,
+  RepositoryEntry,
+} from '../shared/types.ts';
 import type {
   ExecutionMode,
+  GitReconcileResult,
   LivingDocKind,
   MemoryAuthorityTier,
   MemoryFactKind,
@@ -21,6 +28,7 @@ import type {
   MemoryRecallResult,
   MemoryReflectResult,
   ObservationHistoryEntry,
+  ReconcileObservationInput,
 } from '../shared/v3-types.ts';
 import type {ForgeStore} from '../store/database.ts';
 import {
@@ -1544,6 +1552,216 @@ export class HindsightEngine {
       this.store.setMeta(watermarkKey, true);
     });
     return marked;
+  }
+
+  async reconcileExternalGitChanges(input: {
+    readonly hubId: string;
+    readonly executionMode: ExecutionMode;
+    readonly repos: readonly RepositoryEntry[];
+    readonly runner: ISandboxProcessRunner;
+  }): Promise<GitReconcileResult> {
+    const nowIso = new Date().toISOString();
+    let checkedRepos = 0;
+    const contestedIds = new Set<string>();
+    const detectedReverts: Array<{
+      readonly repoId: string;
+      readonly sha: string;
+      readonly subject: string;
+    }> = [];
+    let retainedPitfalls = 0;
+
+    for (const repo of input.repos) {
+      let headSha = '';
+      try {
+        const headRes = await input.runner.run({
+          executable: 'git',
+          args: ['rev-parse', 'HEAD'],
+          cwd: repo.localPath,
+          extraEnv: {LC_ALL: 'C'},
+          timeoutMs: 3000,
+        });
+        if (headRes.exitCode !== 0) continue;
+        headSha = headRes.stdout.trim();
+      } catch {
+        continue;
+      }
+      if (!headSha) continue;
+      checkedRepos += 1;
+
+      const wmKey = `repo_last_reconciled_sha:${repo.id}`;
+      const lastSha = this.store.getMeta<string>(wmKey) ?? undefined;
+      if (lastSha && lastSha === headSha) {
+        continue;
+      }
+
+      const commits = await readRecentGitCommits(
+        input.runner,
+        repo.id,
+        repo.localPath,
+        lastSha,
+        12,
+      );
+      const externalCommits = commits.filter(c => {
+        const subj = c.subject.trim();
+        const isForgeCommit =
+          /^(?:checkpoint\(|handover\(|chore: initialize repository)/i.test(
+            subj,
+          ) || c.author.trim().toLowerCase() === 'forgeops';
+        return !isForgeCommit;
+      });
+
+      const fileToCommit = new Map<
+        string,
+        {readonly sha: string; readonly subject: string}
+      >();
+      for (const c of externalCommits) {
+        for (const f of c.files) {
+          if (!fileToCommit.has(f)) {
+            fileToCommit.set(f, {sha: c.sha, subject: c.subject});
+          }
+        }
+      }
+
+      if (fileToCommit.size > 0) {
+        const externalFiles = [...fileToCommit.keys()];
+        const activeObs = this.store.memory
+          .listObservations(input.hubId, input.executionMode)
+          .filter(o => o.beliefStatus === 'active' && o.pathAnchors.length > 0);
+
+        this.store.atomic(() => {
+          for (const obs of activeObs) {
+            const matchedFile = externalFiles.find(file =>
+              isFileInsideScope(file, obs.pathAnchors),
+            );
+            if (!matchedFile) continue;
+            const commitMeta = fileToCommit.get(matchedFile)!;
+            this.store.memory.markObservationContested(obs.id, {
+              statement: obs.statement,
+              validFrom: obs.updatedAt || obs.createdAt,
+              validUntil: nowIso,
+              reason: `External git commit ${commitMeta.sha.slice(0, 7)}: ${commitMeta.subject}`,
+              factIds: obs.supportingFactIds,
+            });
+            contestedIds.add(obs.id);
+          }
+        });
+      }
+
+      for (const c of externalCommits) {
+        const isRevert = /^(?:revert\b|回滚|回退)/i.test(c.subject.trim());
+        const isHotfix =
+          /\b(?:CHG-\d+|forgeops\/)\b/i.test(c.subject) &&
+          /\b(?:fix|hotfix)\b|修/i.test(c.subject);
+        if (!isRevert && !isHotfix) continue;
+
+        detectedReverts.push({
+          repoId: repo.id,
+          sha: c.sha,
+          subject: c.subject,
+        });
+        const retained = this.retain({
+          hubId: input.hubId,
+          repoId: repo.id,
+          executionMode: input.executionMode,
+          sourceType: 'git_revert_signal',
+          occurredAt: c.committedAt || nowIso,
+          authorityTier: 'L2_verified',
+          rawText: `External Git ${isRevert ? 'Revert' : 'Hotfix'} (${c.sha.slice(0, 7)}): ${c.subject}\nFiles: ${c.files.join(', ')}`,
+          structuredFacts: [
+            {
+              kind: 'pitfall',
+              subjectKey: `repo:${repo.id}:revert:${c.sha.slice(0, 12)}`,
+              claim: `External ${isRevert ? 'revert' : 'hotfix'} ${c.sha.slice(0, 7)} (${c.subject}) modified ${c.files.slice(0, 4).join(', ') || 'files'}.`,
+              confidence: 0.92,
+              pathAnchors: c.files.slice(0, 12),
+              entityNames: [repo.name, c.sha.slice(0, 7)],
+            },
+          ],
+        });
+        retainedPitfalls += retained.insertedFacts;
+      }
+
+      this.store.setMeta(wmKey, headSha);
+    }
+
+    if (contestedIds.size > 0 || retainedPitfalls > 0) {
+      this.store.memory.markLivingDocsStale(input.hubId, input.executionMode);
+      this.consolidatePendingFacts(input.hubId, input.executionMode);
+    }
+
+    return {
+      checkedRepos,
+      contestedObservationIds: [...contestedIds],
+      detectedReverts,
+      retainedPitfalls,
+      checkedAt: nowIso,
+    };
+  }
+
+  resolveObservationConflict(
+    obsId: string,
+    input: ReconcileObservationInput,
+  ): MemoryObservationRecord {
+    const obs = this.store.memory.getObservation(obsId);
+    if (!obs) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Observation "${obsId}" not found`,
+        404,
+      );
+    }
+    const nowIso = new Date().toISOString();
+    const note = input.note?.trim();
+    const nextStatement =
+      input.resolution === 'adopt_code'
+        ? input.newStatement?.trim() || obs.statement
+        : obs.statement;
+    const nextStatus =
+      input.resolution === 'retire' ? 'retired' : ('active' as const);
+    const reasonPrefix =
+      input.resolution === 'adopt_code'
+        ? 'adopt_code'
+        : input.resolution === 'keep_rule'
+          ? 'keep_rule'
+          : 'retire';
+
+    const updated = this.store.atomic(() => {
+      const rec = this.store.memory.reconcileObservation(obsId, {
+        beliefStatus: nextStatus,
+        staleSuspect: false,
+        statement: nextStatement,
+        ftsTokens:
+          nextStatement !== obs.statement
+            ? buildFtsTokens(`${obs.subjectKey} ${nextStatement}`)
+            : undefined,
+        historyEntry: {
+          statement: obs.statement,
+          validFrom: obs.updatedAt || obs.createdAt,
+          validUntil: nowIso,
+          reason: `${reasonPrefix}: ${note || 'Human reconciled observation conflict'}`,
+          factIds: obs.supportingFactIds,
+        },
+      })!;
+
+      if (nextStatement !== obs.statement) {
+        this.store.memory.upsertVector({
+          hubId: obs.hubId,
+          executionMode: obs.executionMode,
+          targetKind: 'observation',
+          targetId: obs.id,
+          embeddingSpace: LOCAL_EMBEDDING_SPACE,
+          dims: LOCAL_EMBEDDING_DIMS,
+          vectorBlob: encodeFloat32Blob(
+            embedTextLocal(nextStatement, LOCAL_EMBEDDING_DIMS),
+          ),
+        });
+      }
+      this.store.memory.markLivingDocsStale(obs.hubId, obs.executionMode);
+      return rec;
+    });
+
+    this.invalidateVectorCache(obs.hubId, obs.executionMode);
+    return updated;
   }
 
   buildAllCapsules(

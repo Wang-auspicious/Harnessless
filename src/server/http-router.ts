@@ -16,7 +16,10 @@ import {rankAttentionQueue} from '../core/cognitive.ts';
 import type {IAgentAdapterHub} from '../adapters/contracts.ts';
 import type {HindsightEngine} from '../memory/hindsight-engine.ts';
 import type {HamaEngine} from '../requirements/hama-engine.ts';
-import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
+import type {
+  IGitWorktreeManager,
+  ISandboxProcessRunner,
+} from '../sandbox/contracts.ts';
 import type {
   BootstrapSnapshot,
   ChangeDetailSnapshot,
@@ -68,6 +71,7 @@ export class ForgeHttpServer {
   private readonly store: ForgeStore;
   private readonly vault: HostSecretVault;
   private readonly worktrees: IGitWorktreeManager;
+  private readonly runner?: ISandboxProcessRunner;
   private readonly adapters: IAgentAdapterHub;
   private readonly closure: RequirementClosureEngine;
   private readonly continuity: ContinuityEngine;
@@ -83,6 +87,7 @@ export class ForgeHttpServer {
     readonly store: ForgeStore;
     readonly vault: HostSecretVault;
     readonly worktrees: IGitWorktreeManager;
+    readonly runner?: ISandboxProcessRunner;
     readonly adapters: IAgentAdapterHub;
     readonly closure: RequirementClosureEngine;
     readonly continuity: ContinuityEngine;
@@ -99,6 +104,7 @@ export class ForgeHttpServer {
     this.store = deps.store;
     this.vault = deps.vault;
     this.worktrees = deps.worktrees;
+    this.runner = deps.runner;
     this.adapters = deps.adapters;
     this.closure = deps.closure;
     this.continuity = deps.continuity;
@@ -545,6 +551,79 @@ export class ForgeHttpServer {
           actor: 'human_operator',
         });
         this.sendJson(res, 201, ghost);
+        return;
+      }
+
+      const takeoverStatusMatch =
+        /^\/api\/changes\/([^/]+)\/takeover-status$/.exec(path);
+      if (method === 'GET' && takeoverStatusMatch) {
+        const nodeId = url.searchParams.get('nodeId') || undefined;
+        this.sendJson(
+          res,
+          200,
+          await this.continuity.getTakeoverStatus(
+            takeoverStatusMatch[1]!,
+            nodeId,
+          ),
+        );
+        return;
+      }
+
+      const nodeTakeoverMatch =
+        /^\/api\/changes\/([^/]+)\/nodes\/([^/]+)\/takeover$/.exec(path);
+      if (method === 'POST' && nodeTakeoverMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        const actor = optString(body, 'actor', 'human_operator', 80);
+        this.sendJson(
+          res,
+          200,
+          await this.continuity.pauseForHumanTakeover(
+            nodeTakeoverMatch[1]!,
+            nodeTakeoverMatch[2]!,
+            actor,
+          ),
+        );
+        return;
+      }
+
+      const resumeHandoverMatch =
+        /^\/api\/changes\/([^/]+)\/nodes\/([^/]+)\/resume-handover$/.exec(path);
+      if (method === 'POST' && resumeHandoverMatch) {
+        const body = asRecord(await this.readJsonBody(req));
+        this.sendJson(
+          res,
+          200,
+          await this.continuity.resumeFromHumanHandover(
+            resumeHandoverMatch[1]!,
+            resumeHandoverMatch[2]!,
+            {
+              runVerify:
+                body['runVerify'] !== undefined
+                  ? Boolean(body['runVerify'])
+                  : true,
+              handoverNote: optString(body, 'handoverNote', '', 2048),
+              saveAsMemory: Boolean(body['saveAsMemory']),
+              memoryTitle: optString(body, 'memoryTitle', '', 160) || undefined,
+              autoResume:
+                body['autoResume'] !== undefined
+                  ? Boolean(body['autoResume'])
+                  : true,
+              actor: optString(body, 'actor', 'human_operator', 80),
+            },
+          ),
+        );
+        return;
+      }
+
+      const causalDiffMatch = /^\/api\/changes\/([^/]+)\/causal-diff$/.exec(
+        path,
+      );
+      if (method === 'GET' && causalDiffMatch) {
+        this.sendJson(
+          res,
+          200,
+          await this.continuity.getCausalDiff(causalDiffMatch[1]!),
+        );
         return;
       }
 
@@ -1120,6 +1199,49 @@ export class ForgeHttpServer {
         return;
       }
 
+      if (method === 'POST' && path === '/api/missions/probe') {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const probed = await this.missions.probeIntent({
+          hubId: optString(body, 'hubId', '') || undefined,
+          repoIds: optStringArray(body, 'repoIds', 32),
+          repoPaths: optStringArray(body, 'repoPaths', 32),
+          rawIntent: reqString(body, 'rawIntent', 32_768),
+          executionMode:
+            body['executionMode'] !== undefined
+              ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                  'live',
+                  'simulation',
+                ])
+              : undefined,
+        });
+        this.sendJson(res, 200, probed);
+        return;
+      }
+
+      const missionProbeMatch = /^\/api\/missions\/([^/]+)\/probe$/.exec(path);
+      if (method === 'GET' && missionProbeMatch) {
+        if (!this.missions) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Mission orchestrator unavailable',
+            500,
+          );
+        }
+        this.sendJson(
+          res,
+          200,
+          await this.missions.getMissionProbe(missionProbeMatch[1]!),
+        );
+        return;
+      }
+
       const missionDetailMatch = /^\/api\/missions\/([^/]+)$/.exec(path);
       if (method === 'GET' && missionDetailMatch) {
         if (!this.missions) {
@@ -1554,6 +1676,84 @@ export class ForgeHttpServer {
             ? this.store.memory.listObservations(hubId, mode, includeRetired)
             : [],
         );
+        return;
+      }
+
+      if (method === 'POST' && path === '/api/memory/reconcile-git') {
+        if (!this.hindsight || !this.runner) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Hindsight or process runner unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const hubId =
+          optString(body, 'hubId', '') ||
+          this.store.listHubs(false)[0]?.id ||
+          '';
+        if (!hubId || !this.store.getHub(hubId)) {
+          throw new ForgeError('NOT_FOUND', `Hub "${hubId}" not found`, 404);
+        }
+        const mode: ExecutionMode =
+          body['executionMode'] !== undefined
+            ? reqEnum<ExecutionMode>(body, 'executionMode', [
+                'live',
+                'simulation',
+              ])
+            : 'live';
+        const repoIds = optStringArray(body, 'repoIds', 32);
+        const repos =
+          repoIds.length > 0
+            ? this.store
+                .listRepositories(hubId)
+                .filter(r => repoIds.includes(r.id))
+            : this.store.listRepositories(hubId);
+        const recResult = await this.hindsight.reconcileExternalGitChanges({
+          hubId,
+          executionMode: mode,
+          repos,
+          runner: this.runner,
+        });
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'memory',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, recResult);
+        return;
+      }
+
+      const obsReconcileMatch =
+        /^\/api\/memory\/observations\/([^/]+)\/reconcile$/.exec(path);
+      if (method === 'POST' && obsReconcileMatch) {
+        if (!this.hindsight) {
+          throw new ForgeError(
+            'INTERNAL_ERROR',
+            'Hindsight engine unavailable',
+            500,
+          );
+        }
+        const body = asRecord(await this.readJsonBody(req));
+        const updated = this.hindsight.resolveObservationConflict(
+          obsReconcileMatch[1]!,
+          {
+            resolution: reqEnum(body, 'resolution', [
+              'adopt_code',
+              'keep_rule',
+              'retire',
+            ] as const),
+            newStatement:
+              optString(body, 'newStatement', '', 4096) || undefined,
+            note: optString(body, 'note', '', 1024) || undefined,
+          },
+        );
+        this.broadcast({
+          type: 'state.changed',
+          scope: 'memory',
+          at: new Date().toISOString(),
+        });
+        this.sendJson(res, 200, updated);
         return;
       }
 

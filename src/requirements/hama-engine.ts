@@ -22,6 +22,7 @@ import type {
 import type {
   ApprovedRequirementsBaseline,
   ArtifactRef,
+  CodebaseProbeReport,
   DecisionOptionPreview,
   MissionDecisionRecord,
   MissionGateKind,
@@ -98,6 +99,37 @@ function refOf<K extends string>(art: {
 function wrapUntrusted(tag: string, content: string): string {
   const nonce = randomBytes(6).toString('hex');
   return `<${tag} nonce="${nonce}">\n${content}\n</${tag}>`;
+}
+
+function renderCodebaseRealityBlock(probe?: CodebaseProbeReport): string {
+  if (!probe || probe.scannedFilesCount === 0) {
+    return '';
+  }
+  const files = probe.matchedFiles.slice(0, 6).map(f => {
+    const exp = f.exports.slice(0, 4).join(', ');
+    const imp =
+      f.importers.length > 0
+        ? ` | importedBy(${f.importers.length}): ${f.importers.slice(0, 3).join(', ')}`
+        : '';
+    return `- ${f.filePath} (${f.lineCount}L${exp ? ` | exports: ${exp}` : ''}${imp})`;
+  });
+  const notes = probe.realityNotes
+    .slice(0, 4)
+    .map(n => `- [${n.level.toUpperCase()}] ${n.titleEn}: ${n.detailEn}`);
+  const verifyCmds = probe.detectedVerifyCommands
+    .slice(0, 3)
+    .map(v => `${v.repoName}: ${v.command}`);
+
+  const raw = [
+    `BlastRadius=${probe.blastRadius} (${probe.recommendedTrack}), Scanned=${probe.scannedFilesCount}`,
+    verifyCmds.length > 0 ? `Verify: ${verifyCmds.join('; ')}` : '',
+    files.length > 0 ? `Matched Files:\n${files.join('\n')}` : '',
+    notes.length > 0 ? `Reality Challenges:\n${notes.join('\n')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return wrapUntrusted('codebase_probe_reality', raw.slice(0, 1800));
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -231,6 +263,16 @@ export class HamaEngine {
       inputPayload: input,
       stage: 'intake',
     });
+    if (
+      input.codebaseProbe &&
+      !this.store.hama.latestArtifact(mission.id, 'codebase_probe')
+    ) {
+      this.store.hama.writeArtifact(
+        mission.id,
+        'codebase_probe',
+        input.codebaseProbe,
+      );
+    }
   }
 
   getDetail(missionId: string): HamaDetailSnapshot {
@@ -343,6 +385,16 @@ export class HamaEngine {
     }
 
     const input = JSON.parse(run.inputJson) as HamaStartInput;
+    if (
+      input.codebaseProbe &&
+      !this.store.hama.latestArtifact(mission.id, 'codebase_probe')
+    ) {
+      this.store.hama.writeArtifact(
+        mission.id,
+        'codebase_probe',
+        input.codebaseProbe,
+      );
+    }
 
     let intakeArt = this.store.hama.latestArtifact<IntakeArtifactData>(
       mission.id,
@@ -418,6 +470,16 @@ export class HamaEngine {
       );
     }
     const input = JSON.parse(run.inputJson) as HamaStartInput;
+    if (
+      input.codebaseProbe &&
+      !this.store.hama.latestArtifact(mission.id, 'codebase_probe')
+    ) {
+      this.store.hama.writeArtifact(
+        mission.id,
+        'codebase_probe',
+        input.codebaseProbe,
+      );
+    }
     const policy = resolvePresetPolicy(mission.preset, mission.configOverrides);
 
     switch (gate.kind) {
@@ -2236,15 +2298,17 @@ export class HamaEngine {
       mission,
       `${input.title} ${input.rawIntent.slice(0, 200)}`,
     );
+    const probeBlock = renderCodebaseRealityBlock(input.codebaseProbe);
     const docsText = input.documents
       .map(d => `### ${d.title}\n${d.content}`)
       .join('\n\n');
     const systemPrompt =
-      'You are the HAMA Requirements Intake Analyst. Return ONLY a strict JSON object conforming to the schema.';
+      'You are the HAMA Requirements Intake Analyst. Ground every item in real files/exports from codebase_probe_reality and explicitly challenge shaky, redundant, or over-engineered user assumptions with concrete file evidence instead of blindly agreeing. Return ONLY a strict JSON object conforming to the schema.';
     const userPrompt = [
       `Mission Title: ${input.title}`,
       wrapUntrusted('untrusted_intent', input.rawIntent),
       docsText ? wrapUntrusted('untrusted_documents', docsText) : '',
+      probeBlock,
       grounding,
       feedback ? `Clarification Feedback: ${feedback}` : '',
       `JSON Schema: ${JSON.stringify(intakeSchema.json)}`,
@@ -2449,11 +2513,13 @@ export class HamaEngine {
       mission,
       `${input.title} ${intake.summary.slice(0, 160)}`,
     );
+    const probeBlock = renderCodebaseRealityBlock(input.codebaseProbe);
     return this.invokeStructured(
       mission,
-      'You are the HAMA Chief Architect integrating resolved issues into a unified specification Proposal. Return ONLY JSON.',
+      'You are the HAMA Chief Architect integrating resolved issues into a unified specification Proposal. Anchor approach/constraints/risks in real codebase_probe_reality paths and challenge risky assumptions rather than blindly endorsing them. Return ONLY JSON.',
       [
         `Mission: ${input.title}`,
+        probeBlock,
         grounding,
         input.parentPrd
           ? `Parent Baseline ScopeKeys: ${input.parentPrd.requirements.map(r => r.scopeKey).join(', ')}`

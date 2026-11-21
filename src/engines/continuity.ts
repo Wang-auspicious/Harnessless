@@ -1,12 +1,16 @@
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {sha256Canonical} from '../core/canonical-json.ts';
+import {sha256Canonical, sha256Text} from '../core/canonical-json.ts';
 import {reinforceAgentMemoryStability} from '../core/cognitive.ts';
 import {
   renderUbiquitousLanguageSection,
   selectTermsForRepo,
 } from '../core/ddd.ts';
-import {scopesOverlap} from '../core/glob-scope.ts';
+import {
+  detectRetrySpin,
+  normalizeErrorFingerprint,
+} from '../core/failure-guard.ts';
+import {isFileInsideScope, scopesOverlap} from '../core/glob-scope.ts';
 import {
   canAutoAdvanceGate,
   canAutoApproveGhostAmendment,
@@ -25,7 +29,10 @@ import type {
   McpSubmissionPayload,
 } from '../adapters/contracts.ts';
 import type {HindsightEngine} from '../memory/hindsight-engine.ts';
-import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
+import type {
+  IGitWorktreeManager,
+  ISandboxProcessRunner,
+} from '../sandbox/contracts.ts';
 import type {ForgeSseEvent} from '../shared/api.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {
@@ -34,9 +41,16 @@ import type {
   GraphNode,
 } from '../shared/types.ts';
 import type {
+  CausalDiffFile,
+  CausalDiffGroup,
+  CausalDiffReport,
   DecisionOptionPreview,
+  FailureCategory,
   FailureForensicsCard,
   MissionGateKind,
+  ResumeHandoverInput,
+  ResumeHandoverResult,
+  TakeoverStatusSnapshot,
 } from '../shared/v3-types.ts';
 import type {ForgeStore} from '../store/database.ts';
 import type {CompletionCertifier} from './certifier.ts';
@@ -64,6 +78,7 @@ export class ContinuityEngine {
   private readonly steward: InfraStewardEngine;
   private readonly publish: SsePublisher;
   private readonly hindsight?: HindsightEngine;
+  private readonly runner?: ISandboxProcessRunner;
   private readonly rootSignal?: AbortSignal;
   private readonly activeChangeRuns = new Set<string>();
   private readonly activeAbortControllers = new Map<string, AbortController>();
@@ -76,6 +91,10 @@ export class ContinuityEngine {
     string,
     readonly string[]
   >();
+  private readonly nodeFailureHistory = new Map<
+    string,
+    Array<{readonly fingerprint: string; readonly diffHash: string}>
+  >();
   private reservedInFlightUsd = 0;
 
   constructor(deps: {
@@ -87,6 +106,7 @@ export class ContinuityEngine {
     readonly steward: InfraStewardEngine;
     readonly publish: SsePublisher;
     readonly hindsight?: HindsightEngine;
+    readonly runner?: ISandboxProcessRunner;
     readonly rootSignal?: AbortSignal;
   }) {
     this.store = deps.store;
@@ -97,6 +117,7 @@ export class ContinuityEngine {
     this.steward = deps.steward;
     this.publish = deps.publish;
     this.hindsight = deps.hindsight;
+    this.runner = deps.runner;
     this.rootSignal = deps.rootSignal;
   }
 
@@ -522,6 +543,7 @@ export class ContinuityEngine {
         });
         this.store.updateNodeForensics(id, null);
         this.nodePreAttemptSnapshots.delete(`${changeId}:${id}`);
+        this.nodeFailureHistory.delete(`${changeId}:${id}`);
       }
 
       const nextChange = this.store.updateChange(changeId, {status: 'planned'});
@@ -913,6 +935,7 @@ export class ContinuityEngine {
       }
 
       if (verdict.certified) {
+        this.nodeFailureHistory.delete(`${change.id}:${node.id}`);
         this.store.updateGraphNode(node.id, {
           status: 'certified',
           outputSummary: verdict.summary,
@@ -948,19 +971,40 @@ export class ContinuityEngine {
         return {handoff, haltLoop: true};
       }
 
+      const errorFingerprint =
+        verdict.errorFingerprint ??
+        normalizeErrorFingerprint(verdict.summary, verdict.diagnostics);
+
       if (
         (change.executionMode ?? 'live') === 'live' &&
-        verdict.outcome === 'env_fault'
+        (verdict.outcome === 'env_fault' ||
+          verdict.failureCategory === 'infra_env')
       ) {
+        const infraForensics: FailureForensicsCard = {
+          failedNodeId: node.id,
+          failedNodeCode: node.code,
+          reasonCode: verdict.reasonCode,
+          summary: verdict.summary,
+          diagnostics: verdict.diagnostics.slice(0, 6),
+          targetCheckpointLabel: 'Environment Check',
+          rescueRef: 'none',
+          failedAt: new Date().toISOString(),
+          category: 'infra_env',
+          errorFingerprint,
+          suggestedAction:
+            verdict.plainAdvice ??
+            'Fix environment/dependency issue then click Resume.',
+        };
+        this.store.updateNodeForensics(node.id, infraForensics);
         this.store.updateGraphNode(node.id, {
           status: 'blocked_human',
           attemptCount: Math.max(0, node.attemptCount),
-          outputSummary: `Fail-closed audit env fault: ${verdict.summary}`,
+          outputSummary: `Fail-closed env fault: ${verdict.summary}`,
         });
         this.store.updateChangeStatusCas(change.id, capturedEpoch, {
           status: 'paused_human',
         });
-        const question = `Live evaluator fault on ${change.code}/${node.code}: ${verdict.summary}`;
+        const question = `Live environment/evaluator fault on ${change.code}/${node.code}: ${verdict.summary}`;
         this.raisePauseAttention(change, node.id, question);
         this.openMissionPauseGate(change, {
           nodeId: node.id,
@@ -989,12 +1033,84 @@ export class ContinuityEngine {
         return {handoff, haltLoop: true};
       }
 
+      const failKey = `${change.id}:${node.id}`;
+      const diffForSpin = await this.worktrees
+        .diffSinceCommit(change.worktreePath, sinceCommitSha)
+        .catch(() => null);
+      const diffHash = diffForSpin
+        ? sha256Text(diffForSpin.patch).slice(0, 16)
+        : '';
+      const history = this.nodeFailureHistory.get(failKey) ?? [];
+      history.push({fingerprint: errorFingerprint, diffHash});
+      if (history.length > 10) {
+        history.shift();
+      }
+      this.nodeFailureHistory.set(failKey, history);
+
+      const spin = detectRetrySpin(history);
+      if (spin.spinning) {
+        const spinForensics: FailureForensicsCard = {
+          failedNodeId: node.id,
+          failedNodeCode: node.code,
+          reasonCode: verdict.reasonCode,
+          summary: `Paused to prevent retry spin (${spin.reason}): ${verdict.summary}`,
+          diagnostics: verdict.diagnostics.slice(0, 6),
+          targetCheckpointLabel: 'Manual IDE Takeover',
+          rescueRef: 'preserved',
+          failedAt: new Date().toISOString(),
+          category: verdict.failureCategory ?? 'logic_bug',
+          errorFingerprint,
+          spinDetected: true,
+          suggestedAction:
+            'Open worktree in IDE to inspect/fix manually, then Resume from Handover.',
+        };
+        this.store.updateNodeForensics(node.id, spinForensics);
+        this.store.updateGraphNode(node.id, {
+          status: 'blocked_human',
+          attemptCount: Math.max(0, node.attemptCount),
+          outputSummary: `Paused for human handover (${spin.reason}): ${verdict.summary}`,
+        });
+        this.store.updateChangeStatusCas(change.id, capturedEpoch, {
+          status: 'paused_human',
+        });
+        const question = `${node.code} hit repeated failure (${spin.reason}) on ${change.code}. Take over in IDE?`;
+        this.raisePauseAttention(change, node.id, question);
+        this.openMissionPauseGate(change, {
+          nodeId: node.id,
+          kind: 'build_escalation',
+          targetId: change.id,
+          question,
+          contextSnippet: verdict.diagnostics.join(' | ') || verdict.summary,
+          options: [
+            {
+              action: 'resume',
+              label: 'Resume After Manual Fix',
+              recommended: true,
+              consequencePreview:
+                'Resets node to ready and continues from current worktree.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Mark Mission Failed',
+              recommended: false,
+              consequencePreview: 'Halts Mission execution.',
+              requiresFeedback: false,
+            },
+          ],
+        });
+        this.emitMissionUpdatedForChange(change.id);
+        return {handoff, haltLoop: true};
+      }
+
       return this.handleVerificationFailureAndRewind(
         change,
         node,
         verdict.summary,
         verdict.diagnostics,
         handoff,
+        verdict.failureCategory,
+        errorFingerprint,
       );
     }
 
@@ -1694,6 +1810,8 @@ export class ContinuityEngine {
     summary: string,
     diagnostics: readonly string[],
     handoff: EpistemicHandoff,
+    failureCategory?: FailureCategory,
+    errorFingerprint?: string,
   ): Promise<{
     readonly handoff: EpistemicHandoff;
     readonly haltLoop: boolean;
@@ -1734,6 +1852,22 @@ export class ContinuityEngine {
       : checkpoints[checkpoints.length - 1];
 
     if (freshFailed.attemptCount >= freshFailed.maxAttempts || !targetCp) {
+      this.store.updateNodeForensics(freshFailed.id, {
+        failedNodeId: freshFailed.id,
+        failedNodeCode: freshFailed.code,
+        reasonCode: 'GATE_FAILED',
+        summary,
+        diagnostics: diagnostics.slice(0, 6),
+        targetCheckpointLabel: targetCp?.label ?? 'None',
+        rescueRef: 'none',
+        failedAt: new Date().toISOString(),
+        category: failureCategory ?? 'logic_bug',
+        errorFingerprint,
+        suggestedAction:
+          failureCategory === 'test_tampering'
+            ? 'Restore original assertions in test files before resuming.'
+            : 'Open worktree in IDE to fix manually, then Resume from Handover.',
+      });
       this.store.updateGraphNode(freshFailed.id, {
         status: 'failed',
         outputSummary: `${summary} — ${diagnostics.join(' | ')}`,
@@ -1795,6 +1929,12 @@ export class ContinuityEngine {
         targetCheckpointLabel: targetCp.label,
         rescueRef: rewindRes.rescueRef,
         failedAt: new Date().toISOString(),
+        category: failureCategory ?? 'logic_bug',
+        errorFingerprint,
+        suggestedAction:
+          failureCategory === 'test_tampering'
+            ? 'Restore original assertions in test files before resuming.'
+            : undefined,
       };
       this.store.updateNodeForensics(freshFailed.id, forensics);
       this.store.appendEpistemicItem({
@@ -2049,6 +2189,437 @@ export class ContinuityEngine {
       at: gate.createdAt,
     });
     this.emitMissionUpdatedForChange(change.id);
+  }
+
+  async getTakeoverStatus(
+    changeId: string,
+    nodeId?: string,
+  ): Promise<TakeoverStatusSnapshot> {
+    const change = this.store.getChange(changeId);
+    if (!change) {
+      throw new ForgeError('NOT_FOUND', `Change "${changeId}" not found`, 404);
+    }
+    const nodes = this.store.listGraphNodes(changeId);
+    const targetNode = nodeId
+      ? nodes.find(n => n.id === nodeId)
+      : (nodes.find(
+          n =>
+            n.status === 'blocked_human' ||
+            n.status === 'failed' ||
+            n.status === 'running' ||
+            n.status === 'ready',
+        ) ??
+        nodes.find(n => n.kind === 'task' || n.kind === 'ghost') ??
+        nodes[0]);
+    if (!targetNode) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Target node "${nodeId ?? ''}" not found on Change "${changeId}"`,
+        404,
+      );
+    }
+    const sinceSha = this.latestCheckpointSha(change);
+    const diff = await this.worktrees
+      .diffSinceCommit(change.worktreePath, sinceSha)
+      .catch(() => ({
+        summary: '(Worktree diff unavailable)',
+        patch: '',
+        changedFiles: [] as readonly string[],
+      }));
+    return {
+      changeId: change.id,
+      changeCode: change.code,
+      changeStatus: change.status,
+      nodeId: targetNode.id,
+      nodeCode: targetNode.code,
+      nodeTitle: targetNode.title,
+      nodeStatus: targetNode.status,
+      worktreePath: change.worktreePath,
+      gitBranch: change.gitBranch,
+      verifyCommand: targetNode.gateCommand ?? change.verifyCommand,
+      modifiedFiles: diff.changedFiles,
+      diffSummary: diff.summary,
+      diffPatch: diff.patch.slice(0, 64_000),
+      forensics: targetNode.forensics ?? null,
+    };
+  }
+
+  async pauseForHumanTakeover(
+    changeId: string,
+    nodeId: string,
+    actor = 'human_operator',
+  ): Promise<TakeoverStatusSnapshot> {
+    const change = this.store.getChange(changeId);
+    if (!change) {
+      throw new ForgeError('NOT_FOUND', `Change "${changeId}" not found`, 404);
+    }
+    const node = this.store.listGraphNodes(changeId).find(n => n.id === nodeId);
+    if (!node) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Node "${nodeId}" not found on Change "${changeId}"`,
+        404,
+      );
+    }
+    await this.abortChangeRun(changeId);
+
+    const audit = this.store.atomic(() => {
+      this.store.updateGraphNode(node.id, {
+        status: 'blocked_human',
+        attemptCount: node.attemptCount,
+        outputSummary: `Paused for manual IDE takeover by ${actor}.`,
+      });
+      this.store.updateChange(changeId, {status: 'paused_human'});
+      this.store.bumpChangeEpochAtomic(changeId);
+      if (change.missionId) {
+        const mission = this.store.missions.getMission(change.missionId);
+        if (
+          mission &&
+          mission.status !== 'aborted' &&
+          mission.status !== 'delivered' &&
+          mission.status !== 'failed'
+        ) {
+          this.store.missions.updateMissionCas(mission.id, undefined, {
+            status: 'paused_human',
+          });
+        }
+      }
+      return this.store.appendAudit({
+        hubId: change.hubId,
+        changeId: change.id,
+        category: 'gate_decision',
+        actor,
+        title: `Human IDE takeover started at ${node.code}`,
+        detail: `Worktree open for direct inspection & edit: ${change.worktreePath}`,
+      });
+    });
+
+    this.publish({type: 'audit.logged', entry: audit});
+    this.emitState('changes');
+    this.emitMissionUpdatedForChange(changeId);
+    return this.getTakeoverStatus(changeId, node.id);
+  }
+
+  async resumeFromHumanHandover(
+    changeId: string,
+    nodeId: string,
+    input: ResumeHandoverInput,
+  ): Promise<ResumeHandoverResult> {
+    const change = this.store.getChange(changeId);
+    if (!change) {
+      throw new ForgeError('NOT_FOUND', `Change "${changeId}" not found`, 404);
+    }
+    const node = this.store.listGraphNodes(changeId).find(n => n.id === nodeId);
+    if (!node) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Node "${nodeId}" not found on Change "${changeId}"`,
+        404,
+      );
+    }
+    await this.abortChangeRun(changeId);
+
+    const actor = input.actor?.trim() || 'human_operator';
+    const note = input.handoverNote?.trim() || '';
+    const sinceSha = this.latestCheckpointSha(change);
+    const diff = await this.worktrees
+      .diffSinceCommit(change.worktreePath, sinceSha)
+      .catch(() => ({
+        summary: '',
+        patch: '',
+        changedFiles: [] as readonly string[],
+      }));
+
+    let verifyOutput = '';
+    const verifyCmd = (node.gateCommand ?? change.verifyCommand).trim();
+    if (input.runVerify !== false && verifyCmd.length > 0 && this.runner) {
+      const res = await this.runner.runCommandString(
+        verifyCmd,
+        change.worktreePath,
+        180_000,
+        this.store.getConstitution().blockedCommands,
+      );
+      verifyOutput = `${res.stdout}\n${res.stderr}`.trim().slice(-2000);
+      if (res.exitCode !== 0 || res.timedOut) {
+        return {
+          ok: false,
+          verifyPassed: false,
+          verifyOutput:
+            verifyOutput ||
+            `Verify command exited with code ${res.exitCode} (${verifyCmd}).`,
+          checkpointSha: null,
+          checkpointTag: null,
+          changedFiles: diff.changedFiles,
+          memoryRetained: false,
+          resumedExecution: false,
+          message:
+            'Verify command failed; your manual edits remain intact in the worktree.',
+        };
+      }
+    }
+
+    const cpCommit = await this.worktrees.createCheckpoint({
+      worktreePath: change.worktreePath,
+      changeCode: change.code,
+      nodeCode: `HANDOVER-${node.code}`,
+      message: `handover(${change.code}/${node.code}): ${note || 'manual human fix'}`,
+    });
+
+    const audit = this.store.atomic(() => {
+      const allTasks = this.store
+        .listGraphNodes(changeId)
+        .filter(n => n.kind === 'task' || n.kind === 'ghost');
+      const certifiedCount =
+        allTasks.filter(n => n.status === 'certified').length +
+        (node.status === 'certified' ? 0 : 1);
+
+      this.store.recordCheckpoint({
+        changeId: change.id,
+        nodeId: node.id,
+        label: `Handover: ${node.code}`,
+        gitCommitSha: cpCommit.commitSha,
+        gitTag: cpCommit.gitTag,
+        certifiedTaskCount: certifiedCount,
+        totalTaskCount: Math.max(1, allTasks.length),
+        engineSnapshot: {handoverNote: note, changedFiles: diff.changedFiles},
+      });
+      const nextEpoch = this.store.bumpChangeEpochAtomic(changeId);
+      this.store.updateGraphNode(node.id, {
+        status: 'certified',
+        attemptCount: node.attemptCount,
+        outputSummary: `Human handover verified (${cpCommit.commitSha.slice(0, 7)}): ${note || 'manual fix committed'}`,
+      });
+      this.store.updateNodeForensics(node.id, null);
+      this.nodeFailureHistory.delete(`${changeId}:${node.id}`);
+      this.nodePreAttemptSnapshots.delete(`${changeId}:${node.id}`);
+      this.store.updateChange(changeId, {status: 'planned'});
+
+      this.store.appendEpistemicItem({
+        changeId: change.id,
+        nodeId: node.id,
+        executionEpoch: nextEpoch,
+        kind: 'spec_confirmed',
+        content: `Human handover on ${node.code}: ${note || 'Verified manually in IDE'} (files: ${diff.changedFiles.join(', ') || 'none'})`,
+        evidenceRef: cpCommit.gitTag,
+      });
+
+      for (const item of this.store.listAttentionItems(false)) {
+        if (
+          item.changeId === changeId &&
+          (!item.nodeId || item.nodeId === node.id)
+        ) {
+          this.store.resolveAttention(
+            item.id,
+            note || `Resolved via human IDE handover on ${node.code}`,
+            'answered',
+          );
+        }
+      }
+
+      if (change.missionId) {
+        const openGates = this.store.missions.listGates(
+          change.missionId,
+          false,
+        );
+        for (const g of openGates) {
+          if (
+            (g.kind === 'build_escalation' || g.kind === 'qa_decision') &&
+            (g.nodeId === node.id || g.changeId === change.id)
+          ) {
+            this.store.missions.resolveGate(g.id, 'resolved');
+          }
+        }
+        const m = this.store.missions.getMission(change.missionId);
+        if (
+          m &&
+          m.status === 'paused_human' &&
+          this.store.missions.listGates(change.missionId, false).length === 0
+        ) {
+          this.store.missions.updateMissionCas(m.id, undefined, {
+            status: 'executing',
+          });
+        }
+      }
+
+      return this.store.appendAudit({
+        hubId: change.hubId,
+        changeId: change.id,
+        category: 'checkpoint',
+        actor,
+        title: `Completed human handover at ${node.code} (${cpCommit.commitSha.slice(0, 7)})`,
+        detail: `${note || 'Manual fix verified'} | Tag ${cpCommit.gitTag} | Epoch ${nextEpoch}`,
+      });
+    });
+
+    let memoryRetained = false;
+    if (input.saveAsMemory && this.hindsight) {
+      const claimText =
+        note ||
+        `Verified human handover fix on ${node.title} (${diff.changedFiles.slice(0, 4).join(', ')})`;
+      this.hindsight.retain({
+        hubId: change.hubId,
+        repoId: change.repoId,
+        missionId: change.missionId ?? null,
+        executionMode: change.executionMode ?? 'live',
+        sourceType: 'human_handover_lesson',
+        authorityTier: 'L3_locked',
+        rawText: `${input.memoryTitle?.trim() || node.title}\n${claimText}`,
+        structuredFacts: [
+          {
+            kind: 'constraint',
+            subjectKey: `repo:${change.repoId}:handover:${node.code}`,
+            claim: claimText,
+            confidence: 0.99,
+            pathAnchors: diff.changedFiles.slice(0, 16),
+            entityNames: [change.code, node.code, change.repoId],
+          },
+        ],
+      });
+      this.store.enqueueEffect(
+        'memory.consolidate',
+        `consolidate:${change.hubId}:${change.executionMode ?? 'live'}`,
+        {
+          hubId: change.hubId,
+          executionMode: change.executionMode ?? 'live',
+        },
+      );
+      memoryRetained = true;
+    }
+
+    this.publish({type: 'audit.logged', entry: audit});
+    this.emitProgress(
+      changeId,
+      node.id,
+      'certified',
+      `Human handover certified (${cpCommit.commitSha.slice(0, 7)})`,
+    );
+    this.emitState('changes');
+    this.emitMissionUpdatedForChange(changeId);
+
+    const autoResume = input.autoResume !== false;
+    if (autoResume) {
+      void this.startChangeExecution(changeId);
+    }
+
+    return {
+      ok: true,
+      verifyPassed: true,
+      verifyOutput,
+      checkpointSha: cpCommit.commitSha,
+      checkpointTag: cpCommit.gitTag,
+      changedFiles: diff.changedFiles,
+      memoryRetained,
+      resumedExecution: autoResume,
+      message: autoResume
+        ? 'Human handover verified, checkpoint saved, and downstream execution resumed.'
+        : 'Human handover verified and checkpoint saved.',
+    };
+  }
+
+  async getCausalDiff(changeId: string): Promise<CausalDiffReport> {
+    const change = this.store.getChange(changeId);
+    if (!change) {
+      throw new ForgeError('NOT_FOUND', `Change "${changeId}" not found`, 404);
+    }
+    const diff = await this.worktrees
+      .diffSinceCommit(change.worktreePath, change.baseCommitSha)
+      .catch(() => ({
+        summary: '',
+        patch: '',
+        changedFiles: [] as readonly string[],
+      }));
+
+    const parsedFiles = new Map<string, CausalDiffFile>();
+    const sections = diff.patch.split(/(?=^diff --git )/m).filter(Boolean);
+    for (const sec of sections) {
+      const m = /^diff --git a\/(.+?) b\/(.+?)$/m.exec(sec);
+      const rawPath = (m?.[2] ?? m?.[1] ?? '').trim().replace(/\\/g, '/');
+      if (!rawPath) continue;
+      let added = 0;
+      let deleted = 0;
+      for (const line of sec.split(/\r?\n/)) {
+        if (line.startsWith('+++') || line.startsWith('---')) continue;
+        if (line.startsWith('+')) added += 1;
+        else if (line.startsWith('-')) deleted += 1;
+      }
+      parsedFiles.set(rawPath, {
+        filePath: rawPath,
+        patch: sec,
+        addedLines: added,
+        deletedLines: deleted,
+      });
+    }
+    for (const f of diff.changedFiles) {
+      const norm = f.replace(/\\/g, '/');
+      if (!parsedFiles.has(norm)) {
+        parsedFiles.set(norm, {
+          filePath: norm,
+          patch: '',
+          addedLines: 0,
+          deletedLines: 0,
+        });
+      }
+    }
+
+    const nodes = this.store.listGraphNodes(changeId);
+    const phaseMap = new Map(
+      nodes.filter(n => n.kind === 'phase_container').map(p => [p.id, p.title]),
+    );
+    const taskNodes = nodes
+      .filter(n => n.kind === 'task' || n.kind === 'ghost')
+      .sort((a, b) => a.positionY - b.positionY || a.positionX - b.positionX);
+
+    const remaining = new Map(parsedFiles);
+    const groups: CausalDiffGroup[] = [];
+
+    for (const task of taskNodes) {
+      const safeCode = task.code.replace(/[^A-Za-z0-9_-]/g, '_');
+      const slicePath = `.forgeops/slices/${safeCode}.md`;
+      const matched: CausalDiffFile[] = [];
+
+      for (const [filePath, fileObj] of remaining.entries()) {
+        const isTaskSlice = filePath === slicePath;
+        const inDeclaredScope =
+          task.fileScope.length > 0 &&
+          isFileInsideScope(filePath, task.fileScope);
+        if (isTaskSlice || inDeclaredScope) {
+          matched.push(fileObj);
+          remaining.delete(filePath);
+        }
+      }
+
+      if (matched.length > 0) {
+        groups.push({
+          nodeId: task.id,
+          nodeCode: task.code,
+          nodeTitle: task.title,
+          nodeStatus: task.status,
+          phaseLabel:
+            (task.containerNodeId && phaseMap.get(task.containerNodeId)) ||
+            'Execution',
+          files: matched,
+        });
+      }
+    }
+
+    if (remaining.size > 0) {
+      groups.push({
+        nodeId: null,
+        nodeCode: 'SHARED',
+        nodeTitle: 'Shared / Unscoped Files',
+        nodeStatus: change.status,
+        phaseLabel: 'Shared',
+        files: [...remaining.values()],
+      });
+    }
+
+    return {
+      changeId: change.id,
+      changeCode: change.code,
+      gitBranch: change.gitBranch,
+      totalFiles: parsedFiles.size,
+      groups,
+    };
   }
 
   private emitMissionUpdatedForChange(changeId: string): void {

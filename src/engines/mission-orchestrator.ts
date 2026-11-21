@@ -13,7 +13,11 @@ import type {
 } from '../adapters/contracts.ts';
 import type {HindsightEngine} from '../memory/hindsight-engine.ts';
 import type {HamaEngine} from '../requirements/hama-engine.ts';
-import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
+import type {
+  IGitWorktreeManager,
+  ISandboxProcessRunner,
+} from '../sandbox/contracts.ts';
+import {scanRepositoriesForProbe} from '../sandbox/repo-scanner.ts';
 import {resolvePresetPolicy} from '../shared/control-schema.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {
@@ -22,10 +26,16 @@ import type {
   ForgeSseEvent,
   MissionDetailSnapshot,
   MissionTraceabilityResponse,
+  ProbeMissionRequest,
 } from '../shared/api.ts';
-import type {ChangeRecord, GraphNode} from '../shared/types.ts';
+import type {
+  ChangeRecord,
+  GraphNode,
+  RepositoryEntry,
+} from '../shared/types.ts';
 import type {
   BaselineImpactReport,
+  CodebaseProbeReport,
   ControlAvailability,
   ControlCommandInput,
   DecisionAction,
@@ -62,6 +72,7 @@ export interface MissionOrchestratorDeps {
   readonly lookupProvider: ProviderSecretLookup;
   readonly worktreesRoot: string;
   readonly publish: (event: ForgeSseEvent) => void;
+  readonly runner?: ISandboxProcessRunner;
   readonly rootSignal?: AbortSignal;
 }
 
@@ -121,6 +132,7 @@ export class MissionOrchestrator {
   private readonly lookupProvider: ProviderSecretLookup;
   private readonly worktreesRoot: string;
   private readonly publish: (event: ForgeSseEvent) => void;
+  private readonly runner?: ISandboxProcessRunner;
   private readonly rootSignal?: AbortSignal;
   private readonly validationCache = new Map<string, ValidationReport>();
   private readonly trialCache = new Map<string, TrialSimulationReport>();
@@ -140,12 +152,137 @@ export class MissionOrchestrator {
     this.lookupProvider = deps.lookupProvider;
     this.worktreesRoot = deps.worktreesRoot;
     this.publish = deps.publish;
+    this.runner = deps.runner;
     this.rootSignal = deps.rootSignal;
+  }
+
+  async probeIntent(req: ProbeMissionRequest): Promise<CodebaseProbeReport> {
+    const hub = req.hubId
+      ? this.store.getHub(req.hubId)
+      : this.store.listHubs(false)[0];
+    if (req.hubId && !hub) {
+      throw new ForgeError('NOT_FOUND', `Hub "${req.hubId}" not found`, 404);
+    }
+
+    const repos: RepositoryEntry[] = [];
+    if (hub) {
+      const hubRepos = this.store.listRepositories(hub.id);
+      if (req.repoIds && req.repoIds.length > 0) {
+        const idSet = new Set(req.repoIds);
+        repos.push(...hubRepos.filter(r => idSet.has(r.id)));
+      } else if (!req.repoPaths || req.repoPaths.length === 0) {
+        repos.push(...hubRepos);
+      }
+    }
+
+    if (req.repoPaths && req.repoPaths.length > 0) {
+      for (const localPath of req.repoPaths) {
+        if (!existsSync(localPath)) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Repository path does not exist: ${localPath}`,
+            404,
+          );
+        }
+        const registered = hub
+          ? this.store
+              .listRepositories(hub.id)
+              .find(r => r.localPath === localPath)
+          : undefined;
+        repos.push(
+          registered ?? {
+            id: `probe-${basename(localPath)}`,
+            hubId: hub?.id ?? 'probe',
+            name: basename(localPath) || 'repo',
+            tier: 'service',
+            localPath,
+            defaultBranch: 'main',
+            verifyCommand: 'git status --short',
+            contractSummary: '',
+            boundedContext: basename(localPath) || 'core',
+            lastHumanInteractionAt: new Date().toISOString(),
+            spacedReviewCount: 0,
+            createdAt: new Date().toISOString(),
+          },
+        );
+      }
+    }
+
+    let report: CodebaseProbeReport;
+    if (this.runner && repos.length > 0) {
+      report = await scanRepositoriesForProbe(
+        this.worktrees,
+        this.runner,
+        repos,
+        req.rawIntent,
+      );
+    } else {
+      report = {
+        probedAt: new Date().toISOString(),
+        repoCount: repos.length,
+        scannedFilesCount: 0,
+        matchedFiles: [],
+        importEdges: [],
+        detectedVerifyCommands: [],
+        recentHotspots: [],
+        recentReverts: [],
+        realityNotes: [],
+        blastRadius: repos.length > 1 ? 'high' : 'low',
+        recommendedTrack: repos.length > 1 ? 'full_hama' : 'express',
+        plainRationaleZh:
+          '未检测到可扫描的本地代码路径，将按默认规则创建任务。',
+        plainRationaleEn:
+          'No scannable local repository files detected; using standard triage.',
+        estimatedCostRangeUsd: repos.length > 1 ? [2.0, 6.5] : [0.2, 0.8],
+        recalledMemories: [],
+      };
+    }
+
+    if (hub) {
+      const recallRes = this.hindsight.recall({
+        hubId: hub.id,
+        executionMode: req.executionMode ?? 'live',
+        query: req.rawIntent.slice(0, 200),
+        limit: 5,
+        includeRejected: true,
+      });
+      return {
+        ...report,
+        recalledMemories: recallRes.hits.map(h => ({
+          id: h.targetId,
+          title: h.title,
+          authorityTier: h.authorityTier,
+          rejectedWarning: h.rejectedWarning,
+        })),
+      };
+    }
+
+    return report;
+  }
+
+  async getMissionProbe(missionId: string): Promise<CodebaseProbeReport> {
+    const mission = this.mustMission(missionId);
+    const existing = this.store.hama.latestArtifact<CodebaseProbeReport>(
+      missionId,
+      'codebase_probe',
+    );
+    if (existing) {
+      return existing.data;
+    }
+    const probe = await this.probeIntent({
+      hubId: mission.hubId,
+      repoIds: mission.configOverrides.targetRepoIds,
+      rawIntent: mission.rawIntent,
+      executionMode: mission.executionMode,
+    });
+    this.store.hama.writeArtifact(mission.id, 'codebase_probe', probe);
+    return probe;
   }
 
   async createMission(req: CreateMissionRequest): Promise<{
     readonly mission: MissionRecord;
     readonly focus: FocusProjection;
+    readonly probe?: CodebaseProbeReport;
   }> {
     const preset: IntentPresetId = req.preset ?? 'guided';
     const executionMode: ExecutionMode = req.executionMode ?? 'live';
@@ -214,12 +351,43 @@ export class MissionOrchestrator {
       boundRepos = [defaultRepo];
     }
 
+    let probe: CodebaseProbeReport | undefined;
+    if (this.runner) {
+      try {
+        const scanned = await scanRepositoriesForProbe(
+          this.worktrees,
+          this.runner,
+          boundRepos,
+          req.rawIntent,
+        );
+        const recallRes = this.hindsight.recall({
+          hubId: hub.id,
+          executionMode,
+          query: req.rawIntent.slice(0, 200),
+          limit: 5,
+          includeRejected: true,
+        });
+        probe = {
+          ...scanned,
+          recalledMemories: recallRes.hits.map(h => ({
+            id: h.targetId,
+            title: h.title,
+            authorityTier: h.authorityTier,
+            rejectedWarning: h.rejectedWarning,
+          })),
+        };
+      } catch {
+        // Non-blocking codebase probe failure falls back to standard triage.
+      }
+    }
+
     const triage = triageMissionIntent({
       rawIntent: req.rawIntent,
       repoCount: boundRepos.length,
       documentCount: (req.documents ?? []).length,
       requestedTrack: req.triageTrack,
       defaultTrack: policy.defaultTriageTrack,
+      probe,
     });
 
     const projectId =
@@ -266,6 +434,7 @@ export class MissionOrchestrator {
       rawIntent: mission.rawIntent,
       documents: req.documents ?? [],
       parentPrd: parentBaseline?.prd ?? null,
+      codebaseProbe: probe,
     });
 
     this.store.missions.appendEvent(mission.id, 'mission.created', 'operator', {
@@ -376,7 +545,7 @@ export class MissionOrchestrator {
     }
 
     const latest = this.mustMission(mission.id);
-    return {mission: latest, focus: this.getFocusProjection(latest.id)};
+    return {mission: latest, focus: this.getFocusProjection(latest.id), probe};
   }
 
   getFocusProjection(missionId: string): FocusProjection {
@@ -638,6 +807,12 @@ export class MissionOrchestrator {
       this.trialCache.set(missionId, simulated);
     }
 
+    const probe =
+      this.store.hama.latestArtifact<CodebaseProbeReport>(
+        missionId,
+        'codebase_probe',
+      )?.data ?? null;
+
     return {
       mission,
       focus: this.getFocusProjection(missionId),
@@ -647,6 +822,7 @@ export class MissionOrchestrator {
       baseline,
       validation,
       trial,
+      probe,
     };
   }
 

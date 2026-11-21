@@ -118,6 +118,7 @@ export class ForgeRuntime {
       steward: this.steward,
       publish,
       hindsight: this.hindsight,
+      runner: this.runner,
       rootSignal: this.rootAbortController.signal,
     });
     this.hama = new HamaEngine({
@@ -149,6 +150,7 @@ export class ForgeRuntime {
         this.vault.resolveProviderForModel(this.store, model),
       worktreesRoot: this.worktreesRoot,
       publish,
+      runner: this.runner,
       rootSignal: this.rootAbortController.signal,
     });
     this.rooms = new EngineeringRoomsService({
@@ -164,6 +166,7 @@ export class ForgeRuntime {
       store: this.store,
       vault: this.vault,
       worktrees: this.worktrees,
+      runner: this.runner,
       adapters: this.adapters,
       closure: this.closure,
       continuity: this.continuity,

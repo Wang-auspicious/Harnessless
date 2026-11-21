@@ -5,6 +5,12 @@ import {
   renderUbiquitousLanguageSection,
   selectTermsForRepo,
 } from '../core/ddd.ts';
+import {
+  classifyFailure,
+  detectDestructiveContractChanges,
+  detectTestTamperingInDiff,
+  normalizeErrorFingerprint,
+} from '../core/failure-guard.ts';
 import {isFileInsideScope} from '../core/glob-scope.ts';
 import {
   dslArray,
@@ -21,6 +27,7 @@ import type {
 } from '../sandbox/contracts.ts';
 import type {ForgeErrorCode} from '../shared/errors.ts';
 import type {ChangeRecord, GraphNode} from '../shared/types.ts';
+import type {FailureCategory} from '../shared/v3-types.ts';
 import {parseFailClosedAuditJson} from '../shared/validation.ts';
 import type {ForgeStore} from '../store/database.ts';
 
@@ -33,6 +40,9 @@ export interface CertificationVerdict {
   readonly outcome?:
     'completed' | 'rate_limited' | 'env_fault' | 'task_failure';
   readonly retryAfterSeconds?: number;
+  readonly failureCategory?: FailureCategory;
+  readonly errorFingerprint?: string;
+  readonly plainAdvice?: string;
 }
 
 const criteriaResultSchema = dslObject({
@@ -203,13 +213,22 @@ export class CompletionCertifier {
       );
       if (res.exitCode !== 0 || res.timedOut) {
         const tail = `${res.stdout}\n${res.stderr}`.trim().slice(-1200);
+        const failSummary = res.timedOut
+          ? `Hard Gate command timed out: ${cmd}`
+          : `Hard Gate exited with code ${res.exitCode}: ${cmd}`;
+        const diag = classifyFailure({
+          summary: failSummary,
+          diagnostics: [tail || 'Command failed with non-zero exit status.'],
+        });
         return {
           certified: false,
           score: 0,
           reasonCode: 'GATE_FAILED',
-          summary: res.timedOut
-            ? `Hard Gate command timed out: ${cmd}`
-            : `Hard Gate exited with code ${res.exitCode}: ${cmd}`,
+          outcome: diag.category === 'infra_env' ? 'env_fault' : 'task_failure',
+          failureCategory: diag.category,
+          errorFingerprint: diag.fingerprint,
+          plainAdvice: diag.plainAdviceZh,
+          summary: failSummary,
           diagnostics: [tail || 'Command failed with non-zero exit status.'],
         };
       }
@@ -225,12 +244,33 @@ export class CompletionCertifier {
       change.worktreePath,
       baselineSha,
     );
+    const tampering = detectTestTamperingInDiff(diff.patch);
+    if (tampering.tampered) {
+      return {
+        certified: false,
+        score: 0,
+        reasonCode: 'GATE_FAILED',
+        outcome: 'task_failure',
+        failureCategory: 'test_tampering',
+        errorFingerprint: normalizeErrorFingerprint(
+          'Test tampering detected',
+          tampering.findings,
+        ),
+        plainAdvice:
+          '禁止通过跳过用例或删减断言来凑绿灯。请恢复原测试或申请修订测试。',
+        summary:
+          'Blocked: detected silent weakening or deletion of existing tests',
+        diagnostics: tampering.findings,
+      };
+    }
+
     const drift = detectTerminologyDrift(diff.patch, terms);
     if (drift.length > 0) {
       return {
         certified: false,
         score: 0.25,
         reasonCode: 'DDD_DRIFT_DETECTED',
+        failureCategory: 'spec_gap',
         summary: `DDD Terminology Drift Gate blocked ${drift.length} prohibited alias(es) in worktree diff.`,
         diagnostics: drift.map(
           d =>
@@ -239,11 +279,17 @@ export class CompletionCertifier {
       };
     }
 
+    const contractWarnings = detectDestructiveContractChanges(diff.patch);
+    const warningSuffix =
+      contractWarnings.length > 0
+        ? ` [Contract Advisory: ${contractWarnings[0]}]`
+        : '';
+
     return {
       certified: true,
       score: 1,
       reasonCode: 'OK',
-      summary: `Hard Gates (${cmd || 'ddd-check'}) & DDD Terminology Gate passed.`,
+      summary: `Hard Gates (${cmd || 'ddd-check'}) & DDD Terminology Gate passed.${warningSuffix}`,
       diagnostics: [],
     };
   }

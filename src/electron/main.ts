@@ -6,8 +6,9 @@
  * single-instance lock, external URL quarantine, and `FORGEOPS_SMOKE_EXIT=1`.
  */
 
+import {spawn} from 'node:child_process';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {join, resolve} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import process from 'node:process';
 import {pathToFileURL} from 'node:url';
 import {
@@ -95,6 +96,72 @@ function isAllowedExternalUrl(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateAllowedLocalPath(rawPath: unknown): string | null {
+  if (!runtime || typeof rawPath !== 'string' || !rawPath.trim()) {
+    return null;
+  }
+  const roots = [
+    runtime.worktreesRoot,
+    ...runtime.store.listRepositories().map(r => r.localPath),
+  ];
+  for (const root of roots) {
+    if (!root || !existsSync(root)) continue;
+    try {
+      const resolved = runtime.worktrees.resolveInside(root, rawPath, {
+        allowDotGit: false,
+      });
+      if (existsSync(resolved)) {
+        return resolved;
+      }
+    } catch {
+      // Try next allowed root.
+    }
+  }
+  return null;
+}
+
+async function tryLaunchVsCode(targetPath: string): Promise<boolean> {
+  if (!runtime) return false;
+  let exe = runtime.runner.resolveExecutable('code');
+  if (
+    exe &&
+    process.platform === 'win32' &&
+    exe.toLowerCase().endsWith('code.cmd')
+  ) {
+    const winExe = resolve(dirname(exe), '../Code.exe');
+    exe = existsSync(winExe) ? winExe : null;
+  }
+  if (!exe) {
+    return false;
+  }
+  return new Promise(resolveSpawn => {
+    let settled = false;
+    try {
+      const child = spawn(exe, [targetPath], {
+        shell: false,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.once('error', () => {
+        if (!settled) {
+          settled = true;
+          resolveSpawn(false);
+        }
+      });
+      child.unref();
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolveSpawn(true);
+        }
+      }, 250);
+    } catch {
+      resolveSpawn(false);
+    }
+  });
 }
 
 function isTrustedSenderFrame(
@@ -191,6 +258,38 @@ async function bootstrapDesktop(): Promise<void> {
     }
     await shell.openExternal(rawUrl);
     return true;
+  });
+
+  ipcMain.handle('forgeops:open-path', async (ev, rawPath: unknown) => {
+    if (
+      !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin)
+    ) {
+      return false;
+    }
+    const valid = validateAllowedLocalPath(rawPath);
+    if (!valid) {
+      return false;
+    }
+    const err = await shell.openPath(valid);
+    return err === '';
+  });
+
+  ipcMain.handle('forgeops:open-in-editor', async (ev, rawPath: unknown) => {
+    if (
+      !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin)
+    ) {
+      return {ok: false, editor: 'none'};
+    }
+    const valid = validateAllowedLocalPath(rawPath);
+    if (!valid) {
+      return {ok: false, editor: 'none'};
+    }
+    const openedCode = await tryLaunchVsCode(valid);
+    if (openedCode) {
+      return {ok: true, editor: 'vscode'};
+    }
+    const err = await shell.openPath(valid);
+    return {ok: err === '', editor: 'explorer'};
   });
 
   const preloadPath = resolve(__dirname, 'preload.cjs');
