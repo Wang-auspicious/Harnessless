@@ -94,6 +94,11 @@ export function analyzeBaselineImpact(input: {
     key => !nextMap.has(key) && !renamedFromSet.has(key),
   );
 
+  const rawRenamePairs: Array<{
+    readonly fromScopeKey: string;
+    readonly toScopeKey: string;
+    readonly similarity: number;
+  }> = [];
   for (const addedKey of addedScopeKeys) {
     const addedReq = nextMap.get(addedKey)!;
     for (const removedKey of removedScopeKeys) {
@@ -103,13 +108,30 @@ export function analyzeBaselineImpact(input: {
         `${removedReq.title} ${removedReq.description}`,
       );
       if (sim >= 0.45) {
-        renamedScopeCandidates.push({
+        rawRenamePairs.push({
           fromScopeKey: removedKey,
           toScopeKey: addedKey,
           similarity: Number(sim.toFixed(3)),
         });
       }
     }
+  }
+  rawRenamePairs.sort((a, b) => {
+    if (b.similarity !== a.similarity) {
+      return b.similarity - a.similarity;
+    }
+    const fromCmp = a.fromScopeKey.localeCompare(b.fromScopeKey);
+    return fromCmp !== 0 ? fromCmp : a.toScopeKey.localeCompare(b.toScopeKey);
+  });
+  const matchedFrom = new Set<string>();
+  const matchedTo = new Set<string>();
+  for (const pair of rawRenamePairs) {
+    if (matchedFrom.has(pair.fromScopeKey) || matchedTo.has(pair.toScopeKey)) {
+      continue;
+    }
+    matchedFrom.add(pair.fromScopeKey);
+    matchedTo.add(pair.toScopeKey);
+    renamedScopeCandidates.push(pair);
   }
 
   const impactedReqIds = new Set<string>();
@@ -136,9 +158,7 @@ export function analyzeBaselineImpact(input: {
         continue;
       }
       const refs = n.requirementRefs ?? [];
-      const isAffected =
-        refs.some(ref => impactedReqIds.has(ref)) ||
-        (refs.length === 0 && addedScopeKeys.length > 0);
+      const isAffected = refs.some(ref => impactedReqIds.has(ref));
       if (isAffected) {
         affectedNodeIds.push(n.id);
       } else if (n.status === 'certified') {

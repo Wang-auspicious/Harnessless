@@ -253,10 +253,10 @@ export function compileTwinGraph(
 
     phase.tasks.forEach((task, tIdx) => {
       const currentId = codeToTaskId.get(task.code)!;
-      if (task.dependsOnCodes && task.dependsOnCodes.length > 0) {
+      if (Array.isArray(task.dependsOnCodes)) {
         for (const depCode of task.dependsOnCodes) {
           const depId = codeToTaskId.get(depCode);
-          if (depId) {
+          if (depId && depId !== currentId) {
             edges.push(makeEdge(changeId, depId, currentId, 'dep'));
           }
         }

@@ -1,3 +1,4 @@
+import type {PrdDocument} from '../shared/v3-types.ts';
 import type {
   AgendaArtifactData,
   CritiqueData,
@@ -41,6 +42,38 @@ export class SimulationHamaResponder {
     const clarifyNote = input.clarification
       ? ` Human clarification applied: ${input.clarification}.`
       : '';
+    const simClarify =
+      input.rawIntent.includes('[sim:clarify]') && !input.clarification;
+    const blockingQuestions = simClarify
+      ? ['Clarify primary deployment latency target and failure boundary.']
+      : [];
+    const questions = simClarify
+      ? [
+          {
+            question:
+              'Clarify primary deployment latency target and failure boundary.',
+            critical: true,
+          },
+        ]
+      : [];
+
+    const evidence: IntakeArtifactData['evidence'] = [
+      {
+        kind: 'user_fact',
+        claim: input.rawIntent.slice(0, 300) || input.title,
+        sourceRef: 'intent',
+      },
+      ...input.documents.map(d => ({
+        kind: 'document_fact' as const,
+        claim: d.content.slice(0, 300) || d.title,
+        sourceRef: d.title || 'document',
+      })),
+      {
+        kind: 'agent_inference',
+        claim: `Security and audit validation boundary inferred for ${secScope}.`,
+        sourceRef: 'hama-intake',
+      },
+    ];
 
     return {
       summary: `Structured requirements intake for "${input.title}": ${input.rawIntent.slice(0, 240)}.${docNote}${clarifyNote}`,
@@ -68,14 +101,16 @@ export class SimulationHamaResponder {
           sourceRef: docTitles[1] ?? 'security-policy',
         },
       ],
+      evidence,
+      questions,
       ambiguities:
-        input.rawIntent.length < 24 && !input.clarification
+        simClarify || (input.rawIntent.length < 24 && !input.clarification)
           ? ['Clarify primary deployment latency target and failure policy.']
           : [],
       risks: [
         'Scope creep between core workflow delivery and secondary reporting hooks.',
       ],
-      blockingQuestions: [],
+      blockingQuestions,
     };
   }
 
@@ -97,17 +132,25 @@ export class SimulationHamaResponder {
   }
 
   respondAgenda(intake: IntakeArtifactData): AgendaArtifactData {
-    const issues = intake.rawItems.map((item, idx) => ({
-      id: `ISS-${String(idx + 1).padStart(3, '0')}`,
-      title: item.title,
-      scopeKey: `${slugScope(item.title, `scope.${idx + 1}`)}`,
-      summary: item.detail.slice(0, 500),
-      priority: item.priority,
-      itemIds: [item.id],
-      ownerRole: (idx === 0 ? 'product' : 'architecture') as HamaRole,
-      openQuestions:
-        idx === 0 ? ['Confirm strict fail-closed error semantics.'] : [],
-    }));
+    const usedKeys = new Set<string>();
+    const issues = intake.rawItems.map((item, idx) => {
+      let scopeKey = slugScope(item.title, `scope.${idx + 1}`);
+      if (usedKeys.has(scopeKey)) {
+        scopeKey = `${scopeKey}.${idx + 1}`;
+      }
+      usedKeys.add(scopeKey);
+      return {
+        id: `ISS-${String(idx + 1).padStart(3, '0')}`,
+        title: item.title,
+        scopeKey,
+        summary: item.detail.slice(0, 500),
+        priority: item.priority,
+        itemIds: [item.id],
+        ownerRole: (idx === 0 ? 'product' : 'architecture') as HamaRole,
+        openQuestions:
+          idx === 0 ? ['Confirm strict fail-closed error semantics.'] : [],
+      };
+    });
     return {issues};
   }
 
@@ -135,7 +178,7 @@ export class SimulationHamaResponder {
           key: 'fail-closed',
           given: `Malformed or unauthorized input reaches ${input.scopeKey}`,
           when: 'Boundary validation executes',
-          then: 'Operation rejects cleanly with structured diagnostic error',
+          then: 'Execution rejects cleanly with structured diagnostic error',
         },
       ],
       tradeoffs: [
@@ -150,7 +193,19 @@ export class SimulationHamaResponder {
   respondCritique(input: {
     readonly issueId: string;
     readonly role: HamaRole;
+    readonly rawIntent?: string;
+    readonly feedback?: string;
+    readonly round?: number;
+    readonly peerIssueIds?: readonly string[];
   }): CritiqueData {
+    const triggerConflict =
+      (input.rawIntent?.includes('[sim:conflict_edge]') ||
+        input.feedback?.includes('[sim:conflict_edge]')) &&
+      input.role === 'architecture' &&
+      (input.round ?? 1) <= 2 &&
+      input.issueId !== 'ISS-001' &&
+      (input.peerIssueIds ?? []).includes('ISS-001');
+
     return {
       issueId: input.issueId,
       role: input.role,
@@ -163,7 +218,17 @@ export class SimulationHamaResponder {
         input.role === 'quality'
           ? ['Preserve deterministic failure diagnostics on rejected inputs.']
           : [],
-      newEdges: [],
+      newEdges: triggerConflict
+        ? [
+            {
+              from: input.issueId,
+              to: 'ISS-001',
+              kind: 'conflict',
+              reason:
+                'Simulated cross-issue contract conflict detected against peer proposal.',
+            },
+          ]
+        : [],
     };
   }
 
@@ -196,36 +261,52 @@ export class SimulationHamaResponder {
       readonly summary: string;
     }[];
     readonly feedback?: string;
+    readonly parentPrd?: PrdDocument | null;
   }): ProposalArtifactData {
-    const scopeItems = input.issues.map((iss, idx) => ({
-      scopeKey: iss.scopeKey,
-      kind: (idx === 0 ? 'functional' : 'nonfunctional') as
-        'functional' | 'nonfunctional',
-      title: iss.title,
-      description: `${iss.summary}${input.feedback ? ` [Integrated Feedback: ${input.feedback}]` : ''}`,
-      value:
-        idx === 0
-          ? 'Core user capability with measurable acceptance checks.'
-          : 'Operational reliability, security, and auditability boundary.',
-      priority: iss.priority,
-      issueIds: [iss.id],
-      dependencies: idx > 0 ? [input.issues[0]!.scopeKey] : [],
-      constraints: ['Strict fail-closed boundary enforcement'],
-      acceptance: [
-        {
-          key: 'verified-behavior',
-          given: `Configured environment and approved baseline for ${iss.scopeKey}`,
-          when: `${iss.title} executes`,
-          then: 'Expected state transition and artifact checks pass cleanly',
-        },
-        {
-          key: 'rejected-invalid',
-          given: `Invalid payload targets ${iss.scopeKey}`,
-          when: 'Validator evaluates the request',
-          then: 'Execution halts cleanly without partial state mutation',
-        },
-      ],
-    }));
+    const usedScopeKeys = new Set<string>();
+    const parentReqs = input.parentPrd?.requirements ?? [];
+    const scopeItems = input.issues.map((iss, idx) => {
+      let scopeKey = iss.scopeKey;
+      if (usedScopeKeys.has(scopeKey)) {
+        scopeKey = `${scopeKey}.${idx + 1}`;
+      }
+      usedScopeKeys.add(scopeKey);
+      const parentReq = parentReqs[idx];
+      const supersedesScopeKey =
+        parentReq && parentReq.scopeKey !== scopeKey
+          ? parentReq.scopeKey
+          : undefined;
+      return {
+        scopeKey,
+        ...(supersedesScopeKey ? {supersedesScopeKey} : {}),
+        kind: (idx === 0 ? 'functional' : 'nonfunctional') as
+          'functional' | 'nonfunctional',
+        title: iss.title,
+        description: `${iss.summary}${input.feedback ? ` [Integrated Feedback: ${input.feedback}]` : ''}`,
+        value:
+          idx === 0
+            ? 'Core user capability with measurable acceptance checks.'
+            : 'Operational reliability, security, and auditability boundary.',
+        priority: iss.priority,
+        issueIds: [iss.id],
+        dependencies: idx > 0 ? [input.issues[0]!.scopeKey] : [],
+        constraints: ['Strict fail-closed boundary enforcement'],
+        acceptance: [
+          {
+            key: 'verified-behavior',
+            given: `Configured environment and approved baseline for ${scopeKey}`,
+            when: `${iss.title} executes`,
+            then: 'Expected state transition and artifact checks pass cleanly',
+          },
+          {
+            key: 'rejected-invalid',
+            given: `Invalid payload targets ${scopeKey}`,
+            when: 'Validator evaluates the request',
+            then: 'Execution halts cleanly without partial state mutation',
+          },
+        ],
+      };
+    });
 
     return {
       title: `${input.title} Specification Proposal`,
@@ -258,19 +339,79 @@ export class SimulationHamaResponder {
     readonly dimension: EvalDimension;
     readonly proposal: ProposalArtifactData;
     readonly triggerCondition?: boolean;
+    readonly rawIntent?: string;
+    readonly feedback?: string;
+    readonly reworkCount?: number;
   }): EvaluationArtifactData {
-    if (input.triggerCondition && input.dimension === 'risk') {
+    const reworkCount = input.reworkCount ?? 0;
+    const primaryItem = input.proposal.scopeItems[0];
+    const primaryScope = primaryItem?.scopeKey ?? 'core';
+    const primaryIssues = primaryItem?.issueIds ?? ['ISS-001'];
+
+    const simVeto =
+      ((input.rawIntent?.includes('[sim:veto]') && reworkCount === 0) ||
+        input.feedback?.includes('[sim:veto]')) &&
+      input.dimension === 'feasibility';
+    if (simVeto) {
       return {
-        dimension: 'risk',
+        dimension: 'feasibility',
+        verdict: 'fail',
+        score: 35,
+        summary: 'Simulated veto: critical security/architecture violation.',
+        findings: [
+          {
+            severity: 'veto',
+            message:
+              'Simulated veto requires human escalation before proposal approval.',
+            scopeKey: primaryScope,
+            owner: 'architecture',
+            verification: 'Resolve architectural veto constraint',
+          },
+        ],
+      };
+    }
+
+    const simBlocking =
+      ((input.rawIntent?.includes('[sim:blocking]') && reworkCount === 0) ||
+        input.feedback?.includes('[sim:blocking]')) &&
+      input.dimension === 'feasibility';
+    if (simBlocking) {
+      return {
+        dimension: 'feasibility',
+        verdict: 'fail',
+        score: 52,
+        summary: 'Simulated blocking feasibility gap requiring Loop B rework.',
+        findings: [
+          {
+            severity: 'blocking',
+            message:
+              'Simulated blocking finding requires re-discussing primary issue.',
+            scopeKey: primaryScope,
+            issueIds: primaryIssues,
+            owner: 'architecture',
+            verification: 'Address blocking feasibility gap via Loop B',
+          },
+        ],
+      };
+    }
+
+    const simCondition =
+      (input.triggerCondition && input.dimension === 'risk') ||
+      ((input.rawIntent?.includes('[sim:conditional]') ||
+        input.feedback?.includes('[sim:conditional]')) &&
+        input.dimension === 'completeness');
+    if (simCondition) {
+      return {
+        dimension: input.dimension,
         verdict: 'condition',
         score: 84,
         summary:
-          'Risk audit requires release sign-off on fail-closed rollback.',
+          'Evaluation audit requires release sign-off on fail-closed rollback.',
         findings: [
           {
-            severity: 'medium',
+            severity: 'condition',
             message: 'Verify checkpoint rollback cleans partial scope edits.',
-            scopeKey: input.proposal.scopeItems[0]?.scopeKey ?? 'core',
+            scopeKey: primaryScope,
             owner: 'quality',
             verification:
               'Run phase gate verification with dirty worktree check',
