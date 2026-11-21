@@ -204,16 +204,16 @@ async function bootstrapDesktop(): Promise<void> {
     minWidth: 1180,
     minHeight: 720,
     show: !isSmoke,
-    title: 'ForgeOps Console',
-    backgroundColor: '#f8fafc',
+    title: 'ForgeOps v3.0 — Focus-First Software Factory',
+    backgroundColor: '#faf8f4',
     autoHideMenuBar: true,
     ...(useWinOverlay
       ? {
           titleBarStyle: 'hidden',
           titleBarOverlay: {
             color: '#ffffff',
-            symbolColor: '#334155',
-            height: 47,
+            symbolColor: '#1c1917',
+            height: 48,
           },
         }
       : {}),
