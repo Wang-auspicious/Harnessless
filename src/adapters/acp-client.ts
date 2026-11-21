@@ -6,6 +6,10 @@
  */
 
 import type {ISandboxProcessRunner} from '../sandbox/contracts.ts';
+import {
+  type InteractiveProcessControls,
+  SandboxProcessRunner,
+} from '../sandbox/process-runner.ts';
 import type {PermissionTier} from '../shared/types.ts';
 import type {
   AgentInvocationRequest,
@@ -102,6 +106,7 @@ function buildAcpRpcRequests(req: AgentInvocationRequest): string {
     },
   };
 
+  const effectiveTier = req.readOnly ? 'strict' : req.permissionTier;
   const sessionNewFrame = {
     jsonrpc: '2.0',
     id: 2,
@@ -109,7 +114,7 @@ function buildAcpRpcRequests(req: AgentInvocationRequest): string {
     params: {
       cwd: req.cwd,
       model: req.model || req.adapter.defaultModel,
-      permissionTier: req.permissionTier,
+      permissionTier: effectiveTier,
       readOnly: req.readOnly,
       mcpServers,
     },
@@ -157,13 +162,19 @@ export async function runAcpSession(
     };
   }
 
-  const args = [
+  const effectiveTier = req.readOnly ? 'strict' : req.permissionTier;
+  const rawArgs = [
     ...req.adapter.baseArgs,
-    ...req.adapter.permissionFlags[req.permissionTier],
+    ...req.adapter.permissionFlags[effectiveTier],
   ];
+  const args = req.readOnly
+    ? rawArgs.filter(
+        f => f !== '--full-auto' && f !== '--dangerously-skip-permissions',
+      )
+    : rawArgs;
   const extraEnv: Record<string, string> = {
     FORGEOPS_SESSION_ID: req.sessionId,
-    FORGEOPS_PERMISSION_TIER: req.permissionTier,
+    FORGEOPS_PERMISSION_TIER: effectiveTier,
     FORGEOPS_READ_ONLY: req.readOnly ? '1' : '0',
   };
   if (req.mcpEndpointUrl) {
@@ -183,8 +194,12 @@ export async function runAcpSession(
   let costUsd = 0;
   let rpcErrorText = '';
   let permissionDeniedReason = '';
+  let killedForPermission = false;
 
-  const parseJsonRpcLine = (rawLine: string): void => {
+  const parseJsonRpcLine = (
+    rawLine: string,
+    controls: InteractiveProcessControls,
+  ): void => {
     const trimmed = rawLine.trim();
     if (!trimmed.startsWith('{')) {
       return;
@@ -240,7 +255,7 @@ export async function runAcpSession(
         const cmdText =
           typeof params['command'] === 'string' ? params['command'] : '';
         const decision = evaluateAcpPermission(
-          req.permissionTier,
+          effectiveTier,
           req.readOnly,
           toolName,
           cmdText,
@@ -250,8 +265,27 @@ export async function runAcpSession(
           `[ACP Permission ${decision.optionId.toUpperCase()}] ${toolName}: ${decision.reason}`,
           toolName,
         );
+        if (msg['id'] !== undefined && msg['id'] !== null) {
+          controls.writeStdin(
+            `${JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg['id'],
+              result: {
+                outcome: decision.allowed
+                  ? {outcome: 'selected', optionId: decision.optionId}
+                  : {outcome: 'cancelled'},
+                allowed: decision.allowed,
+                optionId: decision.optionId,
+                reason: decision.reason,
+              },
+            })}\n`,
+          );
+        }
         if (!decision.allowed) {
           permissionDeniedReason = decision.reason;
+          killedForPermission = true;
+          controls.endStdin();
+          controls.terminate();
         }
         return;
       }
@@ -263,6 +297,9 @@ export async function runAcpSession(
             ? errObj['message']
             : JSON.stringify(errObj);
         diagnostics.push(rpcErrorText);
+        if (msg['id'] === 3) {
+          controls.endStdin();
+        }
       }
 
       if (msg['result'] && typeof msg['result'] === 'object') {
@@ -302,21 +339,29 @@ export async function runAcpSession(
             costUsd += u['costUsd'];
           }
         }
+        if (msg['id'] === 3) {
+          controls.endStdin();
+        }
       }
     } catch {
       // Non-JSON diagnostic line; ignore.
     }
   };
 
-  const runResult = await runner.run({
+  const interactiveRunner =
+    runner instanceof SandboxProcessRunner
+      ? runner
+      : new SandboxProcessRunner();
+  const runResult = await interactiveRunner.runInteractive({
     executable: req.adapter.command,
     args,
     cwd: req.cwd,
     envAllowlist: req.adapter.envAllowlist,
     extraEnv,
     stdinText: buildAcpRpcRequests(req),
+    keepStdinOpen: true,
     timeoutMs: req.timeoutMs ?? 120_000,
-    onStdoutLine: parseJsonRpcLine,
+    onInteractiveStdoutLine: parseJsonRpcLine,
     signal: req.signal,
   });
 
@@ -330,16 +375,14 @@ export async function runAcpSession(
   ]
     .filter(Boolean)
     .join(' | ');
+  const timedOutWithoutDeny = runResult.timedOut && !killedForPermission;
   const failed =
+    timedOutWithoutDeny ||
     runResult.exitCode !== 0 ||
     rpcErrorText.length > 0 ||
     permissionDeniedReason.length > 0;
 
-  if (
-    failed &&
-    (RATE_LIMIT_PATTERN.test(combinedDiag) ||
-      RATE_LIMIT_PATTERN.test(runResult.stdout))
-  ) {
+  if (failed && RATE_LIMIT_PATTERN.test(combinedDiag)) {
     return {
       outcome: 'rate_limited',
       finalText: assistantChunks.join('').trim(),
@@ -352,6 +395,23 @@ export async function runAcpSession(
       durationSec,
       diagnostic: combinedDiag || 'ACP session rate limited (429)',
       retryAfterSeconds: 30,
+    };
+  }
+
+  if (timedOutWithoutDeny) {
+    return {
+      outcome: 'env_fault',
+      finalText: assistantChunks.join('').trim(),
+      mcpSubmission: null,
+      inputTokens,
+      cachedTokens,
+      firstTurnCachedTokens,
+      outputTokens,
+      costUsd,
+      durationSec,
+      diagnostic: combinedDiag
+        ? `ACP session timed out: ${combinedDiag}`
+        : `ACP adapter ${req.adapter.command} timed out`,
     };
   }
 

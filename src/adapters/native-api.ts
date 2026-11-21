@@ -1,5 +1,14 @@
-import {mkdirSync, readdirSync, readFileSync, writeFileSync} from 'node:fs';
-import {dirname} from 'node:path';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import {dirname, relative} from 'node:path';
 import {isFileInsideScope, normalizeRepoPath} from '../core/glob-scope.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import type {
@@ -30,7 +39,8 @@ function inferProviderCandidates(model: string): string[] {
   if (
     lower.startsWith('gpt') ||
     lower.startsWith('o1') ||
-    lower.startsWith('o3')
+    lower.startsWith('o3') ||
+    lower.startsWith('o4')
   ) {
     return ['openai', 'opencode-go', 'deepseek', 'anthropic'];
   }
@@ -96,6 +106,45 @@ interface NativeToolExecutionResult {
   readonly submission?: McpSubmissionPayload;
 }
 
+const MAX_READ_BYTES = 524_288;
+
+function readBoundedFileText(filePath: string, maxChars: number): string {
+  const st = statSync(filePath);
+  if (!st.isFile()) {
+    throw new Error(`Path is not a regular file: ${filePath}`);
+  }
+  const toRead = Math.min(st.size, MAX_READ_BYTES);
+  if (toRead <= 0) {
+    return '';
+  }
+  const fd = openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(toRead);
+    let offset = 0;
+    while (offset < toRead) {
+      const n = readSync(fd, buf, offset, toRead - offset, offset);
+      if (n <= 0) {
+        break;
+      }
+      offset += n;
+    }
+    return buf.subarray(0, offset).toString('utf8').slice(0, maxChars);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function resolveCanonicalRoot(
+  cwd: string,
+  worktrees: IGitWorktreeManager,
+): string {
+  try {
+    return realpathSync.native(cwd).replace(/^\\\\\?\\/, '');
+  } catch {
+    return worktrees.resolveInside(cwd, '.');
+  }
+}
+
 function executeConfinedTool(
   req: AgentInvocationRequest,
   worktrees: IGitWorktreeManager,
@@ -107,8 +156,11 @@ function executeConfinedTool(
       case 'read_file': {
         const relPath =
           typeof args['path'] === 'string' ? args['path'].trim() : '';
-        const safePath = worktrees.resolveInside(req.cwd, relPath || '.');
-        const content = readFileSync(safePath, 'utf8').slice(0, 32_768);
+        if (!relPath) {
+          return {output: 'Missing file path', isError: true};
+        }
+        const safePath = worktrees.resolveInside(req.cwd, relPath);
+        const content = readBoundedFileText(safePath, 32_768);
         return {output: content, isError: false};
       }
 
@@ -132,8 +184,20 @@ function executeConfinedTool(
         if (!relPath) {
           return {output: 'Missing file path', isError: true};
         }
-        const normRel = normalizeRepoPath(relPath);
-        if (normRel === '.forgeops' || normRel.startsWith('.forgeops/')) {
+        const safePath = worktrees.resolveInside(req.cwd, relPath);
+        const canonicalRoot = resolveCanonicalRoot(req.cwd, worktrees);
+        const relPosix = relative(canonicalRoot, safePath).replace(/\\/g, '/');
+        const canonicalRel = normalizeRepoPath(relPosix);
+        if (!canonicalRel) {
+          return {
+            output: 'POLICY_DENIED: Invalid or escaping write path',
+            isError: true,
+          };
+        }
+        if (
+          canonicalRel === '.forgeops' ||
+          canonicalRel.startsWith('.forgeops/')
+        ) {
           return {
             output:
               'POLICY_DENIED: Workers cannot write inside host-reserved .forgeops/',
@@ -143,20 +207,19 @@ function executeConfinedTool(
         if (
           req.fileScope &&
           req.fileScope.length > 0 &&
-          !isFileInsideScope(normRel, req.fileScope)
+          !isFileInsideScope(canonicalRel, req.fileScope)
         ) {
           return {
-            output: `POLICY_DENIED: "${normRel}" is outside declared task fileScope [${req.fileScope.join(', ')}]`,
+            output: `POLICY_DENIED: "${canonicalRel}" is outside declared task fileScope [${req.fileScope.join(', ')}]`,
             isError: true,
           };
         }
         const content =
           typeof args['content'] === 'string' ? args['content'] : '';
-        const safePath = worktrees.resolveInside(req.cwd, relPath);
         mkdirSync(dirname(safePath), {recursive: true});
         writeFileSync(safePath, content, 'utf8');
         return {
-          output: `Wrote ${content.length} bytes to ${relPath}`,
+          output: `Wrote ${content.length} bytes to ${canonicalRel}`,
           isError: false,
         };
       }
@@ -255,10 +318,27 @@ function buildTurnSignal(
   parentSignal: AbortSignal | undefined,
   timeoutMs: number,
 ): AbortSignal {
-  const timeoutSig = AbortSignal.timeout(Math.max(2000, timeoutMs));
+  const timeoutSig = AbortSignal.timeout(Math.max(100, timeoutMs));
   return parentSignal
     ? AbortSignal.any([parentSignal, timeoutSig])
     : timeoutSig;
+}
+
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw new Error('Aborted');
+  }
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      rejectPromise(new Error('Aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolvePromise();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, {once: true});
+  });
 }
 
 async function fetchWithTransientRetry(
@@ -278,8 +358,10 @@ async function fetchWithTransientRetry(
         signal: buildTurnSignal(parentSignal, turnTimeoutMs),
       });
       if (res.status >= 500 && res.status < 600 && attempt < 2) {
-        await new Promise(r =>
-          setTimeout(r, 350 * (attempt + 1) + Math.floor(Math.random() * 250)),
+        await res.body?.cancel().catch(() => {});
+        await abortableSleep(
+          350 * (attempt + 1) + Math.floor(Math.random() * 250),
+          parentSignal,
         );
         continue;
       }
@@ -289,8 +371,9 @@ async function fetchWithTransientRetry(
       if (parentSignal?.aborted || attempt === 2) {
         throw err;
       }
-      await new Promise(r =>
-        setTimeout(r, 350 * (attempt + 1) + Math.floor(Math.random() * 250)),
+      await abortableSleep(
+        350 * (attempt + 1) + Math.floor(Math.random() * 250),
+        parentSignal,
       );
     }
   }
@@ -323,7 +406,7 @@ export async function runNativeApiSession(
 
   const maxTurns =
     req.maxToolTurns ?? (req.textOnly ? 1 : req.readOnly ? 8 : 16);
-  const turnTimeoutMs = Math.min(90_000, req.timeoutMs ?? 60_000);
+  const totalTimeoutMs = req.timeoutMs ?? 60_000;
   const maxTokens = req.maxOutputTokens ?? (req.readOnly ? 2048 : 4096);
 
   let inputTokens = 0;
@@ -332,6 +415,7 @@ export async function runNativeApiSession(
   let sawFirstTurn = false;
   let outputTokens = 0;
   let mcpSubmission: McpSubmissionPayload | null = null;
+  let exhaustedToolTurns = false;
   const assistantTexts: string[] = [];
 
   const finalizeCost = (): number =>
@@ -342,6 +426,14 @@ export async function runNativeApiSession(
       cachedTokens,
       outputTokens,
     );
+
+  const getRemainingTurnTimeoutMs = (): number | null => {
+    const remaining = totalTimeoutMs - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      return null;
+    }
+    return Math.min(90_000, remaining);
+  };
 
   try {
     if (provider.protocol === 'openai-compatible') {
@@ -356,6 +448,22 @@ export async function runNativeApiSession(
       ];
 
       for (let turn = 0; turn < maxTurns; turn += 1) {
+        const turnTimeoutMs = getRemainingTurnTimeoutMs();
+        if (turnTimeoutMs === null) {
+          return {
+            outcome: 'env_fault',
+            finalText: assistantTexts.join('\n').trim(),
+            mcpSubmission,
+            inputTokens,
+            cachedTokens,
+            firstTurnCachedTokens,
+            outputTokens,
+            costUsd: finalizeCost(),
+            durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
+            diagnostic: `Native API session exceeded timeout (${totalTimeoutMs}ms)`,
+          };
+        }
+
         const bodyPayload: Record<string, unknown> = {
           model: modelId,
           messages,
@@ -382,6 +490,7 @@ export async function runNativeApiSession(
         );
 
         if (res.status === 429) {
+          await res.body?.cancel().catch(() => {});
           const retryAfterSeconds = parseRetryAfterSeconds(
             res.headers.get('retry-after'),
           );
@@ -401,6 +510,7 @@ export async function runNativeApiSession(
         }
 
         if (res.status === 401 || res.status === 403) {
+          await res.body?.cancel().catch(() => {});
           return {
             outcome: 'env_fault',
             finalText: '',
@@ -516,23 +626,39 @@ export async function runNativeApiSession(
           const toolName =
             typeof fnObj['name'] === 'string' ? fnObj['name'] : '';
           let parsedArgs: Record<string, unknown> = {};
+          let argsValid = true;
           if (typeof fnObj['arguments'] === 'string') {
-            try {
-              parsedArgs = JSON.parse(fnObj['arguments']) as Record<
-                string,
-                unknown
-              >;
-            } catch {
-              parsedArgs = {};
+            const rawArgs = fnObj['arguments'].trim();
+            if (rawArgs.length > 0) {
+              try {
+                const parsed = JSON.parse(rawArgs) as unknown;
+                if (
+                  parsed &&
+                  typeof parsed === 'object' &&
+                  !Array.isArray(parsed)
+                ) {
+                  parsedArgs = parsed as Record<string, unknown>;
+                } else {
+                  argsValid = false;
+                }
+              } catch {
+                argsValid = false;
+              }
             }
+          } else if (
+            fnObj['arguments'] &&
+            typeof fnObj['arguments'] === 'object' &&
+            !Array.isArray(fnObj['arguments'])
+          ) {
+            parsedArgs = fnObj['arguments'] as Record<string, unknown>;
           }
 
-          const toolRes = executeConfinedTool(
-            req,
-            worktrees,
-            toolName,
-            parsedArgs,
-          );
+          const toolRes: NativeToolExecutionResult = argsValid
+            ? executeConfinedTool(req, worktrees, toolName, parsedArgs)
+            : {
+                output: `Malformed JSON arguments for tool "${toolName}"`,
+                isError: true,
+              };
           req.onChunk?.('tool', toolRes.output, toolName);
           if (toolRes.submission) {
             mcpSubmission = toolRes.submission;
@@ -547,6 +673,9 @@ export async function runNativeApiSession(
 
         if (mcpSubmission) {
           break;
+        }
+        if (turn === maxTurns - 1) {
+          exhaustedToolTurns = true;
         }
       }
     } else {
@@ -572,6 +701,22 @@ export async function runNativeApiSession(
         : req.systemPrompt;
 
       for (let turn = 0; turn < maxTurns; turn += 1) {
+        const turnTimeoutMs = getRemainingTurnTimeoutMs();
+        if (turnTimeoutMs === null) {
+          return {
+            outcome: 'env_fault',
+            finalText: assistantTexts.join('\n').trim(),
+            mcpSubmission,
+            inputTokens,
+            cachedTokens,
+            firstTurnCachedTokens,
+            outputTokens,
+            costUsd: finalizeCost(),
+            durationSec: Math.max(0.01, (Date.now() - startedAt) / 1000),
+            diagnostic: `Native API session exceeded timeout (${totalTimeoutMs}ms)`,
+          };
+        }
+
         const bodyPayload: Record<string, unknown> = {
           model: modelId,
           max_tokens: maxTokens,
@@ -600,6 +745,7 @@ export async function runNativeApiSession(
         );
 
         if (res.status === 429) {
+          await res.body?.cancel().catch(() => {});
           const retryAfterSeconds = parseRetryAfterSeconds(
             res.headers.get('retry-after'),
           );
@@ -619,6 +765,7 @@ export async function runNativeApiSession(
         }
 
         if (res.status === 401 || res.status === 403) {
+          await res.body?.cancel().catch(() => {});
           return {
             outcome: 'env_fault',
             finalText: '',
@@ -658,9 +805,13 @@ export async function runNativeApiSession(
             typeof u['cache_read_input_tokens'] === 'number'
               ? u['cache_read_input_tokens']
               : 0;
+          const cacheCreate =
+            typeof u['cache_creation_input_tokens'] === 'number'
+              ? u['cache_creation_input_tokens']
+              : 0;
           const outTok =
             typeof u['output_tokens'] === 'number' ? u['output_tokens'] : 0;
-          inputTokens += inTok + cacheRead;
+          inputTokens += inTok + cacheRead + cacheCreate;
           cachedTokens += cacheRead;
           if (!sawFirstTurn) {
             firstTurnCachedTokens = cacheRead;
@@ -718,6 +869,9 @@ export async function runNativeApiSession(
 
         messages.push({role: 'assistant', content: contentBlocks});
         messages.push({role: 'user', content: toolResults});
+        if (turn === maxTurns - 1) {
+          exhaustedToolTurns = true;
+        }
       }
     }
   } catch (err) {
@@ -737,6 +891,23 @@ export async function runNativeApiSession(
   }
 
   const finalText = assistantTexts.join('\n').trim();
+
+  if (exhaustedToolTurns) {
+    return {
+      outcome: 'task_failure',
+      finalText,
+      mcpSubmission,
+      inputTokens,
+      cachedTokens,
+      firstTurnCachedTokens,
+      outputTokens,
+      costUsd: finalizeCost(),
+      durationSec: Number(
+        Math.max(0.01, (Date.now() - startedAt) / 1000).toFixed(3),
+      ),
+      diagnostic: `Exhausted maxToolTurns (${maxTurns}) while model continued requesting tool calls`,
+    };
+  }
 
   return {
     outcome: 'completed',

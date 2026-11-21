@@ -1,9 +1,36 @@
 export function normalizeRepoPath(rawPath: string): string {
-  return rawPath
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\.\/+/, '')
-    .replace(/\/+/g, '/');
+  const replaced = rawPath.trim().replace(/\\/g, '/');
+  if (
+    !replaced ||
+    replaced.includes('\0') ||
+    replaced.startsWith('/') ||
+    /^[a-zA-Z]:/.test(replaced)
+  ) {
+    return '';
+  }
+
+  const hasTrailingSlash = replaced.endsWith('/');
+  const parts = replaced.split('/');
+  const stack: string[] = [];
+
+  for (const seg of parts) {
+    if (!seg || seg === '.') {
+      continue;
+    }
+    if (seg === '..') {
+      if (stack.length === 0) {
+        return '';
+      }
+      stack.pop();
+      continue;
+    }
+    stack.push(seg);
+  }
+
+  if (stack.length === 0) {
+    return '';
+  }
+  return hasTrailingSlash ? `${stack.join('/')}/` : stack.join('/');
 }
 
 function globToRegExp(pattern: string): RegExp {
@@ -45,7 +72,7 @@ function globToRegExp(pattern: string): RegExp {
 export function matchesGlob(filePath: string, pattern: string): boolean {
   const cleanFile = normalizeRepoPath(filePath);
   const cleanPattern = normalizeRepoPath(pattern);
-  if (!cleanPattern) {
+  if (!cleanFile || !cleanPattern) {
     return false;
   }
   if (!/[*?]/.test(cleanPattern)) {

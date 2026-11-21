@@ -54,7 +54,8 @@ function unwrapWindowsNpmCmdTarget(cmdPath: string): string | null {
     if (!match?.[1]) {
       return null;
     }
-    const candidate = resolve(dirname(cmdPath), match[1]);
+    const relTarget = match[1].replace(/^[/\\]+/, '');
+    const candidate = resolve(dirname(cmdPath), relTarget);
     return existsSync(candidate) ? candidate : null;
   } catch {
     return null;
@@ -201,21 +202,39 @@ export function tokenizeCommandArgv(segment: string): string[] {
   return tokens;
 }
 
-function killProcessTree(pid: number | undefined): void {
+async function killProcessTree(pid: number | undefined): Promise<void> {
   if (!pid || pid <= 0) {
     return;
   }
   if (process.platform === 'win32') {
-    try {
-      const killer = spawn('taskkill', ['/T', '/F', '/PID', String(pid)], {
-        shell: false,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      killer.unref();
-    } catch {
-      // Fallback to direct kill below.
-    }
+    await new Promise<void>(resolveKill => {
+      let done = false;
+      const finishKill = (): void => {
+        if (!done) {
+          done = true;
+          resolveKill();
+        }
+      };
+      const guard = setTimeout(finishKill, 1500);
+      try {
+        const killer = spawn('taskkill', ['/T', '/F', '/PID', String(pid)], {
+          shell: false,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        killer.once('close', () => {
+          clearTimeout(guard);
+          finishKill();
+        });
+        killer.once('error', () => {
+          clearTimeout(guard);
+          finishKill();
+        });
+      } catch {
+        clearTimeout(guard);
+        finishKill();
+      }
+    });
     try {
       process.kill(pid, 'SIGKILL');
     } catch {
@@ -233,6 +252,24 @@ function killProcessTree(pid: number | undefined): void {
       // Process already exited.
     }
   }
+}
+
+function quoteCmdToken(token: string): string {
+  return /[\s"]/u.test(token) ? `"${token.replace(/"/g, '\\"')}"` : token;
+}
+
+export interface InteractiveProcessControls {
+  writeStdin(text: string): void;
+  endStdin(): void;
+  terminate(): void;
+}
+
+export interface InteractiveProcessRunOptions extends ProcessRunOptions {
+  readonly keepStdinOpen?: boolean;
+  readonly onInteractiveStdoutLine?: (
+    line: string,
+    controls: InteractiveProcessControls,
+  ) => void;
 }
 
 export class SandboxProcessRunner implements ISandboxProcessRunner {
@@ -292,6 +329,12 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
   }
 
   async run(options: ProcessRunOptions): Promise<ProcessRunResult> {
+    return this.runInteractive(options);
+  }
+
+  async runInteractive(
+    options: InteractiveProcessRunOptions,
+  ): Promise<ProcessRunResult> {
     const fullArgv = [options.executable, ...options.args];
     const violation = findBlockedCommandViolation(
       fullArgv,
@@ -316,6 +359,16 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
     }
 
     const startedAt = Date.now();
+    if (options.signal?.aborted) {
+      return {
+        exitCode: 124,
+        stdout: '',
+        stderr: 'Aborted before process spawn',
+        timedOut: true,
+        durationMs: 1,
+      };
+    }
+
     const resolved = this.resolveExecutable(options.executable);
     if (!resolved) {
       return {
@@ -329,6 +382,7 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
 
     let spawnFile = resolved;
     let spawnArgs: string[] = [...options.args];
+    let windowsVerbatimArguments = false;
 
     if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolved)) {
       const nodeScript = unwrapWindowsNpmCmdTarget(resolved);
@@ -346,7 +400,16 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
           }
         }
         spawnFile = process.env['ComSpec'] || 'cmd.exe';
-        spawnArgs = ['/d', '/s', '/c', resolved, ...options.args];
+        const needsOuterQuotes = [resolved, ...options.args].some(t =>
+          /[\s"]/u.test(t),
+        );
+        if (needsOuterQuotes) {
+          const cmdLine = `"${[resolved, ...options.args].map(quoteCmdToken).join(' ')}"`;
+          spawnArgs = ['/d', '/s', '/c', cmdLine];
+          windowsVerbatimArguments = true;
+        } else {
+          spawnArgs = ['/d', '/s', '/c', resolved, ...options.args];
+        }
       }
     }
 
@@ -363,23 +426,50 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
       let stderrRemainder = '';
       let timedOut = false;
       let settled = false;
+      let killRequested = false;
 
       const child = spawn(spawnFile, spawnArgs, {
         cwd: options.cwd,
         env,
         shell: false,
+        detached: process.platform !== 'win32',
         windowsHide: true,
+        windowsVerbatimArguments,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
+      const triggerTreeKill = (): void => {
+        if (killRequested) {
+          return;
+        }
+        killRequested = true;
+        void killProcessTree(child.pid);
+      };
+
+      const controls: InteractiveProcessControls = {
+        writeStdin: (text: string) => {
+          if (child.stdin && !child.stdin.destroyed && child.stdin.writable) {
+            child.stdin.write(text, 'utf8');
+          }
+        },
+        endStdin: () => {
+          if (child.stdin && !child.stdin.destroyed) {
+            child.stdin.end();
+          }
+        },
+        terminate: () => {
+          triggerTreeKill();
+        },
+      };
+
       const timer = setTimeout(() => {
         timedOut = true;
-        killProcessTree(child.pid);
+        triggerTreeKill();
       }, timeoutMs);
 
       const onAbort = (): void => {
         timedOut = true;
-        killProcessTree(child.pid);
+        triggerTreeKill();
       };
 
       if (options.signal) {
@@ -390,6 +480,11 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
         }
       }
 
+      const emitStdoutLine = (line: string): void => {
+        options.onStdoutLine?.(line);
+        options.onInteractiveStdoutLine?.(line, controls);
+      };
+
       const finish = (exitCode: number, extraStderr = ''): void => {
         if (settled) {
           return;
@@ -399,8 +494,8 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
         if (options.signal) {
           options.signal.removeEventListener('abort', onAbort);
         }
-        if (stdoutRemainder && options.onStdoutLine) {
-          options.onStdoutLine(stdoutRemainder);
+        if (stdoutRemainder) {
+          emitStdoutLine(stdoutRemainder);
           stdoutRemainder = '';
         }
         if (stderrRemainder && options.onStderrLine) {
@@ -422,12 +517,12 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
       child.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
         stdout += text;
-        if (options.onStdoutLine) {
+        if (options.onStdoutLine || options.onInteractiveStdoutLine) {
           stdoutRemainder += text;
           const lines = stdoutRemainder.split(/\r?\n/);
           stdoutRemainder = lines.pop() ?? '';
           for (const line of lines) {
-            options.onStdoutLine(line);
+            emitStdoutLine(line);
           }
         }
       });
@@ -454,10 +549,15 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
       });
 
       if (child.stdin) {
+        child.stdin.on('error', () => {
+          // Ignore EPIPE when child exits before consuming stdin.
+        });
         if (options.stdinText !== undefined) {
           child.stdin.write(options.stdinText, 'utf8');
         }
-        child.stdin.end();
+        if (!options.keepStdinOpen) {
+          child.stdin.end();
+        }
       }
     });
   }

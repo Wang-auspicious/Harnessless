@@ -31,10 +31,16 @@ export function buildCliInvocationArgs(req: AgentInvocationRequest): {
   readonly stdinText?: string;
 } {
   const {adapter, permissionTier, mcpEndpointUrl, mcpAttemptToken} = req;
-  const args: string[] = [
+  const effectiveTier = req.readOnly ? 'strict' : permissionTier;
+  const rawFlags = [
     ...adapter.baseArgs,
-    ...adapter.permissionFlags[permissionTier],
+    ...adapter.permissionFlags[effectiveTier],
   ];
+  const args: string[] = req.readOnly
+    ? rawFlags.filter(
+        f => f !== '--full-auto' && f !== '--dangerously-skip-permissions',
+      )
+    : rawFlags;
 
   if (mcpEndpointUrl) {
     if (adapter.mcpInjection === 'claude-mcp-json') {
@@ -52,6 +58,12 @@ export function buildCliInvocationArgs(req: AgentInvocationRequest): {
       args.push('--mcp-config', JSON.stringify(mcpConfig));
     } else if (adapter.mcpInjection === 'codex-flag') {
       args.push('-c', `mcp_servers.forge_station.url="${mcpEndpointUrl}"`);
+      if (mcpAttemptToken) {
+        args.push(
+          '-c',
+          'mcp_servers.forge_station.bearer_token_env_var="FORGEOPS_MCP_TOKEN"',
+        );
+      }
     }
   }
 
@@ -280,7 +292,7 @@ export async function runCliStreamSession(
   const extraEnv: Record<string, string> = {
     FORGEOPS_SESSION_ID: req.sessionId,
     FORGEOPS_MODEL: req.model || req.adapter.defaultModel,
-    FORGEOPS_PERMISSION_TIER: req.permissionTier,
+    FORGEOPS_PERMISSION_TIER: req.readOnly ? 'strict' : req.permissionTier,
     FORGEOPS_READ_ONLY: req.readOnly ? '1' : '0',
   };
   if (req.mcpEndpointUrl) {
@@ -348,13 +360,12 @@ export async function runCliStreamSession(
   const diagText = [streamErrorText, runResult.stderr.trim()]
     .filter(Boolean)
     .join(' | ');
-  const failed = runResult.exitCode !== 0 || streamErrorText.length > 0;
+  const failed =
+    runResult.timedOut ||
+    runResult.exitCode !== 0 ||
+    streamErrorText.length > 0;
 
-  if (
-    failed &&
-    (RATE_LIMIT_PATTERN.test(diagText) ||
-      RATE_LIMIT_PATTERN.test(runResult.stdout))
-  ) {
+  if (failed && RATE_LIMIT_PATTERN.test(diagText)) {
     return {
       outcome: 'rate_limited',
       finalText,
@@ -367,6 +378,23 @@ export async function runCliStreamSession(
       durationSec,
       diagnostic: diagText || 'CLI harness rate limited (429)',
       retryAfterSeconds: 30,
+    };
+  }
+
+  if (runResult.timedOut) {
+    return {
+      outcome: 'env_fault',
+      finalText,
+      mcpSubmission: null,
+      inputTokens,
+      cachedTokens,
+      firstTurnCachedTokens,
+      outputTokens,
+      costUsd,
+      durationSec,
+      diagnostic: diagText
+        ? `CLI harness timed out: ${diagText}`
+        : `${req.adapter.command} timed out after ${Math.round((req.timeoutMs ?? 120_000) / 1000)}s`,
     };
   }
 
