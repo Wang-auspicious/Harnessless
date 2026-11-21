@@ -1,7 +1,9 @@
 import {randomUUID} from 'node:crypto';
 import {computeEventHash} from '../core/canonical-json.ts';
 import {ForgeError} from '../shared/errors.ts';
+import type {PermissionTier} from '../shared/types.ts';
 import type {
+  BaselineImpactReport,
   DecisionInput,
   DecisionOptionPreview,
   ExecutionMode,
@@ -305,15 +307,18 @@ export class MissionRepository {
     }
   }
 
-  findDecisionByIdempotencyKey(idempotencyKey: string): {
+  findDecisionByIdempotencyKey(
+    missionId: string,
+    idempotencyKey: string,
+  ): {
     readonly payloadSha256: string;
     readonly responseJson: string;
   } | null {
     const row = this.ctx.db
       .prepare(
-        'SELECT payload_sha256, response_json FROM mission_decisions WHERE idempotency_key = ?',
+        'SELECT payload_sha256, response_json FROM mission_decisions WHERE mission_id = ? AND idempotency_key = ?',
       )
-      .get(idempotencyKey) as SqlRow | undefined;
+      .get(missionId, idempotencyKey) as SqlRow | undefined;
     if (!row) {
       return null;
     }
@@ -451,7 +456,7 @@ export class MissionRepository {
     });
   }
 
-  listEvents(missionId: string, limit = 200): MissionEventRecord[] {
+  listEvents(missionId: string, limit = 10_000): MissionEventRecord[] {
     const rows = this.ctx.db
       .prepare(
         'SELECT * FROM mission_events WHERE mission_id = ? ORDER BY seq ASC LIMIT ?',
@@ -468,6 +473,81 @@ export class MissionRepository {
       eventHash: str(r, 'event_hash'),
       createdAt: str(r, 'created_at'),
     }));
+  }
+
+  saveBaselineImpact(
+    missionId: string,
+    report: BaselineImpactReport,
+  ): BaselineImpactReport {
+    const id = `bimp-${randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    this.ctx.db
+      .prepare(
+        `INSERT INTO baseline_impacts
+         (id, mission_id, parent_baseline_id, next_baseline_id, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        missionId,
+        report.parentBaselineId,
+        report.nextBaselineId,
+        JSON.stringify(report),
+        now,
+      );
+    return report;
+  }
+
+  getBaselineImpactByMission(missionId: string): BaselineImpactReport | null {
+    const row = this.ctx.db
+      .prepare(
+        'SELECT payload_json FROM baseline_impacts WHERE mission_id = ? ORDER BY created_at DESC LIMIT 1',
+      )
+      .get(missionId) as SqlRow | undefined;
+    return row
+      ? parseJson<BaselineImpactReport | null>(str(row, 'payload_json'), null)
+      : null;
+  }
+
+  propagatePolicyToActiveChanges(
+    missionId: string,
+    patch: {
+      readonly permissionTier: PermissionTier;
+      readonly budgetUsdLimit: number;
+      readonly maxOvernightHours: number;
+    },
+  ): void {
+    const now = new Date().toISOString();
+    this.ctx.db
+      .prepare(
+        `UPDATE changes
+         SET permission_tier = ?,
+             budget_usd_limit = ?,
+             max_overnight_hours = ?,
+             version = version + 1,
+             updated_at = ?
+         WHERE mission_id = ? AND status NOT IN ('certified', 'archived')`,
+      )
+      .run(
+        patch.permissionTier,
+        patch.budgetUsdLimit,
+        patch.maxOvernightHours,
+        now,
+        missionId,
+      );
+  }
+
+  extendChangeBudget(changeId: string, deltaUsd: number): void {
+    const now = new Date().toISOString();
+    this.ctx.db
+      .prepare(
+        `UPDATE changes
+         SET budget_usd_limit = ROUND(budget_usd_limit + ?, 6),
+             version = version + 1,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(Math.max(0, deltaUsd), now, changeId);
   }
 
   private mapMission(r: SqlRow): MissionRecord {

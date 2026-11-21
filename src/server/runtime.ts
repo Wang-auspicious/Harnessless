@@ -23,6 +23,7 @@ export interface ForgeRuntimeOptions {
   readonly dataDir: string;
   readonly seedDemoOnEmpty?: boolean;
   readonly sessionToken?: string;
+  readonly maxConcurrentSlots?: number;
 }
 
 export class ForgeRuntime {
@@ -48,7 +49,9 @@ export class ForgeRuntime {
   readonly httpServer: ForgeHttpServer;
 
   private readonly daemonTimers: NodeJS.Timeout[] = [];
+  private readonly activeDaemonPromises = new Set<Promise<unknown>>();
   private readonly seedDemoOnEmpty: boolean;
+  private shuttingDown = false;
 
   constructor(options: ForgeRuntimeOptions) {
     this.dataDir = options.dataDir;
@@ -61,20 +64,28 @@ export class ForgeRuntime {
     this.runner = new SandboxProcessRunner();
     this.worktrees = new GitWorktreeManager(this.runner);
     this.mcpStation = new McpStationServer(this.store, this.worktrees);
+    const maxSlots = Math.max(
+      1,
+      Math.min(32, Math.trunc(options.maxConcurrentSlots ?? 3)),
+    );
     this.adapters = new AgentAdapterHub(
       this.store,
       this.runner,
       this.worktrees,
       this.mcpStation,
       model => this.vault.resolveProviderForModel(this.store, model),
-      3,
+      maxSlots,
     );
 
     const publish = (ev: ForgeSseEvent): void => {
       this.httpServer.broadcast(ev);
     };
 
-    this.hindsight = new HindsightEngine(this.store);
+    this.hindsight = new HindsightEngine(this.store, {
+      synthesizeText: (prompt: string, systemPrompt: string) =>
+        this.synthesizeMemoryText(prompt, systemPrompt),
+      embedRemote: (text: string) => this.embedMemoryRemote(text),
+    });
     this.closure = new RequirementClosureEngine(
       this.store,
       this.worktrees,
@@ -178,21 +189,33 @@ export class ForgeRuntime {
     }
 
     const watchdogTimer = setInterval(() => {
+      if (this.shuttingDown) {
+        return;
+      }
       const d = this.store
         .getDaemons()
         .find(x => x.id === 'continuity_watchdog');
       if (d?.enabled) {
-        void this.continuity.tickWatchdog();
+        const p = this.continuity.tickWatchdog().finally(() => {
+          this.activeDaemonPromises.delete(p);
+        });
+        this.activeDaemonPromises.add(p);
       }
     }, 30_000);
     watchdogTimer.unref();
 
     const dreamTimer = setInterval(() => {
+      if (this.shuttingDown) {
+        return;
+      }
       const d = this.store
         .getDaemons()
         .find(x => x.id === 'dreaming_consolidator');
       if (d?.enabled) {
-        void this.dreaming.runSleepConsolidation();
+        const p = this.dreaming.runSleepConsolidation().finally(() => {
+          this.activeDaemonPromises.delete(p);
+        });
+        this.activeDaemonPromises.add(p);
       }
     }, 180_000);
     dreamTimer.unref();
@@ -201,10 +224,16 @@ export class ForgeRuntime {
   }
 
   async stop(): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+    this.shuttingDown = true;
     for (const timer of this.daemonTimers) {
       clearInterval(timer);
     }
     this.daemonTimers.length = 0;
+
+    await this.httpServer.stop();
 
     if (!this.rootAbortController.signal.aborted) {
       this.rootAbortController.abort('shutdown');
@@ -213,19 +242,185 @@ export class ForgeRuntime {
       Promise.allSettled([
         this.continuity.abortAll(),
         this.outboxWorker.stop(),
+        ...this.activeDaemonPromises,
       ]),
       new Promise<void>(resolve => setTimeout(resolve, 3_000)),
     ]);
 
-    for (const sess of this.store.listSessions({limit: 200})) {
-      if (sess.status === 'running') {
-        this.store.finishSession(sess.id, 'interrupted');
-      }
+    if (this.store.isOpen) {
+      this.store.db
+        .prepare(
+          "UPDATE sessions SET status = 'interrupted', ended_at = ? WHERE status = 'running'",
+        )
+        .run(new Date().toISOString());
     }
 
-    await this.httpServer.stop();
     await this.mcpStation.stop();
     this.store.close();
+  }
+
+  private async synthesizeMemoryText(
+    prompt: string,
+    systemPrompt: string,
+  ): Promise<string | null> {
+    if (
+      this.shuttingDown ||
+      this.rootAbortController.signal.aborted ||
+      process.env['FORGEOPS_OFFLINE_VERIFY'] === '1'
+    ) {
+      return null;
+    }
+    const providers = this.store.listModelProviders(id =>
+      this.vault.getKeyStatus(id),
+    );
+    const chosen = ['opencode-go', 'deepseek', 'openai', 'anthropic']
+      .map(id => providers.find(p => p.id === id))
+      .find(p => p && p.hasApiKey);
+    if (!chosen) {
+      return null;
+    }
+    const apiKey = this.vault.getRawApiKey(chosen.id);
+    if (!apiKey) {
+      return null;
+    }
+    const model = chosen.models[0]?.id;
+    if (!model) {
+      return null;
+    }
+    const signal = AbortSignal.any([
+      this.rootAbortController.signal,
+      AbortSignal.timeout(20_000),
+    ]);
+    try {
+      const base = chosen.baseUrl.replace(/\/+$/, '');
+      if (chosen.protocol === 'anthropic-messages') {
+        const endpoint = base.endsWith('/messages')
+          ? base
+          : base.endsWith('/v1')
+            ? `${base}/messages`
+            : `${base}/v1/messages`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 1024,
+            system: systemPrompt,
+            messages: [{role: 'user', content: prompt}],
+          }),
+          signal,
+        });
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => undefined);
+          return null;
+        }
+        const data = (await res.json()) as {
+          content?: Array<{type?: string; text?: string}>;
+        };
+        const text = (data.content ?? [])
+          .filter(b => b.type === 'text' && typeof b.text === 'string')
+          .map(b => b.text!)
+          .join('\n')
+          .trim();
+        return text || null;
+      }
+
+      const endpoint = base.endsWith('/chat/completions')
+        ? base
+        : `${base}/chat/completions`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          messages: [
+            {role: 'system', content: systemPrompt},
+            {role: 'user', content: prompt},
+          ],
+        }),
+        signal,
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      const data = (await res.json()) as {
+        choices?: Array<{message?: {content?: string}}>;
+      };
+      const text = data.choices?.[0]?.message?.content?.trim();
+      return text || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async embedMemoryRemote(text: string): Promise<{
+    readonly embeddingSpace: string;
+    readonly dims: number;
+    readonly vector: Float32Array;
+  } | null> {
+    if (
+      this.shuttingDown ||
+      this.rootAbortController.signal.aborted ||
+      process.env['FORGEOPS_OFFLINE_VERIFY'] === '1'
+    ) {
+      return null;
+    }
+    const apiKey = this.vault.getRawApiKey('openai');
+    if (!apiKey) {
+      return null;
+    }
+    const openai = this.store
+      .listModelProviders(id => this.vault.getKeyStatus(id))
+      .find(p => p.id === 'openai');
+    if (!openai) {
+      return null;
+    }
+    const base = openai.baseUrl.replace(/\/+$/, '');
+    const endpoint = base.endsWith('/embeddings') ? base : `${base}/embeddings`;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'text-embedding-3-small',
+          input: text.slice(0, 8_000),
+        }),
+        signal: AbortSignal.any([
+          this.rootAbortController.signal,
+          AbortSignal.timeout(15_000),
+        ]),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      const data = (await res.json()) as {
+        data?: Array<{embedding?: number[]}>;
+      };
+      const vec = data.data?.[0]?.embedding;
+      if (!Array.isArray(vec) || vec.length === 0) {
+        return null;
+      }
+      return {
+        embeddingSpace: 'openai:text-embedding-3-small',
+        dims: vec.length,
+        vector: new Float32Array(vec),
+      };
+    } catch {
+      return null;
+    }
   }
 
   private async seedEnterpriseWorkspace(): Promise<void> {

@@ -232,7 +232,12 @@ export class EngineeringRoomsService {
 
     const memoryContext =
       recalled.length > 0
-        ? `## Recalled Project Memory\n${recalled.map(h => `- [${h.authorityTier}] ${h.title}: ${h.content}`).join('\n')}`
+        ? `## Recalled Project Memory\n${recalled
+            .map(
+              h =>
+                `- ${h.rejectedWarning ? `**[${h.rejectedWarning}]** ` : ''}[${h.authorityTier}] ${h.title}: ${h.content}`,
+            )
+            .join('\n')}`
         : '';
     const systemPrompt = [
       this.store.getConstitution().markdown,
@@ -284,7 +289,8 @@ export class EngineeringRoomsService {
           ? [
               '- **Grounded Hindsight Memories:**',
               ...recalled.map(
-                h => `  - [${h.authorityTier}] ${h.title}: ${h.content}`,
+                h =>
+                  `  - ${h.rejectedWarning ? `[${h.rejectedWarning}] ` : ''}[${h.authorityTier}] ${h.title}: ${h.content}`,
               ),
             ]
           : ['- **Grounded Hindsight Memories:** none matching query yet.'];

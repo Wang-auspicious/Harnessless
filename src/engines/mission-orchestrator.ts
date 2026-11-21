@@ -6,7 +6,7 @@ import {analyzeBaselineImpact} from '../core/impact-analyzer.ts';
 import {triageMissionIntent} from '../core/policy.ts';
 import {compileBaselineToChangeBlueprints} from '../core/spec-compiler.ts';
 import {validateCompiledMissionPlan} from '../core/spec-validator.ts';
-import {simulateTwinGraphTrial} from '../core/trial-simulator.ts';
+import {simulateMissionTrial} from '../core/trial-simulator.ts';
 import type {
   IAgentAdapterHub,
   ProviderSecretLookup,
@@ -21,18 +21,22 @@ import type {
   FocusProjection,
   ForgeSseEvent,
   MissionDetailSnapshot,
+  MissionTraceabilityResponse,
 } from '../shared/api.ts';
 import type {ChangeRecord, GraphNode} from '../shared/types.ts';
 import type {
   BaselineImpactReport,
   ControlAvailability,
   ControlCommandInput,
+  DecisionAction,
   DecisionInput,
   EvidenceBundle,
   ExecutionMode,
+  FailureForensicsCard,
   IntentPresetId,
   MergeReadinessReport,
   MissionDecisionRecord,
+  MissionGateKind,
   MissionGateRecord,
   MissionHealth,
   MissionRecord,
@@ -79,6 +83,33 @@ const API_PROVIDER_IDS = [
   'anthropic',
 ] as const;
 
+const GATE_ALLOWED_ACTIONS: Readonly<
+  Record<MissionGateKind, readonly DecisionAction[]>
+> = {
+  triage_confirm: ['confirm_triage', 'escalate', 'reject'],
+  setup_required: ['resume', 'switch_simulation', 'reject'],
+  clarification: ['clarify', 'reject'],
+  discussion: ['resolve_issue', 'escalate', 'reject'],
+  evaluation: [
+    'approve',
+    'confirm',
+    'request_changes',
+    'reject',
+    'retry_review',
+  ],
+  limit: ['approve', 'confirm', 'request_changes', 'reject', 'escalate'],
+  approval: ['approve', 'conditional_approve', 'request_changes', 'reject'],
+  conditions: ['release_conditions', 'request_changes', 'reject'],
+  confirmation: ['confirm', 'request_changes', 'reject'],
+  plan_review: ['approve_plan', 'reject'],
+  ghost_amendment: ['approve_ghost', 'waive_ghost', 'reject'],
+  build_escalation: ['resume', 'reject'],
+  budget_extension: ['extend_budget', 'resume', 'reject'],
+  qa_decision: ['approve', 'resume', 'reject'],
+  stale_upstream_gate: ['resync_upstream', 'hold', 'reject'],
+  delivery_approval: ['approve_delivery', 'hold', 'reject'],
+};
+
 export class MissionOrchestrator {
   private readonly store: ForgeStore;
   private readonly worktrees: IGitWorktreeManager;
@@ -93,6 +124,10 @@ export class MissionOrchestrator {
   private readonly rootSignal?: AbortSignal;
   private readonly validationCache = new Map<string, ValidationReport>();
   private readonly trialCache = new Map<string, TrialSimulationReport>();
+  private readonly activeMissionRuns = new Map<
+    string,
+    Promise<MissionRecord>
+  >();
 
   constructor(deps: MissionOrchestratorDeps) {
     this.store = deps.store;
@@ -390,7 +425,10 @@ export class MissionOrchestrator {
 
     const health = this.deriveHealth(mission, openGates.length, changes);
 
-    const capsules = this.hindsight.buildAllCapsules();
+    const capsules = this.hindsight.buildAllCapsules(
+      Date.now(),
+      mission.executionMode,
+    );
     const capsule = capsules.find(c => c.hubId === mission.hubId) ?? null;
     const rehydration =
       capsule && capsule.retentionScore < 0.75 ? capsule : null;
@@ -399,6 +437,7 @@ export class MissionOrchestrator {
     let certifiedNodes = 0;
     let runningNodes = 0;
     let failedNodes = 0;
+    const forensicsList: FailureForensicsCard[] = [];
     for (const chg of changes) {
       for (const n of this.store.listGraphNodes(chg.id)) {
         totalNodes += 1;
@@ -409,8 +448,35 @@ export class MissionOrchestrator {
         } else if (n.status === 'failed') {
           failedNodes += 1;
         }
+        if (n.forensics) {
+          forensicsList.push(n.forensics);
+        }
       }
     }
+    const recentForensics = forensicsList
+      .sort((a, b) => b.failedAt.localeCompare(a.failedAt))
+      .slice(0, 6);
+
+    const currentStepIndex = Math.max(0, stageIdx);
+    const percentComplete =
+      mission.status === 'delivered'
+        ? 100
+        : Math.round(
+            ((currentStepIndex +
+              (totalNodes > 0 ? certifiedNodes / totalNodes : 0)) /
+              STAGE_ORDER.length) *
+              100,
+          );
+    const stageProgress = {
+      currentStepIndex,
+      totalSteps: STAGE_ORDER.length,
+      percentComplete,
+      activeChangeCount: changes.filter(
+        c => c.status === 'running' || c.status === 'planned',
+      ).length,
+      certifiedChangeCount: changes.filter(c => c.status === 'certified')
+        .length,
+    };
 
     const recalled = this.hindsight.recall({
       hubId: mission.hubId,
@@ -418,29 +484,56 @@ export class MissionOrchestrator {
       query: `${mission.title} ${mission.rawIntent.slice(0, 160)}`,
       limit: 4,
     });
-    const repo =
-      (mission.configOverrides.targetRepoIds?.[0]
-        ? this.store.getRepository(mission.configOverrides.targetRepoIds[0])
-        : null) ?? null;
-    const activeDddTerms = selectTermsForRepo(
-      this.store.listDomainTerms(mission.hubId),
-      repo?.id ?? '',
-      repo?.boundedContext,
-    )
-      .slice(0, 6)
-      .map(t => ({
-        canonicalTerm: t.canonicalTerm,
-        boundedContext: t.boundedContext,
-        forbiddenAliases: t.forbiddenAliases,
-      }));
+    const allDomainTerms = this.store.listDomainTerms(mission.hubId);
+    const boundRepoIds =
+      mission.configOverrides.targetRepoIds &&
+      mission.configOverrides.targetRepoIds.length > 0
+        ? mission.configOverrides.targetRepoIds
+        : this.store.listRepositories(mission.hubId).map(r => r.id);
+    const seenTermIds = new Set<string>();
+    const activeDddTerms: Array<{
+      readonly canonicalTerm: string;
+      readonly boundedContext: string;
+      readonly forbiddenAliases: readonly string[];
+    }> = [];
+    for (const repoId of boundRepoIds) {
+      const repo = this.store.getRepository(repoId);
+      for (const t of selectTermsForRepo(
+        allDomainTerms,
+        repoId,
+        repo?.boundedContext,
+      )) {
+        if (!seenTermIds.has(t.id)) {
+          seenTermIds.add(t.id);
+          activeDddTerms.push({
+            canonicalTerm: t.canonicalTerm,
+            boundedContext: t.boundedContext,
+            forbiddenAliases: t.forbiddenAliases,
+          });
+        }
+      }
+    }
+    if (activeDddTerms.length === 0) {
+      for (const t of selectTermsForRepo(allDomainTerms, '', undefined)) {
+        if (!seenTermIds.has(t.id)) {
+          seenTermIds.add(t.id);
+          activeDddTerms.push({
+            canonicalTerm: t.canonicalTerm,
+            boundedContext: t.boundedContext,
+            forbiddenAliases: t.forbiddenAliases,
+          });
+        }
+      }
+    }
 
-    const outbox = this.store.listOutboxEffects(100);
-    const events = this.store.missions.listEvents(missionId, 100);
+    const outboxCounts = this.store.countOutboxEffects();
+    const events = this.store.missions.listEvents(missionId, 10_000);
 
     return {
       mission,
       stage: mission.stage,
       stageSteps,
+      stageProgress,
       health,
       rehydration,
       primaryAction,
@@ -461,7 +554,8 @@ export class MissionOrchestrator {
             : blockingCommentsCount > 0
               ? `${blockingCommentsCount} blocking review comment(s) open.`
               : null,
-        activeDddTerms,
+        recentForensics,
+        activeDddTerms: activeDddTerms.slice(0, 12),
         recalledMemories: recalled.hits.map(h => ({
           id: h.targetId,
           title: h.title,
@@ -493,10 +587,8 @@ export class MissionOrchestrator {
           executionEpoch: mission.executionEpoch,
           missionVersion: mission.version,
           recentEventCount: events.length,
-          pendingOutboxCount: outbox.filter(e => e.status !== 'dead_letter')
-            .length,
-          deadLetterOutboxCount: outbox.filter(e => e.status === 'dead_letter')
-            .length,
+          pendingOutboxCount: outboxCounts.pending,
+          deadLetterOutboxCount: outboxCounts.deadLetter,
         },
       },
     };
@@ -509,14 +601,15 @@ export class MissionOrchestrator {
       ? this.store.hama.getBaseline(mission.activeBaselineId)
       : this.store.hama.getBaselineByMission(missionId);
 
+    const nodesByChange = new Map(
+      changes.map(c => [c.id, this.store.listGraphNodes(c.id)]),
+    );
+    const edgesByChange = new Map(
+      changes.map(c => [c.id, this.store.listGraphEdges(c.id)]),
+    );
+
     let validation = this.validationCache.get(missionId) ?? null;
     if (!validation && changes.length > 0) {
-      const nodesByChange = new Map(
-        changes.map(c => [c.id, this.store.listGraphNodes(c.id)]),
-      );
-      const edgesByChange = new Map(
-        changes.map(c => [c.id, this.store.listGraphEdges(c.id)]),
-      );
       validation = validateCompiledMissionPlan({
         preset: mission.preset,
         baseline,
@@ -535,13 +628,14 @@ export class MissionOrchestrator {
         mission.preset,
         mission.configOverrides,
       );
-      const firstChg = changes[0]!;
-      trial = simulateTwinGraphTrial(
-        this.store.listGraphNodes(firstChg.id),
-        this.store.listGraphEdges(firstChg.id),
+      const simulated: TrialSimulationReport = simulateMissionTrial(
+        changes,
+        nodesByChange,
+        edgesByChange,
         policy.maxParallelSlots,
       );
-      this.trialCache.set(missionId, trial);
+      trial = simulated;
+      this.trialCache.set(missionId, simulated);
     }
 
     return {
@@ -566,6 +660,7 @@ export class MissionOrchestrator {
   }> {
     this.mustMission(missionId);
     const payloadSha256 = sha256Canonical({
+      missionId,
       gateId: input.gateId,
       targetId: input.targetId,
       targetHash: input.targetHash,
@@ -578,6 +673,7 @@ export class MissionOrchestrator {
 
     const txResult = this.store.atomic(() => {
       const replay = this.store.missions.findDecisionByIdempotencyKey(
+        missionId,
         input.idempotencyKey,
       );
       if (replay) {
@@ -622,6 +718,30 @@ export class MissionOrchestrator {
         );
       }
 
+      const allowedActions = GATE_ALLOWED_ACTIONS[gate.kind] ?? [];
+      if (!allowedActions.includes(input.action)) {
+        throw new ForgeError(
+          'VALIDATION_ERROR',
+          `Action "${input.action}" is not allowed for gate kind "${gate.kind}"`,
+          400,
+        );
+      }
+      const matchedOpt = gate.options.find(o => o.action === input.action);
+      if (!matchedOpt) {
+        throw new ForgeError(
+          'VALIDATION_ERROR',
+          `Action "${input.action}" is not in gate "${gate.id}" options`,
+          400,
+        );
+      }
+      if (matchedOpt.requiresFeedback && !input.feedback.trim()) {
+        throw new ForgeError(
+          'VALIDATION_ERROR',
+          `Action "${input.action}" requires non-empty feedback`,
+          400,
+        );
+      }
+
       if (gate.kind === 'confirmation' && input.action === 'confirm') {
         const openBlocking =
           this.store.hama.countOpenBlockingComments(missionId);
@@ -658,6 +778,7 @@ export class MissionOrchestrator {
       if (gate.kind === 'confirmation' && input.action === 'confirm') {
         const curMission = this.mustMission(missionId);
         this.hama.publishBaselineSync(curMission, decision);
+        this.persistBaselineImpactIfNeeded(missionId);
         publishedBaseline = true;
       }
 
@@ -689,14 +810,137 @@ export class MissionOrchestrator {
       at: decision.decidedAt,
     });
 
-    await this.dispatchPostDecision(
-      missionId,
-      gate,
-      decision,
-      txResult.publishedBaseline,
-    );
+    try {
+      await this.dispatchPostDecision(
+        missionId,
+        gate,
+        decision,
+        txResult.publishedBaseline,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.store.missions.appendEvent(
+        missionId,
+        'mission.dispatch_error',
+        'mission_orchestrator',
+        {
+          gateId: gate.id,
+          gateKind: gate.kind,
+          action: decision.action,
+          error: msg,
+        },
+      );
+      const openAfter = this.store.missions.listGates(missionId, false);
+      const curM = this.mustMission(missionId);
+      if (
+        openAfter.length === 0 &&
+        curM.status !== 'failed' &&
+        curM.status !== 'aborted' &&
+        curM.status !== 'delivered'
+      ) {
+        const errCode = err instanceof ForgeError ? err.code : 'INTERNAL_ERROR';
+        const recoveryKind: MissionGateKind =
+          errCode === 'BUDGET_EXCEEDED'
+            ? 'budget_extension'
+            : (errCode === 'SETUP_REQUIRED' ||
+                  errCode === 'ADAPTER_UNAVAILABLE') &&
+                !curM.activeBaselineId
+              ? 'setup_required'
+              : 'build_escalation';
+        const recGate = this.store.missions.openGate({
+          missionId,
+          changeId: gate.changeId,
+          nodeId: gate.nodeId,
+          kind: recoveryKind,
+          targetId: missionId,
+          targetHash: sha256Canonical({missionId, recoveryKind, error: msg}),
+          question: `Post-decision dispatch failed: ${msg}`,
+          contextSnippet: `Error occurred after resolving "${gate.kind}" (${decision.action}).`,
+          options:
+            recoveryKind === 'setup_required'
+              ? [
+                  {
+                    action: 'resume',
+                    label: 'Retry Live Dispatch',
+                    recommended: true,
+                    consequencePreview: 'Retries post-decision HAMA/compile.',
+                    requiresFeedback: false,
+                  },
+                  {
+                    action: 'switch_simulation',
+                    label: 'Switch to Offline Simulation Mode',
+                    recommended: false,
+                    consequencePreview:
+                      'Switches Mission to deterministic simulation mode.',
+                    requiresFeedback: false,
+                  },
+                ]
+              : recoveryKind === 'budget_extension'
+                ? [
+                    {
+                      action: 'extend_budget',
+                      label: 'Extend Budget (+$25) & Retry',
+                      recommended: true,
+                      consequencePreview:
+                        'Raises USD budget ceiling by $25 and retries.',
+                      requiresFeedback: false,
+                    },
+                    {
+                      action: 'reject',
+                      label: 'Mark Mission Failed',
+                      recommended: false,
+                      consequencePreview: 'Marks Mission failed.',
+                      requiresFeedback: false,
+                    },
+                  ]
+                : [
+                    {
+                      action: 'resume',
+                      label: 'Retry Mission Dispatch',
+                      recommended: true,
+                      consequencePreview:
+                        'Retries post-decision compilation or execution.',
+                      requiresFeedback: false,
+                    },
+                    {
+                      action: 'reject',
+                      label: 'Mark Mission Failed',
+                      recommended: false,
+                      consequencePreview: 'Marks Mission failed.',
+                      requiresFeedback: false,
+                    },
+                  ],
+        });
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'paused_human',
+        });
+        this.publish({
+          type: 'gate.opened',
+          missionId,
+          gateId: recGate.id,
+          kind: recGate.kind,
+          at: recGate.createdAt,
+        });
+      }
+      const errState = this.mustMission(missionId);
+      this.publish({
+        type: 'mission.updated',
+        missionId: errState.id,
+        status: errState.status,
+        stage: errState.stage,
+        at: errState.updatedAt,
+      });
+      throw err;
+    }
 
     const updated = this.mustMission(missionId);
+    this.publish({
+      type: 'mission.updated',
+      missionId: updated.id,
+      status: updated.status,
+      stage: updated.stage,
+      at: updated.updatedAt,
+    });
     return {
       decision,
       mission: updated,
@@ -715,6 +959,17 @@ export class MissionOrchestrator {
     let cur = this.mustMission(missionId);
     const actor = cmd.actor ?? 'operator';
 
+    if (
+      (cur.status === 'delivered' || cur.status === 'aborted') &&
+      cmd.action !== 'evolve_baseline'
+    ) {
+      throw new ForgeError(
+        'CONFLICT',
+        `Cannot execute control "${cmd.action}" on ${cur.status} Mission "${missionId}"`,
+        409,
+      );
+    }
+
     switch (cmd.action) {
       case 'switch_preset': {
         if (!cmd.preset) {
@@ -725,23 +980,34 @@ export class MissionOrchestrator {
           );
         }
         const policy = resolvePresetPolicy(cmd.preset, cur.configOverrides);
-        cur = this.store.missions.updateMissionCas(
-          missionId,
-          cmd.expectedVersion,
-          {
-            preset: cmd.preset,
+        cur = this.store.atomic(() => {
+          const next = this.store.missions.updateMissionCas(
+            missionId,
+            cmd.expectedVersion,
+            {
+              preset: cmd.preset,
+              budgetUsdLimit: policy.budgetUsdLimit,
+              maxOvernightHours: policy.maxOvernightHours,
+            },
+          );
+          this.store.missions.propagatePolicyToActiveChanges(missionId, {
+            permissionTier: policy.permissionTier,
             budgetUsdLimit: policy.budgetUsdLimit,
             maxOvernightHours: policy.maxOvernightHours,
-          },
-        );
-        this.store.missions.appendEvent(
-          missionId,
-          'control.switch_preset',
-          actor,
-          {
-            preset: cmd.preset,
-          },
-        );
+          });
+          this.store.missions.appendEvent(
+            missionId,
+            'control.switch_preset',
+            actor,
+            {
+              preset: cmd.preset,
+              permissionTier: policy.permissionTier,
+              budgetUsdLimit: policy.budgetUsdLimit,
+              maxOvernightHours: policy.maxOvernightHours,
+            },
+          );
+          return next;
+        });
         break;
       }
 
@@ -791,23 +1057,23 @@ export class MissionOrchestrator {
       }
 
       case 'abort': {
-        for (const chg of this.store.listChangesForMission(missionId)) {
-          await this.continuity.abortChangeRun(chg.id);
-          if (chg.status === 'running' || chg.status === 'planned') {
-            this.store.updateChange(chg.id, {status: 'paused_human'});
-          }
-        }
+        cur = this.store.missions.updateMissionCas(
+          missionId,
+          cmd.expectedVersion,
+          {status: 'aborted'},
+        );
         for (const openGate of this.store.missions.listGates(
           missionId,
           false,
         )) {
           this.store.missions.resolveGate(openGate.id, 'dismissed');
         }
-        cur = this.store.missions.updateMissionCas(
-          missionId,
-          cmd.expectedVersion,
-          {status: 'aborted'},
-        );
+        for (const chg of this.store.listChangesForMission(missionId)) {
+          await this.continuity.abortChangeRun(chg.id);
+          if (chg.status === 'running' || chg.status === 'planned') {
+            this.store.updateChange(chg.id, {status: 'paused_human'});
+          }
+        }
         this.store.missions.appendEvent(missionId, 'control.abort', actor, {
           reason: cmd.feedback ?? 'Aborted by operator',
         });
@@ -856,10 +1122,17 @@ export class MissionOrchestrator {
             400,
           );
         }
-        await this.continuity.manualRestoreToCheckpoint(
-          cmd.changeId,
-          cmd.checkpointId,
-        );
+        const chg = this.mustMissionChange(missionId, cmd.changeId);
+        const cp = this.store
+          .listCheckpoints(chg.id)
+          .find(c => c.id === cmd.checkpointId);
+        if (!cp) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Checkpoint "${cmd.checkpointId}" not found on Change "${chg.id}"`,
+            404,
+          );
+        }
         cur = this.store.missions.updateMissionCas(
           missionId,
           cmd.expectedVersion,
@@ -869,14 +1142,29 @@ export class MissionOrchestrator {
             bumpEpoch: true,
           },
         );
+        await this.continuity.manualRestoreToCheckpoint(chg.id, cp.id);
         this.store.missions.appendEvent(
           missionId,
           'control.rewind_checkpoint',
           actor,
           {
-            changeId: cmd.changeId,
-            checkpointId: cmd.checkpointId,
+            changeId: chg.id,
+            checkpointId: cp.id,
           },
+        );
+        await this.triggerMissionExecutionByMode(this.mustMission(missionId));
+        break;
+      }
+
+      case 'resync_upstream': {
+        if (cmd.changeId) {
+          this.mustMissionChange(missionId, cmd.changeId);
+        }
+        cur = await this.resyncStaleUpstreamChanges(
+          missionId,
+          cmd.expectedVersion,
+          cmd.changeId,
+          actor,
         );
         break;
       }
@@ -889,16 +1177,35 @@ export class MissionOrchestrator {
             400,
           );
         }
-        this.store.updateGraphNode(cmd.nodeId, {
-          status: 'ready',
-          outputSummary: `Queued manual retry by ${actor}`,
-        });
+        const chg = this.mustMissionChange(missionId, cmd.changeId);
+        const node = this.store
+          .listGraphNodes(chg.id)
+          .find(n => n.id === cmd.nodeId);
+        if (!node) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Graph node "${cmd.nodeId}" not found on Change "${chg.id}"`,
+            404,
+          );
+        }
         cur = this.store.missions.updateMissionCas(
           missionId,
           cmd.expectedVersion,
           {status: 'executing', stage: 'build_verify'},
         );
-        this.store.updateChange(cmd.changeId, {status: 'planned'});
+        this.store.updateGraphNode(node.id, {
+          status: 'ready',
+          attemptCount: 0,
+          outputSummary: `Queued manual retry by ${actor}`,
+        });
+        this.store.updateNodeForensics(node.id, null);
+        this.store.updateChange(chg.id, {status: 'planned'});
+        this.store.missions.appendEvent(
+          missionId,
+          'control.retry_node',
+          actor,
+          {changeId: chg.id, nodeId: node.id},
+        );
         await this.triggerMissionExecutionByMode(cur);
         break;
       }
@@ -916,19 +1223,30 @@ export class MissionOrchestrator {
             400,
           );
         }
+        const chg = this.mustMissionChange(missionId, cmd.changeId);
+        const targetNode = this.store
+          .listGraphNodes(chg.id)
+          .find(n => n.id === cmd.insertBeforeNodeId);
+        if (!targetNode) {
+          throw new ForgeError(
+            'NOT_FOUND',
+            `Target node "${cmd.insertBeforeNodeId}" not found on Change "${chg.id}"`,
+            404,
+          );
+        }
+        cur = this.store.missions.updateMissionCas(
+          missionId,
+          cmd.expectedVersion,
+          {status: cur.status},
+        );
         this.continuity.proposeGhostAmendment({
-          changeId: cmd.changeId,
+          changeId: chg.id,
           title: cmd.ghostTitle,
           description: cmd.ghostDescription,
           insertBeforeNodeId: cmd.insertBeforeNodeId,
           gateCommand: cmd.gateCommand,
           actor: 'human_operator',
         });
-        cur = this.store.missions.updateMissionCas(
-          missionId,
-          cmd.expectedVersion,
-          {status: cur.status},
-        );
         break;
       }
 
@@ -1079,21 +1397,22 @@ export class MissionOrchestrator {
     this.validationCache.set(missionId, validation);
 
     const policy = resolvePresetPolicy(mission.preset, mission.configOverrides);
-    const firstChg = changes[0];
-    const trial: TrialSimulationReport = firstChg
-      ? simulateTwinGraphTrial(
-          nodesByChange.get(firstChg.id) ?? [],
-          edgesByChange.get(firstChg.id) ?? [],
-          policy.maxParallelSlots,
-        )
-      : {
-          feasible: false,
-          totalExecutableNodes: 0,
-          estimatedWaves: [],
-          criticalPathLength: 0,
-          contendedNodePairs: [],
-          unreachableNodeCodes: [],
-        };
+    const trial: TrialSimulationReport =
+      changes.length > 0
+        ? simulateMissionTrial(
+            changes,
+            nodesByChange,
+            edgesByChange,
+            policy.maxParallelSlots,
+          )
+        : {
+            feasible: false,
+            totalExecutableNodes: 0,
+            estimatedWaves: [],
+            criticalPathLength: 0,
+            contendedNodePairs: [],
+            unreachableNodeCodes: [],
+          };
     this.trialCache.set(missionId, trial);
 
     this.store.missions.updateMissionCas(missionId, undefined, {
@@ -1169,14 +1488,28 @@ export class MissionOrchestrator {
     return {changes, validation, trial};
   }
 
-  async startMissionExecution(missionId: string): Promise<MissionRecord> {
-    const mission = this.mustMission(missionId);
-    const policy = resolvePresetPolicy(mission.preset, mission.configOverrides);
+  startMissionExecution(missionId: string): Promise<MissionRecord> {
+    const existing = this.activeMissionRuns.get(missionId);
+    if (existing) {
+      return existing;
+    }
+    const runPromise = this.runMissionExecutionLoop(missionId).finally(() => {
+      this.activeMissionRuns.delete(missionId);
+    });
+    this.activeMissionRuns.set(missionId, runPromise);
+    return runPromise;
+  }
+
+  private async runMissionExecutionLoop(
+    missionId: string,
+  ): Promise<MissionRecord> {
+    this.mustMission(missionId);
 
     this.store.missions.updateMissionCas(missionId, undefined, {
       status: 'executing',
       stage: 'build_verify',
     });
+    this.emitMissionUpdated(missionId);
 
     const allChanges = this.store.listChangesForMission(missionId);
     const remaining = new Map(allChanges.map(c => [c.id, c]));
@@ -1188,9 +1521,14 @@ export class MissionOrchestrator {
     while (remaining.size > 0 && waveGuard < 24) {
       waveGuard += 1;
       const curMission = this.mustMission(missionId);
+      const policy = resolvePresetPolicy(
+        curMission.preset,
+        curMission.configOverrides,
+      );
       if (
         curMission.status === 'aborted' ||
         curMission.status === 'paused_human' ||
+        curMission.status === 'failed' ||
         this.rootSignal?.aborted
       ) {
         break;
@@ -1201,6 +1539,14 @@ export class MissionOrchestrator {
         if (chg.status === 'certified') {
           certifiedIds.add(chg.id);
           remaining.delete(chg.id);
+          continue;
+        }
+        if (
+          chg.status === 'stale_upstream' ||
+          chg.status === 'cooldown_hold' ||
+          chg.status === 'paused_human' ||
+          chg.status === 'failed'
+        ) {
           continue;
         }
         const deps = chg.dependsOnChangeIds ?? [];
@@ -1237,66 +1583,140 @@ export class MissionOrchestrator {
         ),
       );
 
+      const failedChanges: ChangeRecord[] = [];
+      const pausedChanges: ChangeRecord[] = [];
+      const cooldownChanges: ChangeRecord[] = [];
+      const staleChanges: ChangeRecord[] = [];
+
       for (let i = 0; i < ready.length; i += 1) {
         const chg = ready[i]!;
         const r = results[i]!;
         const fresh =
           r.status === 'fulfilled' ? r.value : this.store.getChange(chg.id)!;
         remaining.delete(chg.id);
-        if (fresh.status === 'certified') {
+        if (r.status === 'rejected' && fresh.status !== 'failed') {
+          failedChanges.push(fresh);
+        } else if (fresh.status === 'certified') {
           certifiedIds.add(fresh.id);
         } else if (fresh.status === 'failed') {
-          const gate = this.store.missions.openGate({
-            missionId,
-            changeId: fresh.id,
-            kind: 'build_escalation',
-            targetId: fresh.id,
-            targetHash: sha256Canonical({
-              changeId: fresh.id,
-              status: fresh.status,
-              epoch: fresh.executionEpoch ?? 1,
-            }),
-            question: `Repository Change ${fresh.code} failed after max retries. Resume or fail Mission?`,
-            contextSnippet: fresh.summary,
-            options: [
-              {
-                action: 'resume',
-                label: 'Reset Node & Resume Change',
-                recommended: true,
-                consequencePreview:
-                  'Clears failure state and retries pending graph nodes.',
-                requiresFeedback: false,
-              },
-              {
-                action: 'reject',
-                label: 'Mark Mission Failed',
-                recommended: false,
-                consequencePreview: 'Stops Mission delivery at failed status.',
-                requiresFeedback: false,
-              },
-            ],
-          });
-          this.store.missions.updateMissionCas(missionId, undefined, {
-            status: 'paused_human',
-          });
-          this.publish({
-            type: 'gate.opened',
-            missionId,
-            gateId: gate.id,
-            kind: gate.kind,
-            at: gate.createdAt,
-          });
-          return this.mustMission(missionId);
+          failedChanges.push(fresh);
+        } else if (fresh.status === 'stale_upstream') {
+          staleChanges.push(fresh);
+        } else if (fresh.status === 'cooldown_hold') {
+          cooldownChanges.push(fresh);
         } else if (fresh.status === 'paused_human') {
-          this.store.missions.updateMissionCas(missionId, undefined, {
-            status: 'paused_human',
-          });
-          return this.mustMission(missionId);
+          pausedChanges.push(fresh);
         }
+      }
+
+      if (failedChanges.length > 0) {
+        for (const failedChg of failedChanges) {
+          const existingGate = this.store.missions
+            .listGates(missionId, false)
+            .find(
+              g => g.kind === 'build_escalation' && g.targetId === failedChg.id,
+            );
+          if (!existingGate) {
+            const gate = this.store.missions.openGate({
+              missionId,
+              changeId: failedChg.id,
+              kind: 'build_escalation',
+              targetId: failedChg.id,
+              targetHash: sha256Canonical({
+                changeId: failedChg.id,
+                status: failedChg.status,
+                epoch: failedChg.executionEpoch ?? 1,
+              }),
+              question: `Repository Change ${failedChg.code} failed after max retries. Resume or fail Mission?`,
+              contextSnippet: failedChg.summary,
+              options: [
+                {
+                  action: 'resume',
+                  label: 'Reset Node & Resume Change',
+                  recommended: true,
+                  consequencePreview:
+                    'Clears failure state and retries pending graph nodes.',
+                  requiresFeedback: false,
+                },
+                {
+                  action: 'reject',
+                  label: 'Mark Mission Failed',
+                  recommended: false,
+                  consequencePreview:
+                    'Stops Mission delivery at failed status.',
+                  requiresFeedback: false,
+                },
+              ],
+            });
+            this.publish({
+              type: 'gate.opened',
+              missionId,
+              gateId: gate.id,
+              kind: gate.kind,
+              at: gate.createdAt,
+            });
+          }
+        }
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'paused_human',
+        });
+        this.emitMissionUpdated(missionId);
+        return this.mustMission(missionId);
+      }
+
+      if (staleChanges.length > 0) {
+        this.openStaleUpstreamGate(missionId, staleChanges);
+        this.emitMissionUpdated(missionId);
+        return this.mustMission(missionId);
+      }
+
+      if (pausedChanges.length > 0) {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'paused_human',
+        });
+        this.emitMissionUpdated(missionId);
+        return this.mustMission(missionId);
+      }
+
+      if (cooldownChanges.length > 0) {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'cooldown_hold',
+        });
+        this.store.missions.appendEvent(
+          missionId,
+          'mission.cooldown_hold',
+          'mission_orchestrator',
+          {changeIds: cooldownChanges.map(c => c.id)},
+        );
+        this.emitMissionUpdated(missionId);
+        return this.mustMission(missionId);
       }
     }
 
     const latestChanges = this.store.listChangesForMission(missionId);
+    const staleLeft = latestChanges.filter(c => c.status === 'stale_upstream');
+    if (staleLeft.length > 0) {
+      this.openStaleUpstreamGate(missionId, staleLeft);
+      this.emitMissionUpdated(missionId);
+      return this.mustMission(missionId);
+    }
+
+    const cooldownLeft = latestChanges.filter(
+      c => c.status === 'cooldown_hold',
+    );
+    if (cooldownLeft.length > 0) {
+      this.store.missions.updateMissionCas(missionId, undefined, {
+        status: 'cooldown_hold',
+      });
+      this.emitMissionUpdated(missionId);
+      return this.mustMission(missionId);
+    }
+
+    const latestMission = this.mustMission(missionId);
+    const finalPolicy = resolvePresetPolicy(
+      latestMission.preset,
+      latestMission.configOverrides,
+    );
     if (
       latestChanges.length > 0 &&
       latestChanges.every(c => c.status === 'certified')
@@ -1306,7 +1726,7 @@ export class MissionOrchestrator {
         stage: 'certify_deliver',
       });
       const readiness = await this.checkDeliveryReadiness(missionId);
-      if (policy.autoAdvanceDelivery && readiness.ready) {
+      if (finalPolicy.autoAdvanceDelivery && readiness.ready) {
         this.store.missions.updateMissionCas(missionId, undefined, {
           status: 'delivered',
           stage: 'certify_deliver',
@@ -1346,6 +1766,22 @@ export class MissionOrchestrator {
                 'Marks Mission delivered and seals the final EvidenceBundle.',
               requiresFeedback: false,
             },
+            {
+              action: 'hold',
+              label: 'Hold Delivery for Inspection',
+              recommended: false,
+              consequencePreview:
+                'Keeps Mission paused before final delivery sign-off.',
+              requiresFeedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Reject Delivery & Mark Failed',
+              recommended: false,
+              consequencePreview:
+                'Marks Mission failed instead of sealing delivery.',
+              requiresFeedback: true,
+            },
           ],
         });
         this.store.missions.updateMissionCas(missionId, undefined, {
@@ -1359,6 +1795,7 @@ export class MissionOrchestrator {
           at: gate.createdAt,
         });
       }
+      this.emitMissionUpdated(missionId);
     }
 
     return this.mustMission(missionId);
@@ -1409,7 +1846,7 @@ export class MissionOrchestrator {
     const changes = this.store.listChangesForMission(missionId);
     const readiness =
       changes.length > 0 ? await this.checkDeliveryReadiness(missionId) : null;
-    const events = this.store.missions.listEvents(missionId, 1000);
+    const events = this.store.missions.listEvents(missionId, 10_000);
 
     const nodesByChange = new Map<string, GraphNode[]>();
     for (const c of changes) {
@@ -1475,6 +1912,29 @@ export class MissionOrchestrator {
     return {
       ...unsigned,
       bundleSha256: sha256Canonical(unsigned),
+    };
+  }
+
+  async getMissionTraceability(
+    missionId: string,
+  ): Promise<MissionTraceabilityResponse> {
+    const mission = this.mustMission(missionId);
+    const baseline = mission.activeBaselineId
+      ? this.store.hama.getBaseline(mission.activeBaselineId)
+      : this.store.hama.getBaselineByMission(missionId);
+    const changes = this.store.listChangesForMission(missionId);
+    const readiness =
+      changes.length > 0 ? await this.checkDeliveryReadiness(missionId) : null;
+    let impact = this.store.missions.getBaselineImpactByMission(missionId);
+    if (!impact && baseline?.parentId) {
+      impact = this.persistBaselineImpactIfNeeded(missionId);
+    }
+    return {
+      missionId: mission.id,
+      baseline,
+      changes,
+      readiness,
+      impact,
     };
   }
 
@@ -1591,7 +2051,7 @@ export class MissionOrchestrator {
     }
 
     if (
-      gate.kind === 'clarification' ||
+      (gate.kind === 'clarification' && !gate.changeId) ||
       gate.kind === 'discussion' ||
       gate.kind === 'evaluation' ||
       gate.kind === 'approval' ||
@@ -1606,12 +2066,48 @@ export class MissionOrchestrator {
         this.rootSignal,
       );
       if (out.baseline) {
+        this.persistBaselineImpactIfNeeded(missionId);
         await this.compileAndValidateMission(missionId);
       }
       return;
     }
 
+    if (gate.kind === 'clarification' && gate.changeId) {
+      if (decision.action === 'reject') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+        return;
+      }
+      const chg = this.store.getChange(gate.changeId);
+      if (chg) {
+        this.store.appendEpistemicItem({
+          changeId: chg.id,
+          nodeId: gate.nodeId,
+          executionEpoch: chg.executionEpoch ?? 1,
+          kind: 'spec_confirmed',
+          content: `Human clarification (${decision.actor}): ${decision.feedback}`,
+          evidenceRef: decision.id,
+        });
+        if (chg.status === 'paused_human') {
+          this.store.updateChange(chg.id, {status: 'planned'});
+        }
+      }
+      if (gate.targetId.startsWith('attn-')) {
+        try {
+          this.store.resolveAttention(gate.targetId, decision.feedback);
+        } catch {
+          // Attention item may already be resolved.
+        }
+      }
+      if (mission.status === 'paused_human') {
+        await this.triggerMissionExecutionByMode(this.mustMission(missionId));
+      }
+      return;
+    }
+
     if (publishedBaseline) {
+      this.persistBaselineImpactIfNeeded(missionId);
       await this.compileAndValidateMission(missionId);
       return;
     }
@@ -1628,6 +2124,12 @@ export class MissionOrchestrator {
     }
 
     if (gate.kind === 'ghost_amendment') {
+      if (decision.action === 'reject') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+        return;
+      }
       if (gate.nodeId) {
         this.store.updateGraphNode(gate.nodeId, {
           status: decision.action === 'waive_ghost' ? 'waived' : 'ready',
@@ -1647,12 +2149,94 @@ export class MissionOrchestrator {
           this.store.updateChange(gate.changeId, {status: 'planned'});
           for (const n of this.store.listGraphNodes(gate.changeId)) {
             if (n.status === 'failed' || n.status === 'blocked_human') {
-              this.store.updateGraphNode(n.id, {status: 'ready'});
+              this.store.updateGraphNode(n.id, {
+                status: 'ready',
+                attemptCount: 0,
+                outputSummary: `Reset via build_escalation resume by ${decision.actor}`,
+              });
+              this.store.updateNodeForensics(n.id, null);
             }
           }
         }
         await this.triggerMissionExecutionByMode(this.mustMission(missionId));
       } else {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+      }
+      return;
+    }
+
+    if (gate.kind === 'budget_extension') {
+      if (decision.action === 'reject') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+        return;
+      }
+      if (decision.action === 'extend_budget') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          budgetUsdLimit: Number((mission.budgetUsdLimit + 25).toFixed(2)),
+          maxOvernightHours: mission.maxOvernightHours + 4,
+          status: mission.activeBaselineId ? 'executing' : 'requirements',
+        });
+        if (gate.changeId) {
+          this.store.missions.extendChangeBudget(gate.changeId, 25);
+          const chg = this.store.getChange(gate.changeId);
+          if (chg && chg.status === 'paused_human') {
+            this.store.updateChange(chg.id, {status: 'planned'});
+          }
+        }
+      } else if (gate.changeId) {
+        const chg = this.store.getChange(gate.changeId);
+        if (chg && chg.status === 'paused_human') {
+          this.store.updateChange(chg.id, {status: 'planned'});
+        }
+      }
+      if (!mission.activeBaselineId) {
+        const out = await this.hama.startOrAdvance(missionId, {
+          signal: this.rootSignal,
+          feedback: decision.feedback,
+        });
+        if (out.baseline) {
+          this.persistBaselineImpactIfNeeded(missionId);
+          await this.compileAndValidateMission(missionId);
+        }
+      } else {
+        await this.triggerMissionExecutionByMode(this.mustMission(missionId));
+      }
+      return;
+    }
+
+    if (gate.kind === 'qa_decision') {
+      if (decision.action === 'reject') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+        return;
+      }
+      if (gate.nodeId) {
+        this.store.updateGraphNode(gate.nodeId, {
+          status: 'certified',
+          outputSummary: `Approved QA decision (${decision.action}) by ${decision.actor}`,
+        });
+      }
+      if (gate.changeId) {
+        this.store.updateChange(gate.changeId, {status: 'planned'});
+      }
+      await this.triggerMissionExecutionByMode(this.mustMission(missionId));
+      return;
+    }
+
+    if (gate.kind === 'stale_upstream_gate') {
+      if (decision.action === 'resync_upstream') {
+        await this.resyncStaleUpstreamChanges(
+          missionId,
+          undefined,
+          gate.changeId ?? undefined,
+          decision.actor,
+        );
+      } else if (decision.action === 'reject') {
         this.store.missions.updateMissionCas(missionId, undefined, {
           status: 'failed',
         });
@@ -1671,6 +2255,26 @@ export class MissionOrchestrator {
           'mission.delivered',
           decision.actor,
           {gateId: gate.id},
+        );
+      } else if (decision.action === 'reject') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'failed',
+        });
+        this.store.missions.appendEvent(
+          missionId,
+          'mission.delivery_rejected',
+          decision.actor,
+          {gateId: gate.id, feedback: decision.feedback},
+        );
+      } else if (decision.action === 'hold') {
+        this.store.missions.updateMissionCas(missionId, undefined, {
+          status: 'paused_human',
+        });
+        this.store.missions.appendEvent(
+          missionId,
+          'mission.delivery_held',
+          decision.actor,
+          {gateId: gate.id, feedback: decision.feedback},
         );
       }
     }
@@ -1868,6 +2472,19 @@ export class MissionOrchestrator {
           'Spawns a child Mission anchored to this baseline SHA-256.',
       },
       {
+        action: 'resync_upstream',
+        label: 'Re-sync Stale Downstream Changes',
+        enabled:
+          !isTerminal && changes.some(c => c.status === 'stale_upstream'),
+        disabledReason: isTerminal
+          ? `Mission is ${mission.status}`
+          : changes.some(c => c.status === 'stale_upstream')
+            ? null
+            : 'No stale_upstream Changes',
+        impactSummary:
+          'Rewinds stale downstream Changes to CP-0, updates upstream SHAs, and restarts.',
+      },
+      {
         action: 'abort',
         label: 'Abort Mission',
         enabled: !isTerminal,
@@ -1877,6 +2494,191 @@ export class MissionOrchestrator {
       },
     ];
     return controls;
+  }
+
+  private async resyncStaleUpstreamChanges(
+    missionId: string,
+    expectedVersion: number | undefined,
+    onlyChangeId: string | undefined,
+    actor: string,
+  ): Promise<MissionRecord> {
+    const cur = this.store.missions.updateMissionCas(
+      missionId,
+      expectedVersion,
+      {
+        status: 'executing',
+        stage: 'build_verify',
+        bumpEpoch: true,
+      },
+    );
+
+    const allChanges = this.store.listChangesForMission(missionId);
+    const staleTargets = allChanges.filter(c =>
+      onlyChangeId ? c.id === onlyChangeId : c.status === 'stale_upstream',
+    );
+    const resyncedIds: string[] = [];
+
+    for (const chg of staleTargets) {
+      const cps = this.store.listCheckpoints(chg.id);
+      const cp0 = cps[0];
+      if (cp0) {
+        await this.continuity.manualRestoreToCheckpoint(chg.id, cp0.id);
+      } else {
+        await this.continuity.abortChangeRun(chg.id);
+        this.store.bumpChangeEpochAtomic(chg.id);
+      }
+
+      const nextShas: Record<string, string> = {
+        ...(chg.upstreamContractShas ?? {}),
+      };
+      for (const depId of chg.dependsOnChangeIds ?? []) {
+        const depCps = this.store.listCheckpoints(depId);
+        const depChg = this.store.getChange(depId);
+        const headSha =
+          depCps[depCps.length - 1]?.gitCommitSha ?? depChg?.baseCommitSha;
+        if (headSha) {
+          nextShas[depId] = headSha;
+        }
+      }
+      this.store.updateChangeUpstreamShas(chg.id, nextShas);
+      this.store.updateChange(chg.id, {status: 'planned'});
+      resyncedIds.push(chg.id);
+    }
+
+    for (const openGate of this.store.missions.listGates(missionId, false)) {
+      if (openGate.kind === 'stale_upstream_gate') {
+        this.store.missions.resolveGate(openGate.id, 'dismissed');
+      }
+    }
+
+    this.store.missions.appendEvent(
+      missionId,
+      'control.resync_upstream',
+      actor,
+      {resyncedChangeIds: resyncedIds},
+    );
+    await this.triggerMissionExecutionByMode(this.mustMission(missionId));
+    return this.mustMission(cur.id);
+  }
+
+  private openStaleUpstreamGate(
+    missionId: string,
+    staleChanges: readonly ChangeRecord[],
+  ): void {
+    const first = staleChanges[0];
+    if (!first) {
+      return;
+    }
+    const existing = this.store.missions
+      .listGates(missionId, false)
+      .find(g => g.kind === 'stale_upstream_gate');
+    if (!existing) {
+      const gate = this.store.missions.openGate({
+        missionId,
+        changeId: first.id,
+        kind: 'stale_upstream_gate',
+        targetId: first.id,
+        targetHash: sha256Canonical({
+          missionId,
+          staleIds: staleChanges.map(c => c.id),
+          epochs: staleChanges.map(c => c.executionEpoch ?? 1),
+        }),
+        question: `Upstream contract changed; ${staleChanges.map(c => c.code).join(', ')} marked stale_upstream. Re-sync downstream Change(s)?`,
+        contextSnippet: staleChanges
+          .map(c => `${c.code}: ${c.title}`)
+          .join('\n'),
+        options: [
+          {
+            action: 'resync_upstream',
+            label: 'Re-sync Downstream Changes to CP-0 & Restart',
+            recommended: true,
+            consequencePreview:
+              'Rewinds stale downstream Changes to CP-0, updates upstream SHAs, and restarts execution.',
+            requiresFeedback: false,
+          },
+          {
+            action: 'hold',
+            label: 'Hold for Manual Inspection',
+            recommended: false,
+            consequencePreview: 'Keeps Mission paused.',
+            requiresFeedback: false,
+          },
+          {
+            action: 'reject',
+            label: 'Mark Mission Failed',
+            recommended: false,
+            consequencePreview: 'Marks Mission failed.',
+            requiresFeedback: false,
+          },
+        ],
+      });
+      this.publish({
+        type: 'gate.opened',
+        missionId,
+        gateId: gate.id,
+        kind: gate.kind,
+        at: gate.createdAt,
+      });
+    }
+    this.store.missions.updateMissionCas(missionId, undefined, {
+      status: 'paused_human',
+    });
+  }
+
+  private persistBaselineImpactIfNeeded(
+    missionId: string,
+  ): BaselineImpactReport | null {
+    const existing = this.store.missions.getBaselineImpactByMission(missionId);
+    if (existing) {
+      return existing;
+    }
+    const baseline = this.store.hama.getBaselineByMission(missionId);
+    if (!baseline?.parentId) {
+      return null;
+    }
+    const parentBaseline = this.store.hama.getBaseline(baseline.parentId);
+    if (!parentBaseline) {
+      return null;
+    }
+    const activeChanges = this.store.listChangesForMission(
+      parentBaseline.missionId,
+    );
+    const nodesByChangeId = new Map<string, readonly GraphNode[]>(
+      activeChanges.map(c => [c.id, this.store.listGraphNodes(c.id)]),
+    );
+    const report = analyzeBaselineImpact({
+      parentBaseline,
+      nextBaseline: baseline,
+      activeChanges,
+      nodesByChangeId,
+    });
+    return this.store.missions.saveBaselineImpact(missionId, report);
+  }
+
+  private mustMissionChange(missionId: string, changeId: string): ChangeRecord {
+    const chg = this.store.getChange(changeId);
+    if (!chg || chg.missionId !== missionId) {
+      throw new ForgeError(
+        'NOT_FOUND',
+        `Change "${changeId}" not found on Mission "${missionId}"`,
+        404,
+      );
+    }
+    return chg;
+  }
+
+  private emitMissionUpdated(missionId: string): void {
+    const m = this.store.missions.getMission(missionId);
+    if (!m) {
+      return;
+    }
+    this.publish({
+      type: 'mission.updated',
+      missionId: m.id,
+      status: m.status,
+      stage: m.stage,
+      at: m.updatedAt,
+    });
   }
 
   private mustMission(missionId: string): MissionRecord {
