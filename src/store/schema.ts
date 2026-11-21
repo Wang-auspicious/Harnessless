@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS mission_decisions (
   id TEXT PRIMARY KEY,
   gate_id TEXT NOT NULL REFERENCES mission_gates(id) ON DELETE RESTRICT,
   mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE RESTRICT,
-  idempotency_key TEXT UNIQUE NOT NULL,
+  idempotency_key TEXT NOT NULL,
   payload_sha256 TEXT NOT NULL,
   target_id TEXT NOT NULL,
   target_hash TEXT NOT NULL,
@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS mission_decisions (
   scope TEXT NOT NULL DEFAULT 'proposal',
   issue_ids_json TEXT NOT NULL DEFAULT '[]',
   response_json TEXT NOT NULL DEFAULT '{}',
-  decided_at TEXT NOT NULL
+  decided_at TEXT NOT NULL,
+  UNIQUE(mission_id, idempotency_key)
 );
 CREATE TRIGGER IF NOT EXISTS mission_decisions_no_update BEFORE UPDATE ON mission_decisions
 BEGIN SELECT RAISE(ABORT, 'mission_decisions is immutable'); END;
@@ -953,6 +954,59 @@ function sanitizeStringArrayJson(raw: unknown): string {
   }
 }
 
+function missionDecisionsNeedsScopedUniqueRebuild(db: DatabaseSync): boolean {
+  const row = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mission_decisions'",
+    )
+    .get() as Record<string, unknown> | undefined;
+  const sql = row?.['sql'];
+  return (
+    typeof sql === 'string' && /idempotency_key\s+TEXT\s+UNIQUE/i.test(sql)
+  );
+}
+
+function ensureMissionDecisionsScopedUnique(db: DatabaseSync): void {
+  if (!missionDecisionsNeedsScopedUniqueRebuild(db)) {
+    return;
+  }
+  db.exec(`
+    DROP TRIGGER IF EXISTS mission_decisions_no_update;
+    DROP TRIGGER IF EXISTS mission_decisions_no_delete;
+    CREATE TABLE mission_decisions_v4 (
+      id TEXT PRIMARY KEY,
+      gate_id TEXT NOT NULL REFERENCES mission_gates(id) ON DELETE RESTRICT,
+      mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE RESTRICT,
+      idempotency_key TEXT NOT NULL,
+      payload_sha256 TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      target_hash TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      feedback TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'proposal',
+      issue_ids_json TEXT NOT NULL DEFAULT '[]',
+      response_json TEXT NOT NULL DEFAULT '{}',
+      decided_at TEXT NOT NULL,
+      UNIQUE(mission_id, idempotency_key)
+    );
+    INSERT INTO mission_decisions_v4 (
+      id, gate_id, mission_id, idempotency_key, payload_sha256, target_id, target_hash,
+      actor, action, feedback, scope, issue_ids_json, response_json, decided_at
+    )
+    SELECT
+      id, gate_id, mission_id, idempotency_key, payload_sha256, target_id, target_hash,
+      actor, action, feedback, scope, issue_ids_json, response_json, decided_at
+    FROM mission_decisions;
+    DROP TABLE mission_decisions;
+    ALTER TABLE mission_decisions_v4 RENAME TO mission_decisions;
+    CREATE TRIGGER IF NOT EXISTS mission_decisions_no_update BEFORE UPDATE ON mission_decisions
+    BEGIN SELECT RAISE(ABORT, 'mission_decisions is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS mission_decisions_no_delete BEFORE DELETE ON mission_decisions
+    BEGIN SELECT RAISE(ABORT, 'mission_decisions is immutable'); END;
+  `);
+}
+
 export function runSchemaMigrations(db: DatabaseSync): void {
   db.exec(BASE_PRAGMAS_SQL);
   db.exec(`
@@ -1457,11 +1511,26 @@ export function runSchemaMigrations(db: DatabaseSync): void {
         }
       }
 
+      ensureMissionDecisionsScopedUnique(db);
+
       const now = new Date().toISOString();
       db.prepare(
         `INSERT INTO meta_kv (key, value_json, updated_at) VALUES ('schema_version', ?, ?)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
       ).run(JSON.stringify(SCHEMA_VERSION), now);
+      db.exec('COMMIT');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // Ignore rollback failure.
+      }
+      throw err;
+    }
+  } else if (missionDecisionsNeedsScopedUniqueRebuild(db)) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      ensureMissionDecisionsScopedUnique(db);
       db.exec('COMMIT');
     } catch (err) {
       try {

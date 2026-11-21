@@ -125,18 +125,28 @@ export class ForgeStore {
       mkdirSync(dirname(dbPath), {recursive: true});
     }
     this.db = new DatabaseSync(dbPath);
-    runSchemaMigrations(this.db);
+    try {
+      runSchemaMigrations(this.db);
 
-    const ctx: StoreContext = {
-      db: this.db,
-      atomic: fn => this.atomic(fn),
-      afterCommit: cb => this.afterCommit(cb),
-      nextSequence: key => this.nextSequence(key),
-    };
-    this.missions = new MissionRepository(ctx);
-    this.hama = new HamaRepository(ctx);
-    this.memory = new MemoryRepository(ctx);
-    this.seedDefaults();
+      const ctx: StoreContext = {
+        db: this.db,
+        atomic: fn => this.atomic(fn),
+        afterCommit: cb => this.afterCommit(cb),
+        nextSequence: key => this.nextSequence(key),
+      };
+      this.missions = new MissionRepository(ctx);
+      this.hama = new HamaRepository(ctx);
+      this.memory = new MemoryRepository(ctx);
+      this.seedDefaults();
+    } catch (err) {
+      this.closed = true;
+      try {
+        this.db.close();
+      } catch {
+        // Ignore close errors after failed init.
+      }
+      throw err;
+    }
   }
 
   get isOpen(): boolean {
