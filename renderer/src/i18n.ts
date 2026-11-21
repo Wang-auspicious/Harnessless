@@ -106,6 +106,26 @@ export interface ChangelogEntryDoc {
 
 export const CHANGELOG_DOCS: readonly ChangelogEntryDoc[] = [
   {
+    version: 'v3.1.0',
+    date: '2026-11-21',
+    titleZh:
+      'SDLC Studio v3.1 · 先探代码再定方案 · IDE 半途接管与因果 Diff · Git 长期记忆对账',
+    titleEn:
+      'SDLC Studio v3.1 · Code-Grounded Workbench · IDE Human Takeover & Causal Diff · Git Memory Reconciliation',
+    highlightsZh: [
+      'Codebase Probe（先探代码，再聊方案）：创建 Mission 与 HAMA 立项前自动只读扫描多仓源码、识别调用扇入、近期 Git 热修/Revert 与测试命令，客观给出「快速直通 / 标准核对 / 严格评审」分流依据与现实质疑。',
+      '确定性失败护栏与防空转熔断：自动区分环境依赖故障（infra_env）、改测试作弊拦截（test_tampering）、规格缺口与逻辑 Bug；检测同类错误死循环及 A->B->A 振荡并提前暂停交由人类接管。',
+      'Task 级断点与 IDE 逃生舱：支持双生图工作台一键在 VS Code / 文件管理器打开物理 Worktree，人工修复后直接「交回工厂验证并续跑」，并支持按任务 DAG 顺序折叠检视 Causal Diff。',
+      'Git 热修复同步与长期记忆对账：自动扫描非 ForgeOps 外部手工提交与 Revert，将受影响规则标为 contested + staleSuspect，避免 AI 覆写人类热修复。',
+    ],
+    highlightsEn: [
+      'Codebase Probe workbench grounded in target repositories: importer fan-in, Git hotspots/reverts, verify command detection, and blast-radius triage before locking proposals.',
+      'Deterministic Failure Guard: separates infra_env, diff-based test_tampering (.skip/.only/deleted tests), spec_gap, and logic_bug, plus error-fingerprint and A->B->A oscillation spin breakers.',
+      'IDE Escape Hatch & Human Handover in Workstation: open worktree in VS Code/Explorer, inspect failure forensics & live dirty files, hand back with verification & L3_locked memory retention, and toggle Causal vs Raw diff.',
+      'Out-of-Band Git Reconciliation in Hindsight Memory: scans external commits and reverts, flags affected rules as contested/staleSuspect, and provides one-click adopt_code / keep_rule / retire actions.',
+    ],
+  },
+  {
     version: 'v2.2.0',
     date: '2026-11-12',
     titleZh:

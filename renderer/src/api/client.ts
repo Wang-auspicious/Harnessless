@@ -3,21 +3,46 @@
  */
 
 import type {
+  AddCommentRequest,
   BootstrapSnapshot,
+  CausalDiffReport,
   ChangeDetailSnapshot,
+  CodebaseProbeReport,
+  ControlCommandInput,
+  ControlSchemaResponse,
   CreateChangeRequest,
   CreateHubRequest,
+  CreateMissionRequest,
+  CreateMissionResponse,
   CreateRoomRequest,
+  DecisionInput,
   EvidenceSearchHit,
+  FocusProjection,
   ForgePreloadBridge,
   ForgeSseEvent,
+  GitReconcileResult,
+  HamaDetailSnapshot,
+  MemoryLivingDocRecord,
   MemoryObservatorySnapshot,
+  MemoryObservationRecord,
+  MemoryRecallQuery,
+  MemoryRecallResult,
+  MemoryReflectResult,
+  MissionDetailSnapshot,
+  MissionEvidenceResponse,
+  MissionTraceabilityResponse,
   PostRoomMessageRequest,
+  ProbeMissionRequest,
   PromoteThreadToChangeRequest,
   ProposeGhostNodeRequest,
+  ReconcileObservationInput,
   RegisterAdapterRequest,
   RegisterRepoRequest,
+  ResolveCommentDispositionRequest,
+  ResumeHandoverInput,
+  ResumeHandoverResult,
   RoomDetailSnapshot,
+  TakeoverStatusSnapshot,
   UpdateChangeTeamRequest,
   UpdateProviderSecretRequest,
   UpsertDomainTermRequest,
@@ -40,6 +65,13 @@ import type {
   SoulConstitution,
   TranscriptMessage,
 } from '../../../src/shared/types.ts';
+import type {
+  ExecutionMode,
+  HamaCommentRecord,
+  MergeReadinessReport,
+  MissionDecisionRecord,
+  MissionRecord,
+} from '../../../src/shared/v3-types.ts';
 
 declare global {
   interface Window {
@@ -331,6 +363,208 @@ export const forgeApi = {
     window.open(url, '_blank', 'noopener,noreferrer');
     return true;
   },
+
+  openPath: async (targetPath: string): Promise<boolean> => {
+    if (window.forgeops?.openPath) {
+      return window.forgeops.openPath(targetPath);
+    }
+    return false;
+  },
+
+  openInEditor: async (
+    targetPath: string,
+  ): Promise<{readonly ok: boolean; readonly editor: string}> => {
+    if (window.forgeops?.openInEditor) {
+      return window.forgeops.openInEditor(targetPath);
+    }
+    return {ok: false, editor: 'unavailable'};
+  },
+
+  probeMission: (body: ProbeMissionRequest): Promise<CodebaseProbeReport> =>
+    apiFetch<CodebaseProbeReport>('/api/missions/probe', {
+      method: 'POST',
+      body,
+    }),
+
+  listMissions: (hubId?: string): Promise<readonly MissionRecord[]> =>
+    apiFetch<readonly MissionRecord[]>(
+      hubId
+        ? `/api/missions?hubId=${encodeURIComponent(hubId)}`
+        : '/api/missions',
+    ),
+
+  createMission: (body: CreateMissionRequest): Promise<CreateMissionResponse> =>
+    apiFetch<CreateMissionResponse>('/api/missions', {method: 'POST', body}),
+
+  getMissionDetail: (missionId: string): Promise<MissionDetailSnapshot> =>
+    apiFetch<MissionDetailSnapshot>(
+      `/api/missions/${encodeURIComponent(missionId)}`,
+    ),
+
+  getMissionFocus: (missionId: string): Promise<FocusProjection> =>
+    apiFetch<FocusProjection>(
+      `/api/missions/${encodeURIComponent(missionId)}/focus`,
+    ),
+
+  getMissionProbe: (missionId: string): Promise<CodebaseProbeReport> =>
+    apiFetch<CodebaseProbeReport>(
+      `/api/missions/${encodeURIComponent(missionId)}/probe`,
+    ),
+
+  resolveMissionDecision: (
+    missionId: string,
+    body: DecisionInput,
+  ): Promise<{
+    readonly decision: MissionDecisionRecord;
+    readonly mission: MissionRecord;
+    readonly focus: FocusProjection;
+  }> =>
+    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/decisions`, {
+      method: 'POST',
+      body,
+    }),
+
+  executeMissionControl: (
+    missionId: string,
+    body: ControlCommandInput,
+  ): Promise<{
+    readonly mission: MissionRecord;
+    readonly focus: FocusProjection;
+    readonly spawnedMission?: MissionRecord;
+  }> =>
+    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/control`, {
+      method: 'POST',
+      body,
+    }),
+
+  getMissionHama: (missionId: string): Promise<HamaDetailSnapshot> =>
+    apiFetch<HamaDetailSnapshot>(
+      `/api/missions/${encodeURIComponent(missionId)}/hama`,
+    ),
+
+  addHamaComment: (
+    missionId: string,
+    body: AddCommentRequest,
+  ): Promise<HamaCommentRecord> =>
+    apiFetch<HamaCommentRecord>(
+      `/api/missions/${encodeURIComponent(missionId)}/comments`,
+      {method: 'POST', body},
+    ),
+
+  resolveHamaComment: (
+    missionId: string,
+    commentId: string,
+    body: ResolveCommentDispositionRequest,
+  ): Promise<HamaCommentRecord> =>
+    apiFetch<HamaCommentRecord>(
+      `/api/missions/${encodeURIComponent(missionId)}/comments/${encodeURIComponent(commentId)}/disposition`,
+      {method: 'POST', body},
+    ),
+
+  getMissionTraceability: (
+    missionId: string,
+  ): Promise<MissionTraceabilityResponse> =>
+    apiFetch<MissionTraceabilityResponse>(
+      `/api/missions/${encodeURIComponent(missionId)}/traceability`,
+    ),
+
+  getMissionReadiness: (missionId: string): Promise<MergeReadinessReport> =>
+    apiFetch<MergeReadinessReport>(
+      `/api/missions/${encodeURIComponent(missionId)}/readiness`,
+    ),
+
+  getMissionEvidence: (missionId: string): Promise<MissionEvidenceResponse> =>
+    apiFetch<MissionEvidenceResponse>(
+      `/api/missions/${encodeURIComponent(missionId)}/evidence`,
+    ),
+
+  getControlSchema: (): Promise<ControlSchemaResponse> =>
+    apiFetch<ControlSchemaResponse>('/api/schema/controls'),
+
+  getTakeoverStatus: (
+    changeId: string,
+    nodeId?: string,
+  ): Promise<TakeoverStatusSnapshot> => {
+    const q = nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : '';
+    return apiFetch<TakeoverStatusSnapshot>(
+      `/api/changes/${encodeURIComponent(changeId)}/takeover-status${q}`,
+    );
+  },
+
+  pauseForHumanTakeover: (
+    changeId: string,
+    nodeId: string,
+    actor?: string,
+  ): Promise<TakeoverStatusSnapshot> =>
+    apiFetch<TakeoverStatusSnapshot>(
+      `/api/changes/${encodeURIComponent(changeId)}/nodes/${encodeURIComponent(nodeId)}/takeover`,
+      {method: 'POST', body: {actor: actor ?? 'human_operator'}},
+    ),
+
+  resumeFromHumanHandover: (
+    changeId: string,
+    nodeId: string,
+    body: ResumeHandoverInput,
+  ): Promise<ResumeHandoverResult> =>
+    apiFetch<ResumeHandoverResult>(
+      `/api/changes/${encodeURIComponent(changeId)}/nodes/${encodeURIComponent(nodeId)}/resume-handover`,
+      {method: 'POST', body},
+    ),
+
+  getCausalDiff: (changeId: string): Promise<CausalDiffReport> =>
+    apiFetch<CausalDiffReport>(
+      `/api/changes/${encodeURIComponent(changeId)}/causal-diff`,
+    ),
+
+  recallMemory: (body: MemoryRecallQuery): Promise<MemoryRecallResult> =>
+    apiFetch<MemoryRecallResult>('/api/memory/recall', {method: 'POST', body}),
+
+  reflectMemory: (body: {
+    readonly hubId: string;
+    readonly executionMode: ExecutionMode;
+    readonly question: string;
+    readonly limit?: number;
+  }): Promise<MemoryReflectResult> =>
+    apiFetch<MemoryReflectResult>('/api/memory/reflect', {
+      method: 'POST',
+      body,
+    }),
+
+  listLivingDocs: (
+    hubId: string,
+    executionMode: ExecutionMode = 'live',
+  ): Promise<readonly MemoryLivingDocRecord[]> =>
+    apiFetch<readonly MemoryLivingDocRecord[]>(
+      `/api/memory/living-docs?hubId=${encodeURIComponent(hubId)}&executionMode=${encodeURIComponent(executionMode)}`,
+    ),
+
+  listObservations: (
+    hubId: string,
+    executionMode: ExecutionMode = 'live',
+    includeRetired = false,
+  ): Promise<readonly MemoryObservationRecord[]> =>
+    apiFetch<readonly MemoryObservationRecord[]>(
+      `/api/memory/observations?hubId=${encodeURIComponent(hubId)}&executionMode=${encodeURIComponent(executionMode)}&includeRetired=${includeRetired ? '1' : '0'}`,
+    ),
+
+  reconcileGitMemory: (body: {
+    readonly hubId: string;
+    readonly executionMode?: ExecutionMode;
+    readonly repoIds?: readonly string[];
+  }): Promise<GitReconcileResult> =>
+    apiFetch<GitReconcileResult>('/api/memory/reconcile-git', {
+      method: 'POST',
+      body,
+    }),
+
+  reconcileObservation: (
+    observationId: string,
+    body: ReconcileObservationInput,
+  ): Promise<MemoryObservationRecord> =>
+    apiFetch<MemoryObservationRecord>(
+      `/api/memory/observations/${encodeURIComponent(observationId)}/reconcile`,
+      {method: 'POST', body},
+    ),
 
   subscribeEvents: (onEvent: (ev: ForgeSseEvent) => void): (() => void) => {
     const cfg = getBridgeConfig();

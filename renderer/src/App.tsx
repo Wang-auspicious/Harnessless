@@ -48,11 +48,13 @@ import {AgentFactoryView} from './views/AgentFactoryView.tsx';
 import {ChangeDashboardView} from './views/ChangeDashboardView.tsx';
 import {ControlTaskView} from './views/ControlTaskView.tsx';
 import {InfraCenterView} from './views/InfraCenterView.tsx';
+import {MissionStudioView} from './views/MissionStudioView.tsx';
 import {RegistryView} from './views/RegistryView.tsx';
 import {RoomsView} from './views/RoomsView.tsx';
 import {WorkstationView} from './views/WorkstationView.tsx';
 
 type NavRoute =
+  | 'missions'
   | 'infra-center'
   | 'registry'
   | 'change-dashboard'
@@ -84,7 +86,7 @@ function readInitialLang(): UiLang {
 
 export function App(): ReactElement {
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
-  const [route, setRoute] = useState<NavRoute>('workstation');
+  const [route, setRoute] = useState<NavRoute>('missions');
   const [prevRouteBeforeDash, setPrevRouteBeforeDash] =
     useState<NavRoute>('registry');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -256,6 +258,8 @@ export function App(): ReactElement {
 
   const routeTitle = useMemo((): string => {
     switch (route) {
+      case 'missions':
+        return tr(lang, 'SDLC 任务工作台', 'Mission Studio');
       case 'infra-center':
         return tr(lang, '基础设施中心', 'Infra Center');
       case 'registry':
@@ -332,6 +336,16 @@ export function App(): ReactElement {
         ),
         category: tr(lang, '文档', 'Docs'),
         run: () => setDrawer('doc'),
+      },
+      {
+        id: 'nav-missions',
+        title: tr(
+          lang,
+          '前往：SDLC 任务工作台 (Mission Studio)',
+          'Go to: Mission Studio',
+        ),
+        category: tr(lang, '导航', 'Navigate'),
+        run: () => setRoute('missions'),
       },
       {
         id: 'nav-ws',
@@ -448,6 +462,7 @@ export function App(): ReactElement {
     : 100;
 
   const inProjectGroup =
+    route === 'missions' ||
     route === 'registry' ||
     route === 'workstation' ||
     route === 'change-dashboard';
@@ -480,7 +495,7 @@ export function App(): ReactElement {
                 ForgeOps
                 <span className="brand-spark-dot" />
               </span>
-              <span className="brand-version">v2.2.0</span>
+              <span className="brand-version">v3.1.0</span>
             </div>
           )}
           <button
@@ -536,6 +551,21 @@ export function App(): ReactElement {
             )}
             {(sidebarCollapsed || openGroups['project']) && (
               <div className="nav-group-items">
+                <button
+                  type="button"
+                  className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
+                    route === 'missions' ? 'active' : ''
+                  }`}
+                  onClick={() => setRoute('missions')}
+                  title={tr(lang, '任务工作台', 'Mission Studio')}
+                >
+                  <span className="nav-item-left">
+                    <GitBranchIcon size={15} />
+                    {!sidebarCollapsed && (
+                      <span>{tr(lang, '任务工作台', 'Mission Studio')}</span>
+                    )}
+                  </span>
+                </button>
                 <button
                   type="button"
                   className={`nav-item ${!sidebarCollapsed ? 'indented' : ''} ${
@@ -937,6 +967,21 @@ export function App(): ReactElement {
         )}
 
         {/* Active View Body */}
+        {route === 'missions' && (
+          <MissionStudioView
+            lang={lang}
+            snapshot={snapshot}
+            activeHubId={activeHubId}
+            refreshTick={refreshTick}
+            onOpenWorkstation={openWorkstationForChange}
+            onRefresh={() => {
+              void reloadBootstrap();
+              setRefreshTick(t => t + 1);
+            }}
+            onError={msg => setErrorBanner(msg)}
+          />
+        )}
+
         {route === 'workstation' && (
           <WorkstationView
             lang={lang}
@@ -1658,7 +1703,9 @@ export function App(): ReactElement {
                           type="button"
                           className="btn btn-primary btn-sm"
                           onClick={() => {
-                            void forgeApi.openExternal('https://github.com');
+                            void forgeApi.openExternal(
+                              'https://github.com/Wang-auspicious/SDLC-studio',
+                            );
                           }}
                         >
                           <GithubIcon size={13} />{' '}

@@ -2,13 +2,19 @@ import {useEffect, useState, type ReactElement} from 'react';
 import type {
   BootstrapSnapshot,
   EvidenceSearchHit,
+  GitReconcileResult,
+  MemoryLivingDocRecord,
   MemoryObservatorySnapshot,
+  MemoryObservationRecord,
+  MemoryRecallResult,
+  MemoryReflectResult,
 } from '../../../src/shared/api.ts';
 import type {
   PermissionTier,
   RehydrationCapsule,
   TranscriptMessage,
 } from '../../../src/shared/types.ts';
+import type {ExecutionMode} from '../../../src/shared/v3-types.ts';
 import {
   forgeApi,
   type DoctorReportDto,
@@ -19,6 +25,7 @@ import {
   CalendarIcon,
   GlobeIcon,
   PlusIcon,
+  RefreshIcon,
   SearchIcon,
   UsersIcon,
 } from '../components/Icons.tsx';
@@ -136,6 +143,60 @@ export function ControlTaskView(props: {
   const [hubDesc, setHubDesc] = useState('');
   const [hubTier, setHubTier] = useState<PermissionTier>('turbo');
   const [doctor, setDoctor] = useState<DoctorReportDto | null>(null);
+
+  // --- Hindsight Memory & Git Reconciliation State ---
+  const [memMode, setMemMode] = useState<ExecutionMode>('live');
+  const [memTab, setMemTab] = useState<'recall' | 'docs' | 'observations'>(
+    'observations',
+  );
+  const [memQuery, setMemQuery] = useState('');
+  const [recallResult, setRecallResult] = useState<MemoryRecallResult | null>(
+    null,
+  );
+  const [reflectResult, setReflectResult] =
+    useState<MemoryReflectResult | null>(null);
+  const [livingDocs, setLivingDocs] = useState<
+    readonly MemoryLivingDocRecord[]
+  >([]);
+  const [expandedDocIds, setExpandedDocIds] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [observations, setObservations] = useState<
+    readonly MemoryObservationRecord[]
+  >([]);
+  const [reconcileResult, setReconcileResult] =
+    useState<GitReconcileResult | null>(null);
+  const [statementEdits, setStatementEdits] = useState<Record<string, string>>(
+    {},
+  );
+  const [memBusy, setMemBusy] = useState(false);
+
+  const loadHindsightData = async (): Promise<void> => {
+    if (!activeHubId) return;
+    try {
+      const [docs, obs] = await Promise.all([
+        forgeApi.listLivingDocs(activeHubId, memMode),
+        forgeApi.listObservations(activeHubId, memMode, false),
+      ]);
+      setLivingDocs(docs);
+      setObservations(obs);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  useEffect(() => {
+    if (section !== 'heartbeat' || !activeHubId) return;
+    void Promise.all([
+      forgeApi.listLivingDocs(activeHubId, memMode),
+      forgeApi.listObservations(activeHubId, memMode, false),
+    ])
+      .then(([docs, obs]) => {
+        setLivingDocs(docs);
+        setObservations(obs);
+      })
+      .catch(err => onError(err instanceof Error ? err.message : String(err)));
+  }, [section, activeHubId, memMode, refreshTick, onError]);
 
   useEffect(() => {
     if (section !== 'sessions' && section !== 'cron') return;
@@ -751,6 +812,548 @@ export function ControlTaskView(props: {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* Hindsight Memory & Git Hotfix Reconciliation */}
+        <div className="surface-card" style={{marginTop: 18}}>
+          <div className="surface-card-header">
+            <span>
+              {tr(
+                lang,
+                '长期记忆演进与 Git 热修复同步 (Hindsight Memory & Git Reconciliation)',
+                'Hindsight Memory & Git Hotfix Reconciliation',
+              )}
+            </span>
+            <div style={{display: 'flex', gap: 8, alignItems: 'center'}}>
+              <select
+                style={{width: 'auto', padding: '4px 8px', fontSize: 12}}
+                value={memMode}
+                onChange={e => setMemMode(e.target.value as ExecutionMode)}
+              >
+                <option value="live">
+                  {tr(lang, '在线记忆 (live)', 'Live Memory')}
+                </option>
+                <option value="simulation">
+                  {tr(lang, '演练记忆 (simulation)', 'Simulation Memory')}
+                </option>
+              </select>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={memBusy || !activeHubId}
+                onClick={() => {
+                  setMemBusy(true);
+                  void forgeApi
+                    .reconcileGitMemory({
+                      hubId: activeHubId,
+                      executionMode: memMode,
+                    })
+                    .then(res => {
+                      setReconcileResult(res);
+                      return loadHindsightData();
+                    })
+                    .catch(err =>
+                      onError(err instanceof Error ? err.message : String(err)),
+                    )
+                    .finally(() => setMemBusy(false));
+                }}
+              >
+                <RefreshIcon size={12} />{' '}
+                {tr(
+                  lang,
+                  '扫描外部 Git 提交与热修复',
+                  'Scan External Git Hotfixes',
+                )}
+              </button>
+            </div>
+          </div>
+
+          <div className="surface-card-body">
+            {reconcileResult && (
+              <div
+                style={{
+                  padding: '9px 12px',
+                  borderRadius: 6,
+                  border: '1px solid #c7d2fe',
+                  background: '#eef2ff',
+                  fontSize: 12,
+                  marginBottom: 12,
+                }}
+              >
+                <strong>
+                  {tr(lang, 'Git 同步扫描完成：', 'Git Reconcile Summary: ')}
+                </strong>
+                {reconcileResult.checkedRepos} {tr(lang, '仓', 'repos')} ·{' '}
+                {reconcileResult.contestedObservationIds.length}{' '}
+                {tr(lang, '条规范待核对', 'contested')} ·{' '}
+                {reconcileResult.detectedReverts.length}{' '}
+                {tr(lang, '次 Revert 回滚', 'reverts')} ·{' '}
+                {reconcileResult.retainedPitfalls}{' '}
+                {tr(lang, '条新教训', 'pitfalls retained')}
+              </div>
+            )}
+
+            <div className="underline-tabs" style={{marginBottom: 14}}>
+              <button
+                type="button"
+                className={`underline-tab ${
+                  memTab === 'observations' ? 'active' : ''
+                }`}
+                onClick={() => setMemTab('observations')}
+              >
+                {tr(
+                  lang,
+                  `冲突与规则核对 (${observations.length})`,
+                  `Observations & Conflicts (${observations.length})`,
+                )}
+              </button>
+              <button
+                type="button"
+                className={`underline-tab ${memTab === 'docs' ? 'active' : ''}`}
+                onClick={() => setMemTab('docs')}
+              >
+                {tr(
+                  lang,
+                  `知识库文档 (${livingDocs.length})`,
+                  `Living Docs (${livingDocs.length})`,
+                )}
+              </button>
+              <button
+                type="button"
+                className={`underline-tab ${
+                  memTab === 'recall' ? 'active' : ''
+                }`}
+                onClick={() => setMemTab('recall')}
+              >
+                {tr(lang, '检索与问答 (Recall & Reflect)', 'Recall & Reflect')}
+              </button>
+            </div>
+
+            {memTab === 'recall' && (
+              <div>
+                <div style={{display: 'flex', gap: 8, marginBottom: 12}}>
+                  <input
+                    value={memQuery}
+                    onChange={e => setMemQuery(e.target.value)}
+                    placeholder={tr(
+                      lang,
+                      '输入技术问题或文件路径以检索多通道证据与综合问答…',
+                      'Ask a memory question or enter keywords to recall & reflect...',
+                    )}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={memBusy || !memQuery.trim() || !activeHubId}
+                    onClick={() => {
+                      setMemBusy(true);
+                      void forgeApi
+                        .recallMemory({
+                          hubId: activeHubId,
+                          executionMode: memMode,
+                          query: memQuery.trim(),
+                          limit: 10,
+                          includeRejected: true,
+                        })
+                        .then(setRecallResult)
+                        .catch(err =>
+                          onError(
+                            err instanceof Error ? err.message : String(err),
+                          ),
+                        )
+                        .finally(() => setMemBusy(false));
+                    }}
+                  >
+                    <SearchIcon size={12} /> {tr(lang, '检索证据', 'Recall')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={memBusy || !memQuery.trim() || !activeHubId}
+                    onClick={() => {
+                      setMemBusy(true);
+                      void forgeApi
+                        .reflectMemory({
+                          hubId: activeHubId,
+                          executionMode: memMode,
+                          question: memQuery.trim(),
+                          limit: 8,
+                        })
+                        .then(setReflectResult)
+                        .catch(err =>
+                          onError(
+                            err instanceof Error ? err.message : String(err),
+                          ),
+                        )
+                        .finally(() => setMemBusy(false));
+                    }}
+                  >
+                    {tr(lang, '综合问答', 'Reflect')}
+                  </button>
+                </div>
+
+                {reflectResult && (
+                  <div
+                    style={{
+                      padding: 12,
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 6,
+                      background: '#fafbfc',
+                      marginBottom: 12,
+                    }}
+                  >
+                    <div style={{fontWeight: 700, marginBottom: 6}}>
+                      {reflectResult.question}
+                    </div>
+                    <pre
+                      className="selectable"
+                      style={{
+                        margin: '0 0 8px',
+                        whiteSpace: 'pre-wrap',
+                        fontSize: 12,
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      {reflectResult.answerMarkdown}
+                    </pre>
+                    {reflectResult.confirmedFacts.length > 0 && (
+                      <div style={{fontSize: 11.5, color: '#166534'}}>
+                        <strong>Confirmed:</strong>{' '}
+                        {reflectResult.confirmedFacts.join(' | ')}
+                      </div>
+                    )}
+                    {reflectResult.contradictions.length > 0 && (
+                      <div
+                        style={{fontSize: 11.5, color: '#b91c1c', marginTop: 4}}
+                      >
+                        <strong>Contradictions:</strong>{' '}
+                        {reflectResult.contradictions.join(' | ')}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {recallResult && (
+                  <div
+                    style={{display: 'flex', flexDirection: 'column', gap: 8}}
+                  >
+                    {recallResult.hits.map(hit => (
+                      <div
+                        key={hit.targetId}
+                        style={{
+                          padding: 10,
+                          border: '1px solid #e2e8f0',
+                          borderRadius: 6,
+                          background: '#ffffff',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            marginBottom: 4,
+                          }}
+                        >
+                          <div style={{display: 'flex', gap: 6}}>
+                            <span className="tag tag-indigo">
+                              {hit.authorityTier}
+                            </span>
+                            <span className="tag">
+                              score {hit.score.toFixed(2)}
+                            </span>
+                            {hit.rejectedWarning && (
+                              <span className="tag tag-red">
+                                {hit.rejectedWarning}
+                              </span>
+                            )}
+                          </div>
+                          <span style={{fontSize: 11, color: '#64748b'}}>
+                            {hit.pathAnchors.join(', ')}
+                          </span>
+                        </div>
+                        <div style={{fontWeight: 600, fontSize: 12.5}}>
+                          {hit.title}
+                        </div>
+                        <div
+                          className="selectable"
+                          style={{fontSize: 12, color: '#475569', marginTop: 2}}
+                        >
+                          {hit.content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {memTab === 'docs' && (
+              <div style={{display: 'flex', flexDirection: 'column', gap: 8}}>
+                {livingDocs.length === 0 ? (
+                  <div style={{color: '#64748b', fontSize: 12}}>
+                    {tr(
+                      lang,
+                      '当前模式暂无自动生成的知识库文档。',
+                      'No living documents yet.',
+                    )}
+                  </div>
+                ) : (
+                  livingDocs.map(doc => {
+                    const expanded = Boolean(expandedDocIds[doc.id]);
+                    return (
+                      <div
+                        key={doc.id}
+                        style={{
+                          border: '1px solid #e2e8f0',
+                          borderRadius: 6,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className="causal-group-header"
+                          onClick={() =>
+                            setExpandedDocIds(prev => ({
+                              ...prev,
+                              [doc.id]: !prev[doc.id],
+                            }))
+                          }
+                        >
+                          <span>{doc.title}</span>
+                          <div style={{display: 'flex', gap: 6}}>
+                            <span className="tag">{doc.docKind}</span>
+                            <span className="tag">v{doc.version}</span>
+                            {doc.stale && (
+                              <span className="tag tag-amber">STALE</span>
+                            )}
+                          </div>
+                        </button>
+                        {expanded && (
+                          <pre
+                            className="selectable"
+                            style={{
+                              margin: 0,
+                              padding: 12,
+                              background: '#ffffff',
+                              fontSize: 12,
+                              whiteSpace: 'pre-wrap',
+                              fontFamily: 'var(--font-mono)',
+                            }}
+                          >
+                            {doc.contentMarkdown}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {memTab === 'observations' && (
+              <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
+                {observations.length === 0 ? (
+                  <div style={{color: '#64748b', fontSize: 12}}>
+                    {tr(
+                      lang,
+                      '当前模式暂无沉淀的行为规范或观察条目。',
+                      'No observations recorded yet.',
+                    )}
+                  </div>
+                ) : (
+                  [...observations]
+                    .sort((a, b) => {
+                      const rank = (o: MemoryObservationRecord): number =>
+                        o.beliefStatus === 'contested' || o.staleSuspect
+                          ? 0
+                          : 1;
+                      return rank(a) - rank(b);
+                    })
+                    .map(obs => {
+                      const needsReconcile =
+                        obs.beliefStatus === 'contested' || obs.staleSuspect;
+                      return (
+                        <div
+                          key={obs.id}
+                          style={{
+                            padding: 12,
+                            border: needsReconcile
+                              ? '1px solid #eab308'
+                              : '1px solid #e2e8f0',
+                            borderRadius: 6,
+                            background: needsReconcile ? '#fffbeb' : '#fafbfc',
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              marginBottom: 6,
+                              gap: 8,
+                            }}
+                          >
+                            <div style={{fontWeight: 700}}>{obs.title}</div>
+                            <div style={{display: 'flex', gap: 5}}>
+                              <span className="tag tag-indigo">
+                                {obs.authorityTier}
+                              </span>
+                              <span
+                                className={`tag ${
+                                  obs.beliefStatus === 'contested'
+                                    ? 'tag-red'
+                                    : 'tag-green'
+                                }`}
+                              >
+                                {obs.beliefStatus}
+                              </span>
+                              {obs.staleSuspect && (
+                                <span className="tag tag-amber">
+                                  staleSuspect
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div
+                            className="selectable"
+                            style={{
+                              fontSize: 12.5,
+                              color: '#334155',
+                              marginBottom: 6,
+                            }}
+                          >
+                            {obs.statement}
+                          </div>
+                          {obs.pathAnchors.length > 0 && (
+                            <div
+                              className="selectable"
+                              style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: 11,
+                                color: '#64748b',
+                                marginBottom: needsReconcile ? 8 : 0,
+                              }}
+                            >
+                              {obs.pathAnchors.join(' · ')}
+                            </div>
+                          )}
+
+                          {needsReconcile && (
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 6,
+                                marginTop: 6,
+                              }}
+                            >
+                              <input
+                                value={statementEdits[obs.id] ?? ''}
+                                onChange={e =>
+                                  setStatementEdits(prev => ({
+                                    ...prev,
+                                    [obs.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder={tr(
+                                  lang,
+                                  '可选：填写更新后的规范正文（留空则按最新热修复语义确认）…',
+                                  'Optional updated rule statement...',
+                                )}
+                              />
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  gap: 6,
+                                  flexWrap: 'wrap',
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="btn btn-primary btn-sm"
+                                  disabled={memBusy}
+                                  onClick={() => {
+                                    setMemBusy(true);
+                                    void forgeApi
+                                      .reconcileObservation(obs.id, {
+                                        resolution: 'adopt_code',
+                                        newStatement:
+                                          statementEdits[obs.id]?.trim() ||
+                                          undefined,
+                                      })
+                                      .then(() => loadHindsightData())
+                                      .catch(err =>
+                                        onError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err),
+                                        ),
+                                      )
+                                      .finally(() => setMemBusy(false));
+                                  }}
+                                >
+                                  {tr(
+                                    lang,
+                                    '跟随最新代码更新规范',
+                                    'Follow New Code (adopt_code)',
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm"
+                                  disabled={memBusy}
+                                  onClick={() => {
+                                    setMemBusy(true);
+                                    void forgeApi
+                                      .reconcileObservation(obs.id, {
+                                        resolution: 'keep_rule',
+                                      })
+                                      .then(() => loadHindsightData())
+                                      .catch(err =>
+                                        onError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err),
+                                        ),
+                                      )
+                                      .finally(() => setMemBusy(false));
+                                  }}
+                                >
+                                  {tr(lang, '保留原规范', 'Keep Rule')}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-sm"
+                                  disabled={memBusy}
+                                  onClick={() => {
+                                    setMemBusy(true);
+                                    void forgeApi
+                                      .reconcileObservation(obs.id, {
+                                        resolution: 'retire',
+                                      })
+                                      .then(() => loadHindsightData())
+                                      .catch(err =>
+                                        onError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err),
+                                        ),
+                                      )
+                                      .finally(() => setMemBusy(false));
+                                  }}
+                                >
+                                  {tr(lang, '归档退役', 'Retire')}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>

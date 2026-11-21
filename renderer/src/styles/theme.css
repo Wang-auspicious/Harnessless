@@ -1818,3 +1818,103 @@ textarea:focus {
   border-color: #86efac;
   background: #f0fdf4;
 }
+
+.stage-stepper {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.stage-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-card);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.stage-step.active {
+  border-color: var(--border-indigo);
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-weight: 700;
+}
+
+.stage-step.completed {
+  border-color: var(--green-border);
+  background: var(--green-tint);
+  color: var(--green);
+}
+
+.stage-step.blocked {
+  border-color: var(--amber-border);
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.takeover-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-indigo-soft);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.takeover-panel {
+  border: 1px solid var(--amber-border);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  margin-bottom: 16px;
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+}
+
+.takeover-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-hairline);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.causal-group-card {
+  border: 1px solid var(--border-card);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.causal-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg-subtle);
+  border: none;
+  border-bottom: 1px solid var(--border-hairline);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}

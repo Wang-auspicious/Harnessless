@@ -15,7 +15,11 @@ import {
 import '@xyflow/react/dist/style.css';
 import type {
   BootstrapSnapshot,
+  CausalDiffReport,
   ChangeDetailSnapshot,
+  FailureCategory,
+  ResumeHandoverResult,
+  TakeoverStatusSnapshot,
 } from '../../../src/shared/api.ts';
 import type {
   DomainTermEntry,
@@ -40,6 +44,7 @@ import {
   RefreshIcon,
   SearchIcon,
   ShieldIcon,
+  TerminalIcon,
 } from '../components/Icons.tsx';
 import {formatStatusLabel, tr, type UiLang} from '../i18n.ts';
 
@@ -488,6 +493,22 @@ export function WorkstationView(props: {
     Record<string, boolean>
   >({});
   const [diffText, setDiffText] = useState<string | null>(null);
+  const [diffMode, setDiffMode] = useState<'causal' | 'raw'>('causal');
+  const [causalDiff, setCausalDiff] = useState<CausalDiffReport | null>(null);
+  const [collapsedCausalGroups, setCollapsedCausalGroups] = useState<
+    Record<string, boolean>
+  >({});
+  const [takeoverStatus, setTakeoverStatus] =
+    useState<TakeoverStatusSnapshot | null>(null);
+  const [showTakeoverPanel, setShowTakeoverPanel] = useState(false);
+  const [editorNotice, setEditorNotice] = useState<string | null>(null);
+  const [handoverNote, setHandoverNote] = useState('');
+  const [runVerify, setRunVerify] = useState(true);
+  const [saveAsMemory, setSaveAsMemory] = useState(false);
+  const [memoryTitle, setMemoryTitle] = useState('');
+  const [autoResume, setAutoResume] = useState(true);
+  const [handoverResult, setHandoverResult] =
+    useState<ResumeHandoverResult | null>(null);
   const [showGhostModal, setShowGhostModal] = useState(false);
   const [ghostTitle, setGhostTitle] = useState('');
   const [ghostDesc, setGhostDesc] = useState('');
@@ -860,12 +881,174 @@ export function WorkstationView(props: {
     }
   };
 
-  const handleInspectDiff = async (): Promise<void> => {
+  const formatFailureCategory = (cat?: FailureCategory): string => {
+    switch (cat) {
+      case 'infra_env':
+        return tr(lang, '环境/依赖故障 (infra_env)', 'Infra/Env (infra_env)');
+      case 'test_tampering':
+        return tr(
+          lang,
+          '防改测试拦截 (test_tampering)',
+          'Test Tampering (test_tampering)',
+        );
+      case 'spec_gap':
+        return tr(lang, '需求规格缺口 (spec_gap)', 'Spec Gap (spec_gap)');
+      case 'logic_bug':
+        return tr(lang, '代码逻辑缺陷 (logic_bug)', 'Logic Bug (logic_bug)');
+      default:
+        return tr(lang, '失败诊断', 'Failure Diagnosis');
+    }
+  };
+
+  useEffect(() => {
+    setTakeoverStatus(null);
+    setCausalDiff(null);
+    setHandoverResult(null);
+    setEditorNotice(null);
+  }, [effectiveChangeId]);
+
+  useEffect(() => {
+    if (!detail) return;
+    if (
+      detail.change.status === 'paused_human' ||
+      selectedNode?.status === 'failed'
+    ) {
+      setShowTakeoverPanel(true);
+      void forgeApi
+        .getTakeoverStatus(detail.change.id, selectedNode?.id)
+        .then(setTakeoverStatus)
+        .catch(() => {
+          // Non-fatal preview load.
+        });
+    }
+  }, [detail, selectedNode?.id, selectedNode?.status]);
+
+  const handleOpenInIde = async (): Promise<void> => {
+    const targetPath =
+      takeoverStatus?.worktreePath ??
+      detail?.change.worktreePath ??
+      activeRepo?.localPath ??
+      '';
+    if (!targetPath) return;
+    const res = await forgeApi.openInEditor(targetPath);
+    setEditorNotice(
+      res.ok
+        ? tr(
+            lang,
+            `已在编辑器 (${res.editor}) 打开工作区目录。`,
+            `Opened workspace in ${res.editor}.`,
+          )
+        : tr(
+            lang,
+            `未能自动唤起桌面编辑器（${res.editor}），路径：${targetPath}`,
+            `Could not launch editor (${res.editor}): ${targetPath}`,
+          ),
+    );
+  };
+
+  const handleOpenFolder = async (): Promise<void> => {
+    const targetPath =
+      takeoverStatus?.worktreePath ??
+      detail?.change.worktreePath ??
+      activeRepo?.localPath ??
+      '';
+    if (!targetPath) return;
+    const ok = await forgeApi.openPath(targetPath);
+    setEditorNotice(
+      ok
+        ? tr(
+            lang,
+            '已在系统文件管理器打开目录。',
+            'Opened folder in OS explorer.',
+          )
+        : tr(
+            lang,
+            `目录仅限桌面端打开：${targetPath}`,
+            `Desktop IPC required to open folder: ${targetPath}`,
+          ),
+    );
+  };
+
+  const handleLoadTakeoverStatus = async (): Promise<void> => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const snap = await forgeApi.getTakeoverStatus(
+        detail.change.id,
+        selectedNode?.id,
+      );
+      setTakeoverStatus(snap);
+      setShowTakeoverPanel(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePauseForTakeover = async (): Promise<void> => {
+    if (!detail || !selectedNode) return;
+    setBusy(true);
+    try {
+      const snap = await forgeApi.pauseForHumanTakeover(
+        detail.change.id,
+        selectedNode.id,
+      );
+      setTakeoverStatus(snap);
+      setShowTakeoverPanel(true);
+      setActiveTab('details');
+      onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResumeHandover = async (): Promise<void> => {
+    if (!detail || !selectedNode) return;
+    setBusy(true);
+    try {
+      const res = await forgeApi.resumeFromHumanHandover(
+        detail.change.id,
+        selectedNode.id,
+        {
+          runVerify,
+          handoverNote: handoverNote.trim(),
+          saveAsMemory,
+          memoryTitle:
+            saveAsMemory && memoryTitle.trim() ? memoryTitle.trim() : undefined,
+          autoResume,
+        },
+      );
+      setHandoverResult(res);
+      const updatedSnap = await forgeApi
+        .getTakeoverStatus(detail.change.id, selectedNode.id)
+        .catch(() => null);
+      if (updatedSnap) {
+        setTakeoverStatus(updatedSnap);
+      }
+      onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleInspectDiff = async (
+    targetMode?: 'causal' | 'raw',
+  ): Promise<void> => {
     if (!detail) {
       return;
     }
-    const d = await forgeApi.getChangeDiff(detail.change.id);
-    setDiffText(`${d.summary}\n\n${d.patch || '(Clean working tree)'}`);
+    const mode = targetMode ?? diffMode;
+    setDiffMode(mode);
+    setBusy(true);
+    try {
+      const [raw, causal] = await Promise.all([
+        forgeApi.getChangeDiff(detail.change.id),
+        forgeApi.getCausalDiff(detail.change.id),
+      ]);
+      setDiffText(`${raw.summary}\n\n${raw.patch || '(Clean working tree)'}`);
+      setCausalDiff(causal);
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (hubChanges.length === 0) {
@@ -981,6 +1164,30 @@ export function WorkstationView(props: {
         <div className="workstation-strip-right">
           <button
             type="button"
+            className="btn btn-sm"
+            disabled={!detail}
+            onClick={() => void handleOpenInIde()}
+          >
+            <TerminalIcon size={12} /> {tr(lang, '在 IDE 中打开', 'Open IDE')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={!detail}
+            onClick={() => void handleOpenFolder()}
+          >
+            <FileTextIcon size={12} /> {tr(lang, '打开目录', 'Folder')}
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy || !detail || !selectedNode}
+            onClick={() => void handlePauseForTakeover()}
+          >
+            <AlertTriangleIcon size={12} /> {tr(lang, '人工接管', 'Takeover')}
+          </button>
+          <button
+            type="button"
             className="btn btn-primary btn-sm"
             disabled={busy || !detail}
             onClick={() => void handleRunResume()}
@@ -1000,6 +1207,30 @@ export function WorkstationView(props: {
           </button>
         </div>
       </div>
+
+      {editorNotice && (
+        <div
+          style={{
+            padding: '7px 16px',
+            background: '#eef2ff',
+            borderBottom: '1px solid #c7d2fe',
+            color: '#3730a3',
+            fontSize: 12,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <span className="selectable">{editorNotice}</span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setEditorNotice(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* 2-Column Workstation Body */}
       <div className="workstation-body">
@@ -1148,6 +1379,370 @@ export function WorkstationView(props: {
               className="workstation-tab-panel"
               style={{padding: '20px 24px'}}
             >
+              {detail && (
+                <div className="takeover-strip">
+                  <div style={{fontSize: 12.5, color: '#334155'}}>
+                    <strong>
+                      {tr(lang, '工作树接管入口：', 'IDE Escape Hatch: ')}
+                    </strong>
+                    <span
+                      className="selectable"
+                      style={{fontFamily: 'var(--font-mono)', fontSize: 11.5}}
+                    >
+                      {detail.change.gitBranch}
+                    </span>
+                  </div>
+                  <div style={{display: 'flex', gap: 6, flexWrap: 'wrap'}}>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void handleOpenInIde()}
+                    >
+                      <TerminalIcon size={12} />{' '}
+                      {tr(lang, '在 IDE 中打开', 'Open in IDE')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={busy}
+                      onClick={() => {
+                        if (showTakeoverPanel && takeoverStatus) {
+                          setShowTakeoverPanel(false);
+                        } else {
+                          void handleLoadTakeoverStatus();
+                        }
+                      }}
+                    >
+                      {showTakeoverPanel && takeoverStatus
+                        ? tr(lang, '收起接管面板', 'Hide Takeover')
+                        : tr(lang, '查看接管状态', 'Inspect Takeover')}
+                    </button>
+                    {selectedNode && (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={busy}
+                        onClick={() => void handlePauseForTakeover()}
+                      >
+                        {tr(lang, '暂停并人工接管', 'Pause for Takeover')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {showTakeoverPanel && takeoverStatus && selectedNode && (
+                <div className="takeover-panel">
+                  <div className="takeover-panel-header">
+                    <span>
+                      <span style={{color: '#d97706', display: 'inline-flex'}}>
+                        <AlertTriangleIcon size={14} />
+                      </span>{' '}
+                      {tr(
+                        lang,
+                        `人工接管与本地修改交接 (${takeoverStatus.nodeCode})`,
+                        `Human Takeover & Handover (${takeoverStatus.nodeCode})`,
+                      )}
+                    </span>
+                    <div style={{display: 'flex', gap: 6}}>
+                      {takeoverStatus.forensics?.category && (
+                        <span className="tag tag-amber">
+                          {formatFailureCategory(
+                            takeoverStatus.forensics.category,
+                          )}
+                        </span>
+                      )}
+                      {takeoverStatus.forensics?.spinDetected && (
+                        <span className="tag tag-red">
+                          {tr(lang, '检测到空转熔断', 'Spin Breaker')}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={busy}
+                        onClick={() => void handleLoadTakeoverStatus()}
+                      >
+                        <RefreshIcon size={12} />{' '}
+                        {tr(lang, '刷新本地修改', 'Refresh Edits')}
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    className="surface-card-body"
+                    style={{display: 'flex', flexDirection: 'column', gap: 10}}
+                  >
+                    {takeoverStatus.forensics && (
+                      <div
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: 6,
+                          background: '#fef3c7',
+                          border: '1px solid #eab308',
+                          fontSize: 12.5,
+                        }}
+                      >
+                        <div style={{fontWeight: 700, marginBottom: 3}}>
+                          {takeoverStatus.forensics.summary}
+                        </div>
+                        {takeoverStatus.forensics.suggestedAction && (
+                          <div style={{color: '#92400e'}}>
+                            {takeoverStatus.forensics.suggestedAction}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr',
+                        gap: 10,
+                      }}
+                    >
+                      <div>
+                        <div className="field-label">
+                          {tr(lang, 'Worktree 本地路径', 'Worktree Path')}
+                        </div>
+                        <div
+                          className="selectable"
+                          style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11.5,
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {takeoverStatus.worktreePath}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="field-label">
+                          {tr(
+                            lang,
+                            '验证命令 (Verify Command)',
+                            'Verify Command',
+                          )}
+                        </div>
+                        <div
+                          className="selectable"
+                          style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11.5,
+                          }}
+                        >
+                          {takeoverStatus.verifyCommand || '-'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="field-label">
+                        {tr(
+                          lang,
+                          `实时检测到未提交改动文件 (${takeoverStatus.modifiedFiles.length})`,
+                          `Live Modified Files (${takeoverStatus.modifiedFiles.length})`,
+                        )}
+                      </div>
+                      {takeoverStatus.modifiedFiles.length === 0 ? (
+                        <div style={{fontSize: 12, color: '#64748b'}}>
+                          {takeoverStatus.diffSummary}
+                        </div>
+                      ) : (
+                        <div
+                          style={{display: 'flex', gap: 5, flexWrap: 'wrap'}}
+                        >
+                          {takeoverStatus.modifiedFiles.map(f => (
+                            <span
+                              key={f}
+                              className="tag tag-indigo selectable"
+                              style={{fontFamily: 'var(--font-mono)'}}
+                            >
+                              {f}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="field-label">
+                        {tr(
+                          lang,
+                          '人工交接说明（记录本次手动修了什么）',
+                          'Handover Note',
+                        )}
+                      </label>
+                      <input
+                        value={handoverNote}
+                        onChange={e => setHandoverNote(e.target.value)}
+                        placeholder={tr(
+                          lang,
+                          '例如：已补全超时重连逻辑，手动运行测试通过…',
+                          'e.g. Fixed socket reconnect edge case in adapter...',
+                        )}
+                      />
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        gap: 14,
+                        flexWrap: 'wrap',
+                        fontSize: 12.5,
+                        color: '#334155',
+                      }}
+                    >
+                      <label
+                        style={{
+                          display: 'inline-flex',
+                          gap: 5,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          style={{width: 'auto'}}
+                          checked={runVerify}
+                          onChange={e => setRunVerify(e.target.checked)}
+                        />
+                        {tr(
+                          lang,
+                          '交回时跑 Verify 验证',
+                          'Run verify on handover',
+                        )}
+                      </label>
+                      <label
+                        style={{
+                          display: 'inline-flex',
+                          gap: 5,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          style={{width: 'auto'}}
+                          checked={saveAsMemory}
+                          onChange={e => setSaveAsMemory(e.target.checked)}
+                        />
+                        {tr(
+                          lang,
+                          '沉淀为长期记忆规则 (L3_locked)',
+                          'Save fix rule to L3_locked memory',
+                        )}
+                      </label>
+                      <label
+                        style={{
+                          display: 'inline-flex',
+                          gap: 5,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          style={{width: 'auto'}}
+                          checked={autoResume}
+                          onChange={e => setAutoResume(e.target.checked)}
+                        />
+                        {tr(
+                          lang,
+                          '验证通过后自动续跑后续节点',
+                          'Auto-resume downstream nodes',
+                        )}
+                      </label>
+                    </div>
+
+                    {saveAsMemory && (
+                      <div>
+                        <label className="field-label">
+                          {tr(
+                            lang,
+                            '记忆规则标题（可选）',
+                            'Memory Title (Optional)',
+                          )}
+                        </label>
+                        <input
+                          value={memoryTitle}
+                          onChange={e => setMemoryTitle(e.target.value)}
+                          placeholder={tr(
+                            lang,
+                            '给这条长期经验起个明确标题…',
+                            'Short title for retained L3_locked constraint...',
+                          )}
+                        />
+                      </div>
+                    )}
+
+                    <div style={{display: 'flex', gap: 8}}>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        disabled={busy}
+                        onClick={() => void handleResumeHandover()}
+                      >
+                        <CheckCircleIcon size={13} />{' '}
+                        {tr(
+                          lang,
+                          '我已修好，交回工厂验证并续跑',
+                          'I Fixed It — Handover & Verify',
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => void handleOpenInIde()}
+                      >
+                        <TerminalIcon size={12} />{' '}
+                        {tr(lang, '在 IDE 中打开', 'Open in IDE')}
+                      </button>
+                    </div>
+
+                    {handoverResult && (
+                      <div
+                        style={{
+                          padding: '9px 12px',
+                          borderRadius: 6,
+                          border: handoverResult.ok
+                            ? '1px solid #86efac'
+                            : '1px solid #f87171',
+                          background: handoverResult.ok ? '#f0fdf4' : '#fee2e2',
+                          fontSize: 12,
+                        }}
+                      >
+                        <div style={{fontWeight: 700}}>
+                          {handoverResult.message}
+                        </div>
+                        {handoverResult.checkpointSha && (
+                          <div
+                            style={{
+                              marginTop: 4,
+                              fontFamily: 'var(--font-mono)',
+                            }}
+                          >
+                            Checkpoint:{' '}
+                            {handoverResult.checkpointSha.slice(0, 7)} (
+                            {handoverResult.checkpointTag})
+                          </div>
+                        )}
+                        {handoverResult.verifyOutput && (
+                          <pre
+                            className="selectable"
+                            style={{
+                              margin: '6px 0 0',
+                              maxHeight: 120,
+                              overflow: 'auto',
+                              fontSize: 11,
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            {handoverResult.verifyOutput}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {selectedNode ? (
                 <div className="surface-card">
                   <div className="surface-card-header">
@@ -1338,52 +1933,206 @@ export function WorkstationView(props: {
                       </div>
                     )}
 
-                    {diffText !== null && (
+                    {(diffText !== null || causalDiff !== null) && (
                       <div style={{marginTop: 18}}>
                         <div
                           style={{
                             display: 'flex',
                             justifyContent: 'space-between',
                             alignItems: 'center',
-                            marginBottom: 6,
+                            marginBottom: 8,
+                            flexWrap: 'wrap',
+                            gap: 8,
                           }}
                         >
-                          <span
-                            className="field-label"
-                            style={{marginBottom: 0}}
+                          <div
+                            style={{
+                              display: 'flex',
+                              gap: 6,
+                              alignItems: 'center',
+                            }}
                           >
-                            {tr(
-                              lang,
-                              '物理隔离 Git Worktree 差异',
-                              'Isolated Git Worktree Diff',
-                            )}{' '}
-                            ({detail?.change.gitBranch})
-                          </span>
+                            <span
+                              className="field-label"
+                              style={{marginBottom: 0}}
+                            >
+                              {tr(
+                                lang,
+                                '物理隔离 Git Worktree 差异',
+                                'Isolated Git Worktree Diff',
+                              )}{' '}
+                              ({detail?.change.gitBranch})
+                            </span>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${
+                                diffMode === 'causal' ? 'btn-soft' : ''
+                              }`}
+                              onClick={() => void handleInspectDiff('causal')}
+                            >
+                              {tr(
+                                lang,
+                                '按任务因果顺序 (Causal)',
+                                'Causal by Task',
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn btn-sm ${
+                                diffMode === 'raw' ? 'btn-soft' : ''
+                              }`}
+                              onClick={() => void handleInspectDiff('raw')}
+                            >
+                              {tr(lang, '原始 Diff (Raw)', 'Raw Diff')}
+                            </button>
+                          </div>
                           <button
                             type="button"
                             className="btn btn-sm"
-                            onClick={() => setDiffText(null)}
+                            onClick={() => {
+                              setDiffText(null);
+                              setCausalDiff(null);
+                            }}
                           >
                             {tr(lang, '收起差异', 'Close Diff')}
                           </button>
                         </div>
-                        <pre
-                          className="selectable"
-                          style={{
-                            margin: 0,
-                            padding: 14,
-                            background: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            borderRadius: 8,
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11.5,
-                            maxHeight: 260,
-                            overflow: 'auto',
-                            whiteSpace: 'pre-wrap',
-                          }}
-                        >
-                          {diffText}
-                        </pre>
+
+                        {diffMode === 'causal' && causalDiff ? (
+                          <div>
+                            {causalDiff.groups.length === 0 ? (
+                              <div
+                                style={{
+                                  padding: 12,
+                                  background: '#f8fafc',
+                                  border: '1px solid #e2e8f0',
+                                  borderRadius: 6,
+                                  color: '#64748b',
+                                  fontSize: 12,
+                                }}
+                              >
+                                {tr(
+                                  lang,
+                                  '工作树当前干净，暂无文件改动。',
+                                  'Clean working tree.',
+                                )}
+                              </div>
+                            ) : (
+                              causalDiff.groups.map((grp, idx) => {
+                                const grpKey = `${grp.nodeId ?? 'unmapped'}:${idx}`;
+                                const collapsed = Boolean(
+                                  collapsedCausalGroups[grpKey],
+                                );
+                                return (
+                                  <div
+                                    key={grpKey}
+                                    className="causal-group-card"
+                                  >
+                                    <button
+                                      type="button"
+                                      className="causal-group-header"
+                                      onClick={() =>
+                                        setCollapsedCausalGroups(prev => ({
+                                          ...prev,
+                                          [grpKey]: !prev[grpKey],
+                                        }))
+                                      }
+                                    >
+                                      <span>
+                                        [{grp.phaseLabel}] {grp.nodeCode} ·{' '}
+                                        {grp.nodeTitle}
+                                      </span>
+                                      <div style={{display: 'flex', gap: 6}}>
+                                        <span className="tag">
+                                          {grp.nodeStatus}
+                                        </span>
+                                        <span className="tag tag-indigo">
+                                          {grp.files.length}{' '}
+                                          {tr(lang, '文件', 'files')}
+                                        </span>
+                                      </div>
+                                    </button>
+                                    {!collapsed && (
+                                      <div style={{padding: 10}}>
+                                        {grp.files.map(f => (
+                                          <div
+                                            key={f.filePath}
+                                            style={{marginBottom: 10}}
+                                          >
+                                            <div
+                                              style={{
+                                                display: 'flex',
+                                                justifyContent: 'space-between',
+                                                marginBottom: 4,
+                                                fontSize: 12,
+                                                fontFamily: 'var(--font-mono)',
+                                              }}
+                                            >
+                                              <span className="selectable">
+                                                {f.filePath}
+                                              </span>
+                                              <span>
+                                                <span
+                                                  style={{color: '#16a34a'}}
+                                                >
+                                                  +{f.addedLines}
+                                                </span>{' '}
+                                                /{' '}
+                                                <span
+                                                  style={{color: '#dc2626'}}
+                                                >
+                                                  -{f.deletedLines}
+                                                </span>
+                                              </span>
+                                            </div>
+                                            {f.patch && (
+                                              <pre
+                                                className="selectable"
+                                                style={{
+                                                  margin: 0,
+                                                  padding: 10,
+                                                  background: '#f8fafc',
+                                                  border: '1px solid #e2e8f0',
+                                                  borderRadius: 6,
+                                                  fontFamily:
+                                                    'var(--font-mono)',
+                                                  fontSize: 11,
+                                                  maxHeight: 200,
+                                                  overflow: 'auto',
+                                                  whiteSpace: 'pre-wrap',
+                                                }}
+                                              >
+                                                {f.patch}
+                                              </pre>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        ) : (
+                          <pre
+                            className="selectable"
+                            style={{
+                              margin: 0,
+                              padding: 14,
+                              background: '#f8fafc',
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 8,
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: 11.5,
+                              maxHeight: 260,
+                              overflow: 'auto',
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            {diffText}
+                          </pre>
+                        )}
                       </div>
                     )}
                   </div>
