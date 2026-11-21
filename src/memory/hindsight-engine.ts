@@ -7,13 +7,15 @@ import {
 import {sha256Text} from '../core/canonical-json.ts';
 import {isFileInsideScope} from '../core/glob-scope.ts';
 import {ForgeError} from '../shared/errors.ts';
-import type {RehydrationCapsule} from '../shared/types.ts';
+import type {DomainTermEntry, RehydrationCapsule} from '../shared/types.ts';
 import type {
   ExecutionMode,
   LivingDocKind,
   MemoryAuthorityTier,
   MemoryFactKind,
   MemoryFactRecord,
+  MemoryLivingDocRecord,
+  MemoryObservationRecord,
   MemoryRecallHit,
   MemoryRecallQuery,
   MemoryRecallResult,
@@ -65,6 +67,60 @@ export interface ConsolidationReport {
   readonly refreshedDocs: number;
 }
 
+export interface HindsightEngineOptions {
+  readonly synthesizeText?: (
+    prompt: string,
+    systemPrompt: string,
+  ) => Promise<string | null>;
+  readonly embedRemote?: (text: string) => Promise<{
+    readonly embeddingSpace: string;
+    readonly dims: number;
+    readonly vector: Float32Array;
+  } | null>;
+}
+
+export interface EnsureLivingDocInput {
+  readonly hubId: string;
+  readonly repoId?: string | null;
+  readonly executionMode: ExecutionMode;
+  readonly docKind: LivingDocKind;
+  readonly slug: string;
+  readonly title: string;
+  readonly standingQuestion: string;
+  readonly initialMarkdown: string;
+}
+
+type StageBRelation = 'CORROBORATE' | 'SUPERSEDE' | 'CONTRADICT' | 'DISTINCT';
+
+interface RemoteVectorEntry {
+  readonly targetKind: 'observation' | 'fact' | 'chunk';
+  readonly targetId: string;
+  readonly embeddingSpace: string;
+  readonly dims: number;
+  readonly vector: Float32Array;
+}
+
+const CONSOLIDATION_BATCH_SIZE = 80;
+
+const ACYCLIC_DENYLIST = new Set([
+  'living_doc',
+  'capsule',
+  'rehydration_capsule',
+  'agent_wiki',
+  'mental_model',
+  'ddd_map',
+  'pitfall_runbook',
+  'baseline_changelog',
+  'reflection',
+]);
+
+const RESERVED_L1_SUBJECT_PREFIXES = [
+  'ddd:',
+  'req:',
+  'constitution:',
+  'decision:',
+];
+
 const FUNCTIONAL_SUBJECT_PREFIXES = [
   'ddd:',
   'req:',
@@ -85,8 +141,70 @@ const AUTHORITY_MULTIPLIER: Readonly<Record<MemoryAuthorityTier, number>> = {
   L3_locked: 1.35,
 };
 
+const DEFAULT_LIVING_DOC_TEMPLATES: readonly {
+  readonly docKind: LivingDocKind;
+  readonly slug: string;
+  readonly title: string;
+  readonly standingQuestion: string;
+  readonly initialMarkdown: string;
+}[] = [
+  {
+    docKind: 'mental_model',
+    slug: 'mental-model',
+    title: 'Hub Mental Model',
+    standingQuestion:
+      'What is the current architecture, mental model, and active module boundaries?',
+    initialMarkdown:
+      '# Hub Mental Model\n\nAwaiting consolidated observations.',
+  },
+  {
+    docKind: 'agent_wiki',
+    slug: 'agent-wiki',
+    title: 'Hub Agent-Wiki',
+    standingQuestion: 'What is the current repository topology and DDD map?',
+    initialMarkdown: '# Hub Agent-Wiki\n\nAwaiting topology synthesis.',
+  },
+  {
+    docKind: 'ddd_map',
+    slug: 'ddd-map',
+    title: 'DDD Ubiquitous Language Map',
+    standingQuestion:
+      'What are the canonical DDD bounded contexts, domain terms, and forbidden aliases?',
+    initialMarkdown:
+      '# DDD Ubiquitous Language Map\n\nAwaiting canonical domain term consolidation.',
+  },
+  {
+    docKind: 'pitfall_runbook',
+    slug: 'pitfall-runbook',
+    title: 'Pitfall & Rejected-Option Runbook',
+    standingQuestion:
+      'What pitfalls, gate failures, and rejected options must be avoided?',
+    initialMarkdown:
+      '# Pitfall & Rejected-Option Runbook\n\nNo pitfalls recorded yet.',
+  },
+  {
+    docKind: 'baseline_changelog',
+    slug: 'baseline-changelog',
+    title: 'Baseline & Decision Changelog',
+    standingQuestion:
+      'What requirement baselines, decisions, and scope changes are active?',
+    initialMarkdown:
+      '# Baseline & Decision Changelog\n\nNo baseline deltas recorded yet.',
+  },
+];
+
 function isFunctionalSubject(subjectKey: string): boolean {
   return FUNCTIONAL_SUBJECT_PREFIXES.some(p => subjectKey.startsWith(p));
+}
+
+function isCompatibleForSubjectMatch(
+  obs: MemoryObservationRecord,
+  fact: MemoryFactRecord,
+): boolean {
+  return (
+    (fact.kind === 'rejected_option') ===
+    ((obs.kind ?? 'world') === 'rejected_option')
+  );
 }
 
 function splitTextIntoChunks(
@@ -131,13 +249,41 @@ function splitTextIntoChunks(
   return chunks;
 }
 
+function textMatchesTerm(
+  text: string,
+  lowerText: string,
+  needle: string,
+): boolean {
+  const clean = needle.trim();
+  if (!clean) {
+    return false;
+  }
+  if (/[\u4e00-\u9fff]/.test(clean)) {
+    return text.includes(clean);
+  }
+  return lowerText.includes(clean.toLowerCase());
+}
+
 function extractInlineEntities(
   text: string,
   extraNames: readonly string[] = [],
-): Array<{readonly type: string; readonly name: string}> {
-  const out: Array<{type: string; name: string}> = [];
+  domainTerms: readonly DomainTermEntry[] = [],
+): Array<{
+  readonly type: string;
+  readonly name: string;
+  readonly aliases: readonly string[];
+}> {
+  const out: Array<{
+    type: string;
+    name: string;
+    aliases: readonly string[];
+  }> = [];
   const seen = new Set<string>();
-  const add = (type: string, rawName: string): void => {
+  const add = (
+    type: string,
+    rawName: string,
+    aliases: readonly string[] = [],
+  ): void => {
     const clean = rawName.trim();
     if (!clean) {
       return;
@@ -145,9 +291,25 @@ function extractInlineEntities(
     const key = `${type}:${canonicalEntityKey(clean)}`;
     if (!seen.has(key)) {
       seen.add(key);
-      out.push({type, name: clean});
+      out.push({
+        type,
+        name: clean,
+        aliases: Array.from(new Set([clean, ...aliases].filter(Boolean))),
+      });
     }
   };
+
+  const lowerText = text.toLowerCase();
+  for (const term of domainTerms) {
+    const termAliases = [
+      term.canonicalTerm,
+      term.localLabel,
+      ...term.forbiddenAliases,
+    ].filter(Boolean);
+    if (termAliases.some(alias => textMatchesTerm(text, lowerText, alias))) {
+      add('domain_term', term.canonicalTerm, termAliases);
+    }
+  }
 
   for (const name of extraNames) {
     add('concept', name);
@@ -168,8 +330,29 @@ function extractInlineEntities(
   return out.slice(0, 24);
 }
 
+function parseStageBDecision(raw: string | null): StageBRelation | null {
+  if (!raw) {
+    return null;
+  }
+  const upper = raw.toUpperCase();
+  if (upper.includes('CORROBORATE')) {
+    return 'CORROBORATE';
+  }
+  if (upper.includes('SUPERSEDE')) {
+    return 'SUPERSEDE';
+  }
+  if (upper.includes('CONTRADICT')) {
+    return 'CONTRADICT';
+  }
+  if (upper.includes('DISTINCT')) {
+    return 'DISTINCT';
+  }
+  return null;
+}
+
 export class HindsightEngine {
   private readonly store: ForgeStore;
+  private readonly options?: HindsightEngineOptions;
   private readonly vectorCache = new Map<
     string,
     Array<{
@@ -179,8 +362,9 @@ export class HindsightEngine {
     }>
   >();
 
-  constructor(store: ForgeStore) {
+  constructor(store: ForgeStore, options?: HindsightEngineOptions) {
     this.store = store;
+    this.options = options;
   }
 
   retain(input: RetainMemoryInput): {
@@ -188,13 +372,16 @@ export class HindsightEngine {
     readonly insertedChunks: number;
     readonly insertedFacts: number;
   } {
-    if (input.sourceType === 'living_doc' || input.sourceType === 'capsule') {
+    const normalizedSource = input.sourceType.trim().toLowerCase();
+    const metaLayer = input.metadata?.['layer'];
+    if (ACYCLIC_DENYLIST.has(normalizedSource) || metaLayer === 3) {
       throw new ForgeError(
         'POLICY_DENIED',
         `Acyclic Memory Law: "${input.sourceType}" cannot re-enter retain()`,
         403,
       );
     }
+
     const executionMode: ExecutionMode = input.executionMode ?? 'live';
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const authorityTier: MemoryAuthorityTier =
@@ -208,6 +395,19 @@ export class HindsightEngine {
       );
     }
 
+    if (authorityTier === 'L1_observed' && input.structuredFacts) {
+      for (const f of input.structuredFacts) {
+        const subjLower = f.subjectKey.trim().toLowerCase();
+        if (RESERVED_L1_SUBJECT_PREFIXES.some(p => subjLower.startsWith(p))) {
+          throw new ForgeError(
+            'POLICY_DENIED',
+            `L1_observed cannot write to reserved subjectKey "${f.subjectKey}"`,
+            403,
+          );
+        }
+      }
+    }
+
     const contentSha = sha256Text(rawText);
     const result = this.store.atomic(() => {
       const {doc, inserted} = this.store.memory.upsertDocument({
@@ -215,7 +415,7 @@ export class HindsightEngine {
         repoId: input.repoId,
         missionId: input.missionId,
         executionMode,
-        sourceType: input.sourceType,
+        sourceType: normalizedSource,
         occurredAt,
         contentSha256: contentSha,
         rawText,
@@ -223,27 +423,55 @@ export class HindsightEngine {
       });
 
       if (!inserted) {
-        if (input.missionId) {
-          const docEnt = this.store.memory.upsertEntity({
-            hubId: input.hubId,
+        const docEnt = this.store.memory.upsertEntity({
+          hubId: input.hubId,
+          executionMode,
+          entityType: 'document',
+          canonicalKey: canonicalEntityKey(doc.id),
+          displayName: `${normalizedSource}:${doc.id.slice(0, 10)}`,
+          aliases: [doc.id],
+        });
+        const scopeEnt = input.missionId
+          ? this.store.memory.upsertEntity({
+              hubId: input.hubId,
+              executionMode,
+              entityType: 'mission',
+              canonicalKey: canonicalEntityKey(input.missionId),
+              displayName: input.missionId,
+              aliases: [input.missionId],
+            })
+          : input.repoId
+            ? this.store.memory.upsertEntity({
+                hubId: input.hubId,
+                executionMode,
+                entityType: 'repo',
+                canonicalKey: canonicalEntityKey(input.repoId),
+                displayName: input.repoId,
+                aliases: [input.repoId],
+              })
+            : this.store.memory.upsertEntity({
+                hubId: input.hubId,
+                executionMode,
+                entityType: 'source_scope',
+                canonicalKey: canonicalEntityKey(
+                  `${normalizedSource}:${input.hubId}`,
+                ),
+                displayName: `${normalizedSource}:${input.hubId}`,
+                aliases: [normalizedSource],
+              });
+        if (
+          !this.store.memory.hasActiveEdge(
+            input.hubId,
             executionMode,
-            entityType: 'document',
-            canonicalKey: canonicalEntityKey(doc.id),
-            displayName: `${input.sourceType}:${doc.id.slice(0, 10)}`,
-            aliases: [doc.id],
-          });
-          const msnEnt = this.store.memory.upsertEntity({
-            hubId: input.hubId,
-            executionMode,
-            entityType: 'mission',
-            canonicalKey: canonicalEntityKey(input.missionId),
-            displayName: input.missionId,
-            aliases: [input.missionId],
-          });
+            scopeEnt.id,
+            docEnt.id,
+            'referenced_in',
+          )
+        ) {
           this.store.memory.insertEdge({
             hubId: input.hubId,
             executionMode,
-            sourceEntityId: msnEnt.id,
+            sourceEntityId: scopeEnt.id,
             targetEntityId: docEnt.id,
             relation: 'referenced_in',
           });
@@ -277,8 +505,8 @@ export class HindsightEngine {
         return saved;
       });
 
-      // Seed hub DDD domain terms into entity registry for bilingual alias bridging.
-      for (const term of this.store.listDomainTerms(input.hubId)) {
+      const domainTerms = this.store.listDomainTerms(input.hubId);
+      for (const term of domainTerms) {
         this.store.memory.upsertEntity({
           hubId: input.hubId,
           executionMode,
@@ -293,6 +521,12 @@ export class HindsightEngine {
         });
       }
 
+      const defaultConfidence =
+        authorityTier === 'L3_locked'
+          ? 0.98
+          : authorityTier === 'L2_verified'
+            ? 0.72
+            : 0.55;
       const factsInput: readonly StructuredMemoryFactInput[] =
         input.structuredFacts && input.structuredFacts.length > 0
           ? input.structuredFacts
@@ -300,7 +534,7 @@ export class HindsightEngine {
               kind: 'world',
               subjectKey: `doc:${doc.id.slice(-8)}:chunk-${idx}`,
               claim: ch.text.slice(0, 600),
-              confidence: authorityTier === 'L3_locked' ? 0.98 : 0.72,
+              confidence: defaultConfidence,
             }));
 
       let insertedFacts = 0;
@@ -314,6 +548,7 @@ export class HindsightEngine {
           const inlineEntities = extractInlineEntities(
             `${f.subjectKey} ${cleanClaim}`,
             f.entityNames,
+            domainTerms,
           );
           const entityIds: string[] = [];
           for (const ent of inlineEntities) {
@@ -323,10 +558,16 @@ export class HindsightEngine {
               entityType: ent.type,
               canonicalKey: canonicalEntityKey(ent.name),
               displayName: ent.name,
-              aliases: [ent.name],
+              aliases: ent.aliases,
             });
             entityIds.push(savedEnt.id);
           }
+
+          const rawConf = f.confidence ?? defaultConfidence;
+          const clampedConf =
+            authorityTier === 'L1_observed'
+              ? Math.min(0.65, Math.max(0.1, rawConf))
+              : Math.max(0.1, Math.min(1, rawConf));
 
           const factRec = this.store.memory.insertFact({
             hubId: input.hubId,
@@ -337,7 +578,7 @@ export class HindsightEngine {
             subjectKey: f.subjectKey,
             claim: cleanClaim,
             ftsTokens: buildFtsTokens(`${f.subjectKey} ${cleanClaim}`),
-            confidence: Math.max(0.1, Math.min(1, f.confidence ?? 0.75)),
+            confidence: clampedConf,
             authorityTier,
             eventStartAt: occurredAt,
             sourceDocumentId: doc.id,
@@ -410,10 +651,10 @@ export class HindsightEngine {
       stabilityHours: number;
       lastRecalledAt: string;
       sourceChunkId: string | null;
+      supportingFactIds: readonly string[];
       historyCount: number;
       pathAnchors: readonly string[];
-      channels: Set<'fts' | 'vector' | 'graph' | 'temporal'>;
-      rrfScore: number;
+      channelScores: Map<'fts' | 'vector' | 'graph' | 'temporal', number>;
     };
 
     const candidates = new Map<string, Candidate>();
@@ -422,20 +663,29 @@ export class HindsightEngine {
       channel: 'fts' | 'vector' | 'graph' | 'temporal',
       rank: number,
       weight: number,
-      init: Omit<Candidate, 'channels' | 'rrfScore'>,
+      init: Omit<Candidate, 'channelScores'>,
     ): void => {
-      const existing = candidates.get(key);
       const contrib = weight / (60 + rank);
+      const existing = candidates.get(key);
       if (existing) {
-        existing.channels.add(channel);
-        existing.rrfScore += contrib;
+        const prev = existing.channelScores.get(channel) ?? 0;
+        if (contrib > prev) {
+          existing.channelScores.set(channel, contrib);
+        }
         return;
       }
       candidates.set(key, {
         ...init,
-        channels: new Set([channel]),
-        rrfScore: contrib,
+        channelScores: new Map([[channel, contrib]]),
       });
+    };
+
+    const resolveObsChunkId = (obs: MemoryObservationRecord): string | null => {
+      const firstFactId = obs.supportingFactIds[0];
+      if (!firstFactId) {
+        return null;
+      }
+      return this.store.memory.getFact(firstFactId)?.sourceChunkId ?? null;
     };
 
     // Channel 1: Full-Text (FTS5)
@@ -452,11 +702,12 @@ export class HindsightEngine {
           targetId: o.id,
           title: o.title,
           content: o.statement,
-          kind: 'world',
+          kind: o.kind ?? 'world',
           authorityTier: o.authorityTier,
           stabilityHours: o.stabilityHours,
           lastRecalledAt: o.lastRecalledAt,
-          sourceChunkId: o.supportingFactIds[0] ?? null,
+          sourceChunkId: resolveObsChunkId(o),
+          supportingFactIds: o.supportingFactIds,
           historyCount: o.history.length,
           pathAnchors: o.pathAnchors,
         }),
@@ -479,6 +730,7 @@ export class HindsightEngine {
           stabilityHours: f.stabilityHours,
           lastRecalledAt: f.lastRecalledAt,
           sourceChunkId: f.sourceChunkId,
+          supportingFactIds: [],
           historyCount: 0,
           pathAnchors: f.pathAnchors,
         }),
@@ -501,6 +753,7 @@ export class HindsightEngine {
           stabilityHours: 36,
           lastRecalledAt: c.createdAt,
           sourceChunkId: c.id,
+          supportingFactIds: [],
           historyCount: 0,
           pathAnchors: [],
         }),
@@ -528,11 +781,12 @@ export class HindsightEngine {
             targetId: o.id,
             title: o.title,
             content: o.statement,
-            kind: 'world',
+            kind: o.kind ?? 'world',
             authorityTier: o.authorityTier,
             stabilityHours: o.stabilityHours,
             lastRecalledAt: o.lastRecalledAt,
-            sourceChunkId: null,
+            sourceChunkId: resolveObsChunkId(o),
+            supportingFactIds: o.supportingFactIds,
             historyCount: o.history.length,
             pathAnchors: o.pathAnchors,
           });
@@ -550,6 +804,7 @@ export class HindsightEngine {
             stabilityHours: f.stabilityHours,
             lastRecalledAt: f.lastRecalledAt,
             sourceChunkId: f.sourceChunkId,
+            supportingFactIds: [],
             historyCount: 0,
             pathAnchors: f.pathAnchors,
           });
@@ -567,6 +822,7 @@ export class HindsightEngine {
             stabilityHours: 36,
             lastRecalledAt: c.createdAt,
             sourceChunkId: c.id,
+            supportingFactIds: [],
             historyCount: 0,
             pathAnchors: [],
           });
@@ -574,7 +830,7 @@ export class HindsightEngine {
       }
     });
 
-    // Channel 3: 2-Hop Entity-Graph Spreading Activation
+    // Channel 3: Decaying 2-Hop Entity-Graph Spreading Activation
     const qLower = query.query.toLowerCase();
     const qNorm = canonicalEntityKey(query.query);
     const entities = this.store.memory.listEntities(
@@ -584,8 +840,9 @@ export class HindsightEngine {
     const seedIds = new Set<string>();
     for (const ent of entities) {
       const matched =
-        qLower.includes(ent.displayName.toLowerCase()) ||
-        qNorm.includes(ent.canonicalKey) ||
+        (ent.displayName.length >= 2 &&
+          qLower.includes(ent.displayName.toLowerCase())) ||
+        (ent.canonicalKey.length >= 2 && qNorm.includes(ent.canonicalKey)) ||
         ent.aliases.some(
           a => a.length >= 2 && qLower.includes(a.toLowerCase()),
         );
@@ -598,32 +855,79 @@ export class HindsightEngine {
         query.hubId,
         query.executionMode,
       );
-      const hop1 = new Set<string>(seedIds);
+      const activation = new Map<string, number>();
+      const hop1BestWeight = new Map<string, number>();
+      for (const sid of seedIds) {
+        activation.set(sid, 1.0);
+      }
       for (const e of edges) {
+        const w = Math.max(0.1, Math.min(1, e.weight));
         if (seedIds.has(e.sourceEntityId)) {
-          hop1.add(e.targetEntityId);
+          const score = 0.6 * w;
+          activation.set(
+            e.targetEntityId,
+            Math.max(activation.get(e.targetEntityId) ?? 0, score),
+          );
+          if (!seedIds.has(e.targetEntityId)) {
+            hop1BestWeight.set(
+              e.targetEntityId,
+              Math.max(hop1BestWeight.get(e.targetEntityId) ?? 0, w),
+            );
+          }
         }
         if (seedIds.has(e.targetEntityId)) {
-          hop1.add(e.sourceEntityId);
+          const score = 0.6 * w;
+          activation.set(
+            e.sourceEntityId,
+            Math.max(activation.get(e.sourceEntityId) ?? 0, score),
+          );
+          if (!seedIds.has(e.sourceEntityId)) {
+            hop1BestWeight.set(
+              e.sourceEntityId,
+              Math.max(hop1BestWeight.get(e.sourceEntityId) ?? 0, w),
+            );
+          }
         }
       }
-      const hop2 = new Set<string>(hop1);
       for (const e of edges) {
-        if (hop1.has(e.sourceEntityId)) {
-          hop2.add(e.targetEntityId);
+        const w2 = Math.max(0.1, Math.min(1, e.weight));
+        const srcW1 = hop1BestWeight.get(e.sourceEntityId);
+        if (srcW1 !== undefined) {
+          const score = 0.35 * srcW1 * w2;
+          activation.set(
+            e.targetEntityId,
+            Math.max(activation.get(e.targetEntityId) ?? 0, score),
+          );
         }
-        if (hop1.has(e.targetEntityId)) {
-          hop2.add(e.sourceEntityId);
+        const dstW1 = hop1BestWeight.get(e.targetEntityId);
+        if (dstW1 !== undefined) {
+          const score = 0.35 * dstW1 * w2;
+          activation.set(
+            e.sourceEntityId,
+            Math.max(activation.get(e.sourceEntityId) ?? 0, score),
+          );
         }
       }
-      const graphFacts = this.store.memory.listFactsByEntityIds(
-        query.hubId,
-        query.executionMode,
-        [...hop2],
-        20,
-      );
-      graphFacts.forEach((f, idx) =>
-        addRank(`fact:${f.id}`, 'graph', idx + 1, 1.0, {
+
+      const graphFacts = this.store.memory
+        .listFactsByEntityIds(
+          query.hubId,
+          query.executionMode,
+          [...activation.keys()],
+          40,
+        )
+        .map(f => ({
+          fact: f,
+          act: Math.max(0, ...f.entityIds.map(eid => activation.get(eid) ?? 0)),
+        }))
+        .sort(
+          (a, b) =>
+            b.act - a.act || b.fact.ingestedAt.localeCompare(a.fact.ingestedAt),
+        )
+        .slice(0, 20);
+
+      graphFacts.forEach(({fact: f, act}, idx) =>
+        addRank(`fact:${f.id}`, 'graph', idx + 1, act > 0 ? act : 0.35, {
           targetKind: 'fact',
           targetId: f.id,
           title: f.subjectKey,
@@ -633,6 +937,7 @@ export class HindsightEngine {
           stabilityHours: f.stabilityHours,
           lastRecalledAt: f.lastRecalledAt,
           sourceChunkId: f.sourceChunkId,
+          supportingFactIds: [],
           historyCount: 0,
           pathAnchors: f.pathAnchors,
         }),
@@ -663,18 +968,48 @@ export class HindsightEngine {
           stabilityHours: f.stabilityHours,
           lastRecalledAt: f.lastRecalledAt,
           sourceChunkId: f.sourceChunkId,
+          supportingFactIds: [],
           historyCount: 0,
           pathAnchors: f.pathAnchors,
         },
       ),
     );
 
+    // Deduplicate consolidated observation + supporting fact hits
+    const factToObsKey = new Map<string, string>();
+    for (const [key, cand] of candidates.entries()) {
+      if (cand.targetKind === 'observation') {
+        for (const fid of cand.supportingFactIds) {
+          if (!factToObsKey.has(fid)) {
+            factToObsKey.set(fid, key);
+          }
+        }
+      }
+    }
+    for (const [key, cand] of [...candidates.entries()]) {
+      if (cand.targetKind !== 'fact') {
+        continue;
+      }
+      const obsKey = factToObsKey.get(cand.targetId);
+      if (!obsKey) {
+        continue;
+      }
+      const obsCand = candidates.get(obsKey);
+      if (!obsCand) {
+        continue;
+      }
+      for (const [ch, sc] of cand.channelScores.entries()) {
+        const prev = obsCand.channelScores.get(ch) ?? 0;
+        if (sc > prev) {
+          obsCand.channelScores.set(ch, sc);
+        }
+      }
+      candidates.delete(key);
+    }
+
     // Score Fusion: RRF x Ebbinghaus Retention x Authority Multiplier
     const ranked: MemoryRecallHit[] = [];
     for (const cand of candidates.values()) {
-      if (!query.includeRejected && cand.kind === 'rejected_option') {
-        // Still include rejected options when explicitly asked or warn clearly
-      }
       const lastMs = Date.parse(cand.lastRecalledAt);
       const elapsedHours = Number.isFinite(lastMs)
         ? Math.max(0, (nowMs - lastMs) / 3_600_000)
@@ -684,8 +1019,12 @@ export class HindsightEngine {
         cand.stabilityHours,
       );
       const authMult = AUTHORITY_MULTIPLIER[cand.authorityTier];
+      let rrfScore = 0;
+      for (const sc of cand.channelScores.values()) {
+        rrfScore += sc;
+      }
       const finalScore = Number(
-        (cand.rrfScore * (0.5 + 0.5 * retentionFactor) * authMult).toFixed(4),
+        (rrfScore * (0.5 + 0.5 * retentionFactor) * authMult).toFixed(4),
       );
 
       let sourceChunkExcerpt: string | null = null;
@@ -705,7 +1044,7 @@ export class HindsightEngine {
         authorityTier: cand.authorityTier,
         score: finalScore,
         retentionFactor: Number(retentionFactor.toFixed(3)),
-        channelsMatched: [...cand.channels],
+        channelsMatched: [...cand.channelScores.keys()],
         sourceChunkExcerpt,
         observationHistoryCount: cand.historyCount,
         rejectedWarning:
@@ -719,12 +1058,33 @@ export class HindsightEngine {
     ranked.sort((a, b) => b.score - a.score);
     const topHits = ranked.slice(0, limit);
 
-    for (const hit of topHits) {
-      if (hit.targetKind === 'observation') {
-        this.store.memory.touchObservationRecall(hit.targetId);
-      } else if (hit.targetKind === 'fact') {
-        this.store.memory.touchFactRecall(hit.targetId);
-      }
+    if (topHits.length > 0) {
+      const touchIso = new Date(nowMs).toISOString();
+      this.store.atomic(() => {
+        for (const hit of topHits) {
+          if (hit.targetKind === 'observation') {
+            this.store.memory.touchObservationRecall(
+              hit.targetId,
+              undefined,
+              touchIso,
+            );
+            this.store.memory.touchVectorRecall(
+              'observation',
+              hit.targetId,
+              touchIso,
+            );
+          } else if (hit.targetKind === 'fact') {
+            this.store.memory.touchFactRecall(hit.targetId, touchIso);
+            this.store.memory.touchVectorRecall('fact', hit.targetId, touchIso);
+          } else {
+            this.store.memory.touchVectorRecall(
+              'chunk',
+              hit.targetId,
+              touchIso,
+            );
+          }
+        }
+      });
     }
 
     return {
@@ -742,7 +1102,7 @@ export class HindsightEngine {
     const facts = this.store.memory.listUnconsolidatedFacts(
       hubId,
       executionMode,
-      80,
+      CONSOLIDATION_BATCH_SIZE,
     );
     if (facts.length === 0) {
       return {
@@ -754,220 +1114,145 @@ export class HindsightEngine {
       };
     }
 
-    let supersededObservations = 0;
-    let createdObservations = 0;
-    let corroboratedObservations = 0;
-    const nowIso = new Date().toISOString();
-
-    this.store.atomic(() => {
-      for (const fact of facts) {
-        const existingObs = this.store.memory.findActiveObservationsBySubject(
-          hubId,
-          executionMode,
-          fact.subjectKey,
-        );
-        const primary = existingObs[0];
-
-        if (!primary) {
-          const obs = this.store.memory.upsertObservation({
-            hubId,
-            repoId: fact.repoId,
-            executionMode,
-            subjectKey: fact.subjectKey,
-            title: this.deriveObservationTitle(fact),
-            statement: fact.claim,
-            ftsTokens: buildFtsTokens(`${fact.subjectKey} ${fact.claim}`),
-            beliefStatus: 'active',
-            authorityTier: fact.authorityTier,
-            history: [],
-            supportingFactIds: [fact.id],
-            contradictingFactIds: [],
-            entityIds: fact.entityIds,
-            pathAnchors: fact.pathAnchors,
-            stabilityHours: fact.stabilityHours,
-          });
-          this.store.memory.upsertVector({
-            hubId,
-            executionMode,
-            targetKind: 'observation',
-            targetId: obs.id,
-            embeddingSpace: LOCAL_EMBEDDING_SPACE,
-            dims: LOCAL_EMBEDDING_DIMS,
-            vectorBlob: encodeFloat32Blob(
-              embedTextLocal(obs.statement, LOCAL_EMBEDDING_DIMS),
-            ),
-          });
-          this.store.memory.markFactConsolidated(fact.id);
-          createdObservations += 1;
-          continue;
-        }
-
-        const sim = cosineSimilarity(
-          embedTextLocal(primary.statement, LOCAL_EMBEDDING_DIMS),
-          embedTextLocal(fact.claim, LOCAL_EMBEDDING_DIMS),
-        );
-
-        // Corroboration check
-        if (sim >= 0.85 || primary.statement === fact.claim) {
-          const nextStability = reinforceAgentMemoryStability(
-            primary.stabilityHours,
-          );
-          const nextAuth =
-            AUTHORITY_RANK[fact.authorityTier] >
-            AUTHORITY_RANK[primary.authorityTier]
-              ? fact.authorityTier
-              : primary.authorityTier;
-          this.store.memory.upsertObservation({
-            id: primary.id,
-            hubId,
-            repoId: primary.repoId,
-            executionMode,
-            subjectKey: primary.subjectKey,
-            title: primary.title,
-            statement: primary.statement,
-            ftsTokens: buildFtsTokens(
-              `${primary.subjectKey} ${primary.statement}`,
-            ),
-            beliefStatus: primary.beliefStatus,
-            authorityTier: nextAuth,
-            history: primary.history,
-            supportingFactIds: Array.from(
-              new Set([...primary.supportingFactIds, fact.id]),
-            ),
-            contradictingFactIds: primary.contradictingFactIds,
-            entityIds: Array.from(
-              new Set([...primary.entityIds, ...fact.entityIds]),
-            ),
-            pathAnchors: Array.from(
-              new Set([...primary.pathAnchors, ...fact.pathAnchors]),
-            ),
-            stabilityHours: nextStability,
-          });
-          this.store.memory.markFactConsolidated(fact.id);
-          corroboratedObservations += 1;
-          continue;
-        }
-
-        // Stage A: Single-valued functional slot temporal supersession
-        if (
-          isFunctionalSubject(fact.subjectKey) &&
-          AUTHORITY_RANK[fact.authorityTier] >=
-            AUTHORITY_RANK[primary.authorityTier]
-        ) {
-          const prevEntry: ObservationHistoryEntry = {
-            statement: primary.statement,
-            validFrom: primary.createdAt,
-            validUntil: nowIso,
-            reason: `Superseded by ${fact.authorityTier} fact ${fact.id}`,
-            factIds: primary.supportingFactIds,
-          };
-          for (const oldFactId of primary.supportingFactIds) {
-            this.store.memory.supersedeFact(oldFactId, fact.id, nowIso);
-          }
-          const updated = this.store.memory.upsertObservation({
-            id: primary.id,
-            hubId,
-            repoId: fact.repoId ?? primary.repoId,
-            executionMode,
-            subjectKey: primary.subjectKey,
-            title: primary.title,
-            statement: fact.claim,
-            ftsTokens: buildFtsTokens(`${primary.subjectKey} ${fact.claim}`),
-            beliefStatus: 'active',
-            authorityTier: fact.authorityTier,
-            history: [...primary.history, prevEntry],
-            supportingFactIds: [fact.id],
-            contradictingFactIds: primary.contradictingFactIds,
-            entityIds: Array.from(
-              new Set([...primary.entityIds, ...fact.entityIds]),
-            ),
-            pathAnchors: Array.from(
-              new Set([...primary.pathAnchors, ...fact.pathAnchors]),
-            ),
-            stabilityHours: Math.max(
-              primary.stabilityHours,
-              fact.stabilityHours,
-            ),
-          });
-          this.store.memory.upsertVector({
-            hubId,
-            executionMode,
-            targetKind: 'observation',
-            targetId: updated.id,
-            embeddingSpace: LOCAL_EMBEDDING_SPACE,
-            dims: LOCAL_EMBEDDING_DIMS,
-            vectorBlob: encodeFloat32Blob(
-              embedTextLocal(updated.statement, LOCAL_EMBEDDING_DIMS),
-            ),
-          });
-          this.store.memory.markFactConsolidated(fact.id);
-          supersededObservations += 1;
-          continue;
-        }
-
-        // Multi-valued or lower-authority differing claim -> keep distinct observation
-        const distinctObs = this.store.memory.upsertObservation({
-          hubId,
-          repoId: fact.repoId,
-          executionMode,
-          subjectKey: `${fact.subjectKey}#${fact.id.slice(-6)}`,
-          title: this.deriveObservationTitle(fact),
-          statement: fact.claim,
-          ftsTokens: buildFtsTokens(`${fact.subjectKey} ${fact.claim}`),
-          beliefStatus:
-            isFunctionalSubject(fact.subjectKey) &&
-            AUTHORITY_RANK[fact.authorityTier] <
-              AUTHORITY_RANK[primary.authorityTier]
-              ? 'contested'
-              : 'active',
-          authorityTier: fact.authorityTier,
-          history: [],
-          supportingFactIds: [fact.id],
-          contradictingFactIds: isFunctionalSubject(fact.subjectKey)
-            ? primary.supportingFactIds
-            : [],
-          entityIds: fact.entityIds,
-          pathAnchors: fact.pathAnchors,
-          stabilityHours: fact.stabilityHours,
-        });
-        this.store.memory.upsertVector({
-          hubId,
-          executionMode,
-          targetKind: 'observation',
-          targetId: distinctObs.id,
-          embeddingSpace: LOCAL_EMBEDDING_SPACE,
-          dims: LOCAL_EMBEDDING_DIMS,
-          vectorBlob: encodeFloat32Blob(
-            embedTextLocal(distinctObs.statement, LOCAL_EMBEDDING_DIMS),
-          ),
-        });
-        this.store.memory.markFactConsolidated(fact.id);
-        createdObservations += 1;
-      }
-
-      if (supersededObservations > 0 || createdObservations > 0) {
-        const staleDocIds = this.store.memory.markLivingDocsStale(
-          hubId,
-          executionMode,
-        );
-        if (staleDocIds.length > 0) {
-          this.store.enqueueEffect(
-            'memory.refresh_docs',
-            `refresh_docs:${hubId}:${executionMode}`,
-            {hubId, executionMode},
-          );
-        }
-      }
-    });
-
+    const counters = this.applyConsolidationBatch(
+      hubId,
+      executionMode,
+      facts,
+      new Map(),
+      [],
+    );
     this.invalidateVectorCache(hubId, executionMode);
     const refreshedDocs = this.refreshStaleLivingDocs(hubId, executionMode);
 
     return {
       processedFacts: facts.length,
-      supersededObservations,
-      createdObservations,
-      corroboratedObservations,
+      supersededObservations: counters.supersededObservations,
+      createdObservations: counters.createdObservations,
+      corroboratedObservations: counters.corroboratedObservations,
+      refreshedDocs,
+    };
+  }
+
+  async consolidatePendingFactsAsync(
+    hubId: string,
+    executionMode: ExecutionMode,
+  ): Promise<ConsolidationReport> {
+    const facts = this.store.memory.listUnconsolidatedFacts(
+      hubId,
+      executionMode,
+      CONSOLIDATION_BATCH_SIZE,
+    );
+    if (facts.length === 0) {
+      return {
+        processedFacts: 0,
+        supersededObservations: 0,
+        createdObservations: 0,
+        corroboratedObservations: 0,
+        refreshedDocs: 0,
+      };
+    }
+
+    const stageBDecisions = new Map<string, StageBRelation>();
+    const remoteVectors: RemoteVectorEntry[] = [];
+
+    for (const fact of facts) {
+      const compatible = this.store.memory
+        .findActiveObservationsBySubject(hubId, executionMode, fact.subjectKey)
+        .filter(o => isCompatibleForSubjectMatch(o, fact));
+      const primary = compatible[0];
+
+      if (primary && primary.statement !== fact.claim) {
+        const sim = cosineSimilarity(
+          embedTextLocal(primary.statement, LOCAL_EMBEDDING_DIMS),
+          embedTextLocal(fact.claim, LOCAL_EMBEDDING_DIMS),
+        );
+        if (sim >= 0.45 && sim < 0.85 && this.options?.synthesizeText) {
+          const decision = await this.classifyStageBRelation(primary, fact);
+          if (decision) {
+            stageBDecisions.set(fact.id, decision);
+          }
+        }
+      }
+
+      if (this.options?.embedRemote) {
+        try {
+          const remote = await this.options.embedRemote(fact.claim);
+          if (remote && remote.vector.length === remote.dims) {
+            remoteVectors.push({
+              targetKind: 'fact',
+              targetId: fact.id,
+              embeddingSpace: remote.embeddingSpace,
+              dims: remote.dims,
+              vector: remote.vector,
+            });
+          }
+        } catch {
+          // Local vectors remain intact if remote embedding fails.
+        }
+      }
+    }
+
+    const counters = this.applyConsolidationBatch(
+      hubId,
+      executionMode,
+      facts,
+      stageBDecisions,
+      remoteVectors,
+    );
+
+    if (
+      this.options?.embedRemote &&
+      counters.touchedObservationIds.length > 0
+    ) {
+      const obsRemoteVectors: RemoteVectorEntry[] = [];
+      for (const obsId of new Set(counters.touchedObservationIds)) {
+        const obs = this.store.memory.getObservation(obsId);
+        if (!obs) {
+          continue;
+        }
+        try {
+          const remote = await this.options.embedRemote(obs.statement);
+          if (remote && remote.vector.length === remote.dims) {
+            obsRemoteVectors.push({
+              targetKind: 'observation',
+              targetId: obs.id,
+              embeddingSpace: remote.embeddingSpace,
+              dims: remote.dims,
+              vector: remote.vector,
+            });
+          }
+        } catch {
+          // Non-fatal remote embedding failure.
+        }
+      }
+      if (obsRemoteVectors.length > 0) {
+        this.store.atomic(() => {
+          for (const rv of obsRemoteVectors) {
+            this.store.memory.upsertVector({
+              hubId,
+              executionMode,
+              targetKind: rv.targetKind,
+              targetId: rv.targetId,
+              embeddingSpace: rv.embeddingSpace,
+              dims: rv.dims,
+              vectorBlob: encodeFloat32Blob(rv.vector),
+            });
+          }
+        });
+      }
+    }
+
+    this.invalidateVectorCache(hubId, executionMode);
+    const refreshedDocs = await this.refreshStaleLivingDocsAsync(
+      hubId,
+      executionMode,
+    );
+
+    return {
+      processedFacts: facts.length,
+      supersededObservations: counters.supersededObservations,
+      createdObservations: counters.createdObservations,
+      corroboratedObservations: counters.corroboratedObservations,
       refreshedDocs,
     };
   }
@@ -1001,27 +1286,30 @@ export class HindsightEngine {
     const citedObservationIds = new Set<string>();
 
     for (const hit of recalled.hits) {
+      const refTag =
+        hit.targetKind === 'observation' ? ` [obs:${hit.targetId}]` : '';
       if (hit.targetKind === 'observation') {
         citedObservationIds.add(hit.targetId);
       } else if (hit.targetKind === 'chunk') {
         citedChunkIds.add(hit.targetId);
       }
       if (hit.rejectedWarning) {
-        contradictions.push(`[${hit.rejectedWarning}] ${hit.content}`);
+        contradictions.push(`[${hit.rejectedWarning}]${refTag} ${hit.content}`);
       } else if (
         hit.authorityTier === 'L3_locked' ||
         hit.authorityTier === 'L2_verified'
       ) {
-        confirmedFacts.push(`[${hit.authorityTier}] ${hit.content}`);
+        confirmedFacts.push(`[${hit.authorityTier}]${refTag} ${hit.content}`);
       } else {
-        inferences.push(`[${hit.authorityTier}] ${hit.content}`);
+        inferences.push(`[${hit.authorityTier}]${refTag} ${hit.content}`);
       }
     }
 
     for (const obs of observations) {
       if (obs.beliefStatus === 'contested' || obs.staleSuspect) {
+        citedObservationIds.add(obs.id);
         contradictions.push(
-          `[${obs.beliefStatus}${obs.staleSuspect ? '/stale' : ''}] ${obs.title}: ${obs.statement}`,
+          `[${obs.beliefStatus}${obs.staleSuspect ? '/stale' : ''}] [obs:${obs.id}] ${obs.title}: ${obs.statement}`,
         );
       }
     }
@@ -1055,6 +1343,54 @@ export class HindsightEngine {
     };
   }
 
+  async reflectAsync(input: {
+    readonly hubId: string;
+    readonly executionMode: ExecutionMode;
+    readonly question: string;
+    readonly limit?: number;
+  }): Promise<MemoryReflectResult> {
+    const base = this.reflect(input);
+    if (!this.options?.synthesizeText) {
+      return base;
+    }
+    const obsList = this.store.memory.listObservations(
+      input.hubId,
+      input.executionMode,
+    );
+    const validObsIds = new Set(obsList.map(o => o.id));
+    const systemPrompt =
+      'Synthesize a concise engineering reflection in Markdown answering the standing question. Cite observations using [obs:<id>] tags and highlight contradictions or rejected options.';
+    const prompt = [
+      `Question: ${input.question}`,
+      '',
+      'Baseline Evidence:',
+      base.answerMarkdown,
+    ].join('\n');
+    try {
+      const synthesized = await this.options.synthesizeText(
+        prompt,
+        systemPrompt,
+      );
+      if (!synthesized || !synthesized.trim()) {
+        return base;
+      }
+      const cited = new Set(base.citedObservationIds);
+      for (const m of synthesized.matchAll(/\[obs:([A-Za-z0-9_-]+)\]/g)) {
+        const obsId = m[1]!;
+        if (validObsIds.has(obsId)) {
+          cited.add(obsId);
+        }
+      }
+      return {
+        ...base,
+        answerMarkdown: synthesized.trim(),
+        citedObservationIds: [...cited],
+      };
+    } catch {
+      return base;
+    }
+  }
+
   refreshStaleLivingDocs(hubId: string, executionMode: ExecutionMode): number {
     const docs = this.store.memory.listLivingDocs(hubId, executionMode);
     let refreshed = 0;
@@ -1068,52 +1404,93 @@ export class HindsightEngine {
         question: doc.standingQuestion,
         limit: 8,
       });
-      this.store.memory.upsertLivingDoc({
-        hubId,
-        repoId: doc.repoId,
-        executionMode,
-        docKind: doc.docKind,
-        slug: doc.slug,
-        title: doc.title,
-        standingQuestion: doc.standingQuestion,
-        scopeEntities: doc.scopeEntities,
-        contentMarkdown: reflection.answerMarkdown,
-        citedObservationIds: reflection.citedObservationIds,
-        stale: false,
-      });
+      this.upsertRefreshedLivingDoc(hubId, executionMode, doc, reflection);
       refreshed += 1;
     }
     return refreshed;
   }
 
-  ensureDefaultLivingDoc(input: {
-    readonly hubId: string;
-    readonly repoId?: string | null;
-    readonly executionMode: ExecutionMode;
-    readonly docKind: LivingDocKind;
-    readonly slug: string;
-    readonly title: string;
-    readonly standingQuestion: string;
-    readonly initialMarkdown: string;
-  }): void {
-    const existing = this.store.memory
-      .listLivingDocs(input.hubId, input.executionMode)
-      .find(d => d.docKind === input.docKind && d.slug === input.slug);
-    if (!existing) {
-      this.store.memory.upsertLivingDoc({
-        hubId: input.hubId,
-        repoId: input.repoId,
-        executionMode: input.executionMode,
-        docKind: input.docKind,
-        slug: input.slug,
-        title: input.title,
-        standingQuestion: input.standingQuestion,
-        scopeEntities: [],
-        contentMarkdown: input.initialMarkdown,
-        citedObservationIds: [],
-        stale: false,
+  async refreshStaleLivingDocsAsync(
+    hubId: string,
+    executionMode: ExecutionMode,
+  ): Promise<number> {
+    const docs = this.store.memory.listLivingDocs(hubId, executionMode);
+    let refreshed = 0;
+    for (const doc of docs) {
+      if (!doc.stale) {
+        continue;
+      }
+      const reflection = await this.reflectAsync({
+        hubId,
+        executionMode,
+        question: doc.standingQuestion,
+        limit: 8,
       });
+      this.upsertRefreshedLivingDoc(hubId, executionMode, doc, reflection);
+      refreshed += 1;
     }
+    return refreshed;
+  }
+
+  ensureDefaultLivingDoc(
+    hubId: string,
+    executionMode: ExecutionMode,
+  ): MemoryLivingDocRecord[];
+  ensureDefaultLivingDoc(input: EnsureLivingDocInput): void;
+  ensureDefaultLivingDoc(
+    hubIdOrInput: string | EnsureLivingDocInput,
+    executionModeArg?: ExecutionMode,
+  ): MemoryLivingDocRecord[] | void {
+    if (typeof hubIdOrInput !== 'string') {
+      const input = hubIdOrInput;
+      const existing = this.store.memory
+        .listLivingDocs(input.hubId, input.executionMode)
+        .find(d => d.docKind === input.docKind && d.slug === input.slug);
+      if (!existing) {
+        this.store.memory.upsertLivingDoc({
+          hubId: input.hubId,
+          repoId: input.repoId,
+          executionMode: input.executionMode,
+          docKind: input.docKind,
+          slug: input.slug,
+          title: input.title,
+          standingQuestion: input.standingQuestion,
+          scopeEntities: [],
+          contentMarkdown: input.initialMarkdown,
+          citedObservationIds: [],
+          stale: false,
+        });
+      }
+      return;
+    }
+
+    const hubId = hubIdOrInput;
+    const executionMode: ExecutionMode = executionModeArg ?? 'live';
+    const existingDocs = this.store.memory.listLivingDocs(hubId, executionMode);
+    const created: MemoryLivingDocRecord[] = [];
+    for (const tpl of DEFAULT_LIVING_DOC_TEMPLATES) {
+      const exists = existingDocs.some(
+        d => d.docKind === tpl.docKind && d.slug === tpl.slug,
+      );
+      if (!exists) {
+        created.push(
+          this.store.memory.upsertLivingDoc({
+            hubId,
+            repoId: null,
+            executionMode,
+            docKind: tpl.docKind,
+            slug: tpl.slug,
+            title: tpl.title,
+            standingQuestion: tpl.standingQuestion,
+            scopeEntities: [],
+            contentMarkdown: tpl.initialMarkdown,
+            citedObservationIds: [],
+            stale: false,
+          }),
+        );
+      }
+    }
+    return created;
   }
 
   detectGitDrift(
@@ -1121,11 +1498,14 @@ export class HindsightEngine {
     executionMode: ExecutionMode,
     changeId: string,
     changedFiles: readonly string[],
+    executionEpoch?: number,
   ): number {
     if (changedFiles.length === 0) {
       return 0;
     }
-    const watermarkKey = `memory_drift_done:${changeId}`;
+    const epoch =
+      executionEpoch ?? this.store.getChange(changeId)?.executionEpoch ?? 1;
+    const watermarkKey = `memory_drift_done:${changeId}:${epoch}`;
     if (this.store.getMeta<boolean>(watermarkKey)) {
       return 0;
     }
@@ -1149,22 +1529,41 @@ export class HindsightEngine {
         }
       }
       if (marked > 0) {
-        this.store.memory.markLivingDocsStale(hubId, executionMode);
+        const staleDocIds = this.store.memory.markLivingDocsStale(
+          hubId,
+          executionMode,
+        );
+        if (staleDocIds.length > 0) {
+          this.store.enqueueEffect(
+            'memory.refresh_docs',
+            `refresh_docs:${hubId}:${executionMode}`,
+            {hubId, executionMode},
+          );
+        }
       }
       this.store.setMeta(watermarkKey, true);
     });
     return marked;
   }
 
-  buildAllCapsules(nowMs = Date.now()): RehydrationCapsule[] {
+  buildAllCapsules(
+    nowMs = Date.now(),
+    executionMode: ExecutionMode = 'live',
+  ): RehydrationCapsule[] {
     const hubs = this.store.listHubs(false);
     const openAttention = this.store.listAttentionItems(false);
 
     return hubs.map(hub => {
       const anchorMs = Date.parse(hub.lastHumanInteractionAt);
-      const changes = this.store.listChanges(hub.id, false);
+      const changes = this.store
+        .listChanges(hub.id, false)
+        .filter(c => (c.executionMode ?? 'live') === executionMode);
       const audits = this.store.listAuditLedger(50, hub.id);
-      const diffTotals = this.store.getTotalChangeLinesForHub(hub.id);
+      const diffTotals = this.store.getTotalChangeLinesForHub(
+        hub.id,
+        executionMode,
+        hub.lastHumanInteractionAt,
+      );
 
       let tasksCertifiedSinceAnchor = 0;
       let ghostAmendmentsSinceAnchor = 0;
@@ -1192,7 +1591,7 @@ export class HindsightEngine {
 
       const revisedObsCount = this.store.memory.countRevisedObservationsSince(
         hub.id,
-        'live',
+        executionMode,
         hub.lastHumanInteractionAt,
       );
       const adrUpdatesSinceAnchor =
@@ -1246,6 +1645,372 @@ export class HindsightEngine {
     });
   }
 
+  private applyConsolidationBatch(
+    hubId: string,
+    executionMode: ExecutionMode,
+    facts: readonly MemoryFactRecord[],
+    stageBDecisions: ReadonlyMap<string, StageBRelation>,
+    remoteVectors: readonly RemoteVectorEntry[],
+  ): {
+    readonly supersededObservations: number;
+    readonly createdObservations: number;
+    readonly corroboratedObservations: number;
+    readonly touchedObservationIds: readonly string[];
+  } {
+    let supersededObservations = 0;
+    let createdObservations = 0;
+    let corroboratedObservations = 0;
+    const touchedObservationIds: string[] = [];
+    const nowIso = new Date().toISOString();
+
+    this.store.atomic(() => {
+      for (const rv of remoteVectors) {
+        this.store.memory.upsertVector({
+          hubId,
+          executionMode,
+          targetKind: rv.targetKind,
+          targetId: rv.targetId,
+          embeddingSpace: rv.embeddingSpace,
+          dims: rv.dims,
+          vectorBlob: encodeFloat32Blob(rv.vector),
+        });
+      }
+
+      for (const fact of facts) {
+        const compatibleObs = this.store.memory
+          .findActiveObservationsBySubject(
+            hubId,
+            executionMode,
+            fact.subjectKey,
+          )
+          .filter(o => isCompatibleForSubjectMatch(o, fact));
+        const primary = compatibleObs[0];
+
+        if (!primary) {
+          const obs = this.store.memory.upsertObservation({
+            hubId,
+            repoId: fact.repoId,
+            executionMode,
+            kind: fact.kind,
+            subjectKey: fact.subjectKey,
+            title: this.deriveObservationTitle(fact),
+            statement: fact.claim,
+            ftsTokens: buildFtsTokens(`${fact.subjectKey} ${fact.claim}`),
+            beliefStatus: 'active',
+            authorityTier: fact.authorityTier,
+            history: [],
+            supportingFactIds: [fact.id],
+            contradictingFactIds: [],
+            entityIds: fact.entityIds,
+            pathAnchors: fact.pathAnchors,
+            stabilityHours: fact.stabilityHours,
+            staleSuspect: false,
+          });
+          this.store.memory.upsertVector({
+            hubId,
+            executionMode,
+            targetKind: 'observation',
+            targetId: obs.id,
+            embeddingSpace: LOCAL_EMBEDDING_SPACE,
+            dims: LOCAL_EMBEDDING_DIMS,
+            vectorBlob: encodeFloat32Blob(
+              embedTextLocal(obs.statement, LOCAL_EMBEDDING_DIMS),
+            ),
+          });
+          this.store.memory.markFactConsolidated(fact.id);
+          touchedObservationIds.push(obs.id);
+          createdObservations += 1;
+          continue;
+        }
+
+        const sim = cosineSimilarity(
+          embedTextLocal(primary.statement, LOCAL_EMBEDDING_DIMS),
+          embedTextLocal(fact.claim, LOCAL_EMBEDDING_DIMS),
+        );
+        const stageB = stageBDecisions.get(fact.id) ?? null;
+
+        // Corroboration check (with strict authority isolation)
+        if (
+          stageB === 'CORROBORATE' ||
+          (stageB === null && (sim >= 0.85 || primary.statement === fact.claim))
+        ) {
+          const primaryRank = AUTHORITY_RANK[primary.authorityTier];
+          const factRank = AUTHORITY_RANK[fact.authorityTier];
+          const isL1OnHigher =
+            fact.authorityTier === 'L1_observed' && primaryRank > 1;
+          const shouldUpgradeWording = factRank > primaryRank;
+          const nextStatement = shouldUpgradeWording
+            ? fact.claim
+            : primary.statement;
+          const nextTitle = shouldUpgradeWording
+            ? this.deriveObservationTitle(fact)
+            : primary.title;
+          const nextAuth = shouldUpgradeWording
+            ? fact.authorityTier
+            : primary.authorityTier;
+          const nextKind = shouldUpgradeWording
+            ? fact.kind
+            : (primary.kind ?? fact.kind);
+          const nextStability = isL1OnHigher
+            ? primary.stabilityHours
+            : reinforceAgentMemoryStability(primary.stabilityHours);
+          const nextAnchors = isL1OnHigher
+            ? primary.pathAnchors
+            : Array.from(
+                new Set([...primary.pathAnchors, ...fact.pathAnchors]),
+              );
+          const nextEntities = isL1OnHigher
+            ? primary.entityIds
+            : Array.from(new Set([...primary.entityIds, ...fact.entityIds]));
+          const nextStaleSuspect =
+            fact.authorityTier === 'L1_observed' ? primary.staleSuspect : false;
+
+          const updated = this.store.memory.upsertObservation({
+            id: primary.id,
+            hubId,
+            repoId: isL1OnHigher
+              ? primary.repoId
+              : (fact.repoId ?? primary.repoId),
+            executionMode,
+            kind: nextKind,
+            subjectKey: primary.subjectKey,
+            title: nextTitle,
+            statement: nextStatement,
+            ftsTokens: buildFtsTokens(`${primary.subjectKey} ${nextStatement}`),
+            beliefStatus: primary.beliefStatus,
+            authorityTier: nextAuth,
+            history: primary.history,
+            supportingFactIds: Array.from(
+              new Set([...primary.supportingFactIds, fact.id]),
+            ),
+            contradictingFactIds: primary.contradictingFactIds,
+            entityIds: nextEntities,
+            pathAnchors: nextAnchors,
+            stabilityHours: nextStability,
+            staleSuspect: nextStaleSuspect,
+          });
+          if (shouldUpgradeWording) {
+            this.store.memory.upsertVector({
+              hubId,
+              executionMode,
+              targetKind: 'observation',
+              targetId: updated.id,
+              embeddingSpace: LOCAL_EMBEDDING_SPACE,
+              dims: LOCAL_EMBEDDING_DIMS,
+              vectorBlob: encodeFloat32Blob(
+                embedTextLocal(updated.statement, LOCAL_EMBEDDING_DIMS),
+              ),
+            });
+          }
+          this.store.memory.markFactConsolidated(fact.id);
+          touchedObservationIds.push(updated.id);
+          corroboratedObservations += 1;
+          continue;
+        }
+
+        // Functional slot temporal supersession (rejected_option is exempt)
+        const canSupersede =
+          fact.kind !== 'rejected_option' &&
+          (primary.kind ?? 'world') !== 'rejected_option' &&
+          (stageB === 'SUPERSEDE' ||
+            (stageB === null && isFunctionalSubject(fact.subjectKey)) ||
+            (stageB === 'CONTRADICT' &&
+              AUTHORITY_RANK[fact.authorityTier] >
+                AUTHORITY_RANK[primary.authorityTier])) &&
+          AUTHORITY_RANK[fact.authorityTier] >=
+            AUTHORITY_RANK[primary.authorityTier];
+
+        if (canSupersede) {
+          const prevEntry: ObservationHistoryEntry = {
+            statement: primary.statement,
+            validFrom: primary.createdAt,
+            validUntil: nowIso,
+            reason: `Superseded by ${fact.authorityTier} fact ${fact.id}`,
+            factIds: primary.supportingFactIds,
+          };
+          for (const oldFactId of primary.supportingFactIds) {
+            this.store.memory.supersedeFact(oldFactId, fact.id, nowIso);
+          }
+          const updated = this.store.memory.upsertObservation({
+            id: primary.id,
+            hubId,
+            repoId: fact.repoId ?? primary.repoId,
+            executionMode,
+            kind: fact.kind,
+            subjectKey: primary.subjectKey,
+            title: primary.title,
+            statement: fact.claim,
+            ftsTokens: buildFtsTokens(`${primary.subjectKey} ${fact.claim}`),
+            beliefStatus: 'active',
+            authorityTier: fact.authorityTier,
+            history: [...primary.history, prevEntry],
+            supportingFactIds: [fact.id],
+            contradictingFactIds: primary.contradictingFactIds,
+            entityIds: Array.from(
+              new Set([...primary.entityIds, ...fact.entityIds]),
+            ),
+            pathAnchors: Array.from(
+              new Set([...primary.pathAnchors, ...fact.pathAnchors]),
+            ),
+            stabilityHours: Math.max(
+              primary.stabilityHours,
+              fact.stabilityHours,
+            ),
+            staleSuspect:
+              fact.authorityTier === 'L1_observed'
+                ? primary.staleSuspect
+                : false,
+          });
+          this.store.memory.upsertVector({
+            hubId,
+            executionMode,
+            targetKind: 'observation',
+            targetId: updated.id,
+            embeddingSpace: LOCAL_EMBEDDING_SPACE,
+            dims: LOCAL_EMBEDDING_DIMS,
+            vectorBlob: encodeFloat32Blob(
+              embedTextLocal(updated.statement, LOCAL_EMBEDDING_DIMS),
+            ),
+          });
+          this.store.memory.markFactConsolidated(fact.id);
+          touchedObservationIds.push(updated.id);
+          supersededObservations += 1;
+          continue;
+        }
+
+        const isContested =
+          fact.kind !== 'rejected_option' &&
+          (stageB === 'CONTRADICT' ||
+            (isFunctionalSubject(fact.subjectKey) &&
+              AUTHORITY_RANK[fact.authorityTier] <
+                AUTHORITY_RANK[primary.authorityTier]));
+
+        const distinctObs = this.store.memory.upsertObservation({
+          hubId,
+          repoId: fact.repoId,
+          executionMode,
+          kind: fact.kind,
+          subjectKey: `${fact.subjectKey}#${fact.id.slice(-6)}`,
+          title: this.deriveObservationTitle(fact),
+          statement: fact.claim,
+          ftsTokens: buildFtsTokens(`${fact.subjectKey} ${fact.claim}`),
+          beliefStatus: isContested ? 'contested' : 'active',
+          authorityTier: fact.authorityTier,
+          history: [],
+          supportingFactIds: [fact.id],
+          contradictingFactIds: isContested ? primary.supportingFactIds : [],
+          entityIds: fact.entityIds,
+          pathAnchors: fact.pathAnchors,
+          stabilityHours: fact.stabilityHours,
+          staleSuspect: false,
+        });
+        this.store.memory.upsertVector({
+          hubId,
+          executionMode,
+          targetKind: 'observation',
+          targetId: distinctObs.id,
+          embeddingSpace: LOCAL_EMBEDDING_SPACE,
+          dims: LOCAL_EMBEDDING_DIMS,
+          vectorBlob: encodeFloat32Blob(
+            embedTextLocal(distinctObs.statement, LOCAL_EMBEDDING_DIMS),
+          ),
+        });
+        this.store.memory.markFactConsolidated(fact.id);
+        touchedObservationIds.push(distinctObs.id);
+        createdObservations += 1;
+      }
+
+      const provisioned = this.ensureDefaultLivingDoc(hubId, executionMode);
+      if (
+        supersededObservations > 0 ||
+        createdObservations > 0 ||
+        provisioned.length > 0
+      ) {
+        const staleDocIds = this.store.memory.markLivingDocsStale(
+          hubId,
+          executionMode,
+        );
+        if (staleDocIds.length > 0) {
+          this.store.enqueueEffect(
+            'memory.refresh_docs',
+            `refresh_docs:${hubId}:${executionMode}`,
+            {hubId, executionMode},
+          );
+        }
+      }
+
+      if (facts.length >= CONSOLIDATION_BATCH_SIZE) {
+        this.store.enqueueEffect(
+          'memory.consolidate',
+          `consolidate:${hubId}:${executionMode}`,
+          {hubId, executionMode},
+        );
+      }
+    });
+
+    return {
+      supersededObservations,
+      createdObservations,
+      corroboratedObservations,
+      touchedObservationIds,
+    };
+  }
+
+  private async classifyStageBRelation(
+    primary: MemoryObservationRecord,
+    fact: MemoryFactRecord,
+  ): Promise<StageBRelation | null> {
+    if (!this.options?.synthesizeText) {
+      return null;
+    }
+    const systemPrompt =
+      'Classify the relationship between an existing observation and a new candidate fact. Reply with ONE token: CORROBORATE, SUPERSEDE, CONTRADICT, or DISTINCT.';
+    const prompt = [
+      `Subject: ${fact.subjectKey}`,
+      `Existing (${primary.authorityTier}): ${primary.statement}`,
+      `New (${fact.authorityTier}, kind=${fact.kind}): ${fact.claim}`,
+    ].join('\n');
+    try {
+      const reply = await this.options.synthesizeText(prompt, systemPrompt);
+      return parseStageBDecision(reply);
+    } catch {
+      return null;
+    }
+  }
+
+  private upsertRefreshedLivingDoc(
+    hubId: string,
+    executionMode: ExecutionMode,
+    doc: MemoryLivingDocRecord,
+    reflection: MemoryReflectResult,
+  ): void {
+    const preserveRetroWiki =
+      doc.docKind === 'agent_wiki' &&
+      doc.contentMarkdown.includes('Retro-Optimized');
+    this.store.memory.upsertLivingDoc({
+      hubId,
+      repoId: doc.repoId,
+      executionMode,
+      docKind: doc.docKind,
+      slug: doc.slug,
+      title: doc.title,
+      standingQuestion: doc.standingQuestion,
+      scopeEntities: doc.scopeEntities,
+      contentMarkdown: preserveRetroWiki
+        ? doc.contentMarkdown
+        : reflection.answerMarkdown,
+      citedObservationIds: preserveRetroWiki
+        ? Array.from(
+            new Set([
+              ...doc.citedObservationIds,
+              ...reflection.citedObservationIds,
+            ]),
+          )
+        : reflection.citedObservationIds,
+      stale: false,
+    });
+  }
+
   private deriveObservationTitle(fact: MemoryFactRecord): string {
     const clean = fact.subjectKey.replace(/^[a-z]+:/, '');
     return `[${fact.kind}] ${clean.slice(0, 72)}`;
@@ -1269,6 +2034,7 @@ export class HindsightEngine {
       executionMode,
       LOCAL_EMBEDDING_SPACE,
       2000,
+      LOCAL_EMBEDDING_DIMS,
     );
     const decoded = rows.map(r => ({
       targetKind: r.targetKind,

@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import type {DatabaseSync} from 'node:sqlite';
 import {ForgeError} from '../shared/errors.ts';
 import type {
@@ -8,7 +9,7 @@ import type {
   SoulConstitution,
 } from '../shared/types.ts';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const BASE_PRAGMAS_SQL = `
 PRAGMA journal_mode = WAL;
@@ -29,6 +30,10 @@ CREATE TABLE IF NOT EXISTS change_epistemic_items (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_epistemic_change ON change_epistemic_items(change_id, execution_epoch);
+CREATE TRIGGER IF NOT EXISTS change_epistemic_items_no_update BEFORE UPDATE ON change_epistemic_items
+BEGIN SELECT RAISE(ABORT, 'change_epistemic_items is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS change_epistemic_items_no_delete BEFORE DELETE ON change_epistemic_items
+BEGIN SELECT RAISE(ABORT, 'change_epistemic_items is immutable'); END;
 
 CREATE TABLE IF NOT EXISTS missions (
   id TEXT PRIMARY KEY,
@@ -255,15 +260,26 @@ CREATE INDEX IF NOT EXISTS idx_memory_facts_temporal ON memory_facts(hub_id, exe
 CREATE INDEX IF NOT EXISTS idx_memory_facts_unconsolidated ON memory_facts(hub_id, execution_mode, consolidated);
 CREATE TRIGGER IF NOT EXISTS memory_facts_no_delete BEFORE DELETE ON memory_facts
 BEGIN SELECT RAISE(ABORT, 'memory_facts is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS memory_facts_claim_immutable BEFORE UPDATE ON memory_facts
-WHEN NEW.claim != OLD.claim
-  OR NEW.kind != OLD.kind
-  OR NEW.hub_id != OLD.hub_id
-  OR NEW.execution_mode != OLD.execution_mode
-  OR NEW.source_document_id != OLD.source_document_id
-  OR NEW.source_chunk_id != OLD.source_chunk_id
-  OR NEW.event_start_at != OLD.event_start_at
-  OR NEW.ingested_at != OLD.ingested_at
+DROP TRIGGER IF EXISTS memory_facts_claim_immutable;
+CREATE TRIGGER memory_facts_claim_immutable BEFORE UPDATE ON memory_facts
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.hub_id IS NOT OLD.hub_id
+  OR NEW.repo_id IS NOT OLD.repo_id
+  OR NEW.mission_id IS NOT OLD.mission_id
+  OR NEW.execution_mode IS NOT OLD.execution_mode
+  OR NEW.kind IS NOT OLD.kind
+  OR NEW.subject_key IS NOT OLD.subject_key
+  OR NEW.claim IS NOT OLD.claim
+  OR NEW.fts_tokens IS NOT OLD.fts_tokens
+  OR NEW.confidence IS NOT OLD.confidence
+  OR NEW.authority_tier IS NOT OLD.authority_tier
+  OR NEW.event_start_at IS NOT OLD.event_start_at
+  OR NEW.event_end_at IS NOT OLD.event_end_at
+  OR NEW.ingested_at IS NOT OLD.ingested_at
+  OR NEW.source_document_id IS NOT OLD.source_document_id
+  OR NEW.source_chunk_id IS NOT OLD.source_chunk_id
+  OR NEW.path_anchors_json IS NOT OLD.path_anchors_json
+  OR NEW.entity_ids_json IS NOT OLD.entity_ids_json
 BEGIN
   SELECT RAISE(ABORT, 'memory_facts core claim and provenance are immutable');
 END;
@@ -291,6 +307,7 @@ CREATE TABLE IF NOT EXISTS memory_observations (
   hub_id TEXT NOT NULL REFERENCES hubs(id) ON DELETE RESTRICT,
   repo_id TEXT,
   execution_mode TEXT NOT NULL DEFAULT 'live',
+  kind TEXT NOT NULL DEFAULT 'world',
   subject_key TEXT NOT NULL,
   title TEXT NOT NULL,
   statement TEXT NOT NULL,
@@ -345,9 +362,9 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
   active INTEGER NOT NULL DEFAULT 1,
   last_recalled_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(target_kind, target_id, embedding_space)
+  UNIQUE(target_kind, target_id, embedding_space, dims)
 );
-CREATE INDEX IF NOT EXISTS idx_memory_vectors_lookup ON memory_vectors(hub_id, execution_mode, embedding_space, active, last_recalled_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_vectors_lookup ON memory_vectors(hub_id, execution_mode, embedding_space, dims, active, last_recalled_at DESC);
 
 CREATE TABLE IF NOT EXISTS memory_entities (
   id TEXT PRIMARY KEY,
@@ -395,6 +412,16 @@ CREATE TABLE IF NOT EXISTS memory_living_docs (
   updated_at TEXT NOT NULL,
   UNIQUE(hub_id, execution_mode, doc_kind, slug)
 );
+
+CREATE TABLE IF NOT EXISTS baseline_impacts (
+  id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE RESTRICT,
+  parent_baseline_id TEXT NOT NULL,
+  next_baseline_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_baseline_impacts_mission ON baseline_impacts(mission_id, created_at DESC);
 `;
 
 export const FRESH_V3_SCHEMA_SQL = `
@@ -682,7 +709,8 @@ CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON semantic_memories B
   INSERT INTO memories_fts(memories_fts, rowid, id, title, summary)
   VALUES ('delete', old.rowid, old.id, old.title, old.summary);
 END;
-CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON semantic_memories BEGIN
+DROP TRIGGER IF EXISTS memories_fts_au;
+CREATE TRIGGER memories_fts_au AFTER UPDATE OF kind, title, summary, path_anchors_json ON semantic_memories BEGIN
   INSERT INTO memories_fts(memories_fts, rowid, id, title, summary)
   VALUES ('delete', old.rowid, old.id, old.title, old.summary);
   INSERT INTO memories_fts(rowid, id, title, summary)
@@ -692,8 +720,8 @@ END;
 CREATE TABLE IF NOT EXISTS execution_telemetry (
   id TEXT PRIMARY KEY,
   hub_id TEXT NOT NULL,
-  change_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
+  change_id TEXT,
+  node_id TEXT,
   adapter_id TEXT NOT NULL,
   model TEXT NOT NULL,
   role TEXT NOT NULL,
@@ -767,6 +795,10 @@ CREATE TABLE IF NOT EXISTS audit_ledger (
   detail TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS audit_ledger_no_update BEFORE UPDATE ON audit_ledger
+BEGIN SELECT RAISE(ABORT, 'audit_ledger is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS audit_ledger_no_delete BEFORE DELETE ON audit_ledger
+BEGIN SELECT RAISE(ABORT, 'audit_ledger is immutable'); END;
 
 ${V3_NEW_TABLES_SQL}
 `;
@@ -806,6 +838,121 @@ function addColumnIfMissing(
   }
 }
 
+function sha256TextInline(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function tokenizeBilingualInline(text: string): string[] {
+  const cjk = /[\u4e00-\u9fff]/;
+  const out: string[] = [];
+  const rawSegments = text.match(/[A-Za-z0-9_.-]+|[\u4e00-\u9fff]+/g);
+  if (!rawSegments) {
+    return out;
+  }
+  for (const seg of rawSegments) {
+    if (cjk.test(seg)) {
+      if (seg.length === 1) {
+        out.push(seg);
+      } else {
+        for (let i = 0; i < seg.length - 1; i += 1) {
+          out.push(seg.slice(i, i + 2));
+        }
+      }
+      continue;
+    }
+    const lower = seg.toLowerCase();
+    if (lower.length >= 2) {
+      out.push(lower);
+    }
+    const parts = seg
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[_\-./]+/g, ' ')
+      .split(/\s+/)
+      .map(p => p.trim().toLowerCase())
+      .filter(p => p.length > 0);
+    for (const part of parts) {
+      if (part.length >= 2 && part !== lower) {
+        out.push(part);
+      }
+    }
+  }
+  return out;
+}
+
+function buildFtsTokensInline(text: string): string {
+  return tokenizeBilingualInline(text).join(' ');
+}
+
+function fnv1a32Inline(str: string, seed: number): number {
+  let hash = seed >>> 0;
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function embedTextLocal128Blob(text: string): Uint8Array {
+  const dims = 128;
+  const vec = new Float32Array(dims);
+  const tokens = tokenizeBilingualInline(text);
+  for (const tok of tokens) {
+    const idx = fnv1a32Inline(tok, 2166136261) % dims;
+    const sign = (fnv1a32Inline(tok, 16777619) & 1) === 0 ? 1 : -1;
+    vec[idx] = (vec[idx] ?? 0) + sign * 1.5;
+    if (tok.length >= 3) {
+      for (let i = 0; i <= tok.length - 3; i += 1) {
+        const gram = tok.slice(i, i + 3);
+        const gIdx = fnv1a32Inline(gram, 374761393) % dims;
+        const gSign = (fnv1a32Inline(gram, 668265263) & 1) === 0 ? 1 : -1;
+        vec[gIdx] = (vec[gIdx] ?? 0) + gSign * 0.5;
+      }
+    }
+  }
+  let normSq = 0;
+  for (let i = 0; i < dims; i += 1) {
+    const v = vec[i]!;
+    normSq += v * v;
+  }
+  if (normSq > 0) {
+    const inv = 1 / Math.sqrt(normSq);
+    for (let i = 0; i < dims; i += 1) {
+      vec[i] = vec[i]! * inv;
+    }
+  }
+  return new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength);
+}
+
+function columnIsNotNull(
+  db: DatabaseSync,
+  tableName: string,
+  columnName: string,
+): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<
+    Record<string, unknown>
+  >;
+  const col = rows.find(r => String(r['name']) === columnName);
+  return col ? Number(col['notnull']) === 1 : false;
+}
+
+function sanitizeStringArrayJson(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    return '[]';
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return '[]';
+    }
+    return JSON.stringify(
+      parsed.filter((item): item is string => typeof item === 'string'),
+    );
+  } catch {
+    return '[]';
+  }
+}
+
 export function runSchemaMigrations(db: DatabaseSync): void {
   db.exec(BASE_PRAGMAS_SQL);
   db.exec(`
@@ -822,11 +969,33 @@ export function runSchemaMigrations(db: DatabaseSync): void {
     .get() as Record<string, unknown> | undefined;
 
   let currentVersion = 0;
-  if (verRow && typeof verRow['value_json'] === 'string') {
-    const parsed = Number(JSON.parse(verRow['value_json']));
-    if (Number.isFinite(parsed)) {
-      currentVersion = parsed;
+  if (verRow) {
+    if (typeof verRow['value_json'] !== 'string') {
+      throw new ForgeError(
+        'MIGRATION_ERROR',
+        'Invalid schema_version entry in meta_kv',
+        500,
+      );
     }
+    let parsedRaw: unknown;
+    try {
+      parsedRaw = JSON.parse(verRow['value_json']);
+    } catch {
+      throw new ForgeError(
+        'MIGRATION_ERROR',
+        `Corrupt schema_version JSON in meta_kv: ${verRow['value_json']}`,
+        500,
+      );
+    }
+    const parsed = typeof parsedRaw === 'number' ? parsedRaw : Number.NaN;
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new ForgeError(
+        'MIGRATION_ERROR',
+        `Invalid schema_version value in meta_kv: ${verRow['value_json']}`,
+        500,
+      );
+    }
+    currentVersion = parsed;
   } else if (hubsPresent) {
     currentVersion = 1;
   }
@@ -966,9 +1135,104 @@ export function runSchemaMigrations(db: DatabaseSync): void {
         );
       }
 
+      if (tableExists(db, 'memory_observations')) {
+        addColumnIfMissing(
+          db,
+          'memory_observations',
+          'kind',
+          "TEXT NOT NULL DEFAULT 'world'",
+        );
+      }
+
+      if (
+        tableExists(db, 'execution_telemetry') &&
+        (columnIsNotNull(db, 'execution_telemetry', 'change_id') ||
+          columnIsNotNull(db, 'execution_telemetry', 'node_id'))
+      ) {
+        db.exec(`
+          CREATE TABLE execution_telemetry_v4 (
+            id TEXT PRIMARY KEY,
+            hub_id TEXT NOT NULL,
+            change_id TEXT,
+            node_id TEXT,
+            adapter_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            role TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            first_pass_certified INTEGER NOT NULL DEFAULT 0,
+            premature_stop_triggered INTEGER NOT NULL DEFAULT 0,
+            duration_sec REAL NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            first_turn_cached_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0,
+            diagnostic TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO execution_telemetry_v4
+          SELECT id, hub_id, change_id, node_id, adapter_id, model, role, outcome,
+                 first_pass_certified, premature_stop_triggered, duration_sec,
+                 input_tokens, cached_tokens, first_turn_cached_tokens, output_tokens,
+                 cost_usd, diagnostic, created_at
+          FROM execution_telemetry;
+          DROP TABLE execution_telemetry;
+          ALTER TABLE execution_telemetry_v4 RENAME TO execution_telemetry;
+          CREATE INDEX IF NOT EXISTS idx_telemetry_adapter ON execution_telemetry(adapter_id, created_at DESC);
+        `);
+      }
+
+      if (tableExists(db, 'memory_vectors')) {
+        const vecSchemaRow = db
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_vectors'",
+          )
+          .get() as Record<string, unknown> | undefined;
+        const vecSql =
+          typeof vecSchemaRow?.['sql'] === 'string' ? vecSchemaRow['sql'] : '';
+        if (
+          !/UNIQUE\s*\(\s*target_kind\s*,\s*target_id\s*,\s*embedding_space\s*,\s*dims\s*\)/i.test(
+            vecSql,
+          )
+        ) {
+          db.exec(`
+            DROP INDEX IF EXISTS idx_memory_vectors_lookup;
+            CREATE TABLE memory_vectors_v4 (
+              id TEXT PRIMARY KEY,
+              hub_id TEXT NOT NULL,
+              execution_mode TEXT NOT NULL DEFAULT 'live',
+              target_kind TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              embedding_space TEXT NOT NULL,
+              dims INTEGER NOT NULL,
+              vector_blob BLOB NOT NULL,
+              active INTEGER NOT NULL DEFAULT 1,
+              last_recalled_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(target_kind, target_id, embedding_space, dims)
+            );
+            INSERT OR IGNORE INTO memory_vectors_v4
+            SELECT id, hub_id, execution_mode, target_kind, target_id, embedding_space, dims,
+                   vector_blob, active, last_recalled_at, updated_at
+            FROM memory_vectors;
+            DROP TABLE memory_vectors;
+            ALTER TABLE memory_vectors_v4 RENAME TO memory_vectors;
+            CREATE INDEX IF NOT EXISTS idx_memory_vectors_lookup
+              ON memory_vectors(hub_id, execution_mode, embedding_space, dims, active, last_recalled_at DESC);
+          `);
+        }
+      }
+
       db.exec(FRESH_V3_SCHEMA_SQL);
 
       if (tableExists(db, 'semantic_memories')) {
+        const validHubIds = new Set(
+          (
+            db.prepare('SELECT id FROM hubs').all() as Array<
+              Record<string, unknown>
+            >
+          ).map(h => String(h['id'])),
+        );
         const legacyRows = db
           .prepare('SELECT * FROM semantic_memories')
           .all() as Array<Record<string, unknown>>;
@@ -978,11 +1242,23 @@ export function runSchemaMigrations(db: DatabaseSync): void {
            VALUES (?, ?, ?, NULL, 'live', 'legacy_semantic_memory', ?, ?, ?, '{}', ?)
            ON CONFLICT(hub_id, execution_mode, content_sha256) DO NOTHING`,
         );
+        const findDocById = db.prepare(
+          'SELECT id FROM memory_documents WHERE id = ?',
+        );
+        const findDocBySha = db.prepare(
+          "SELECT id FROM memory_documents WHERE hub_id = ? AND execution_mode = 'live' AND content_sha256 = ?",
+        );
         const insChunk = db.prepare(
           `INSERT INTO memory_chunks
            (id, document_id, hub_id, execution_mode, seq, start_offset, end_offset, text, fts_tokens, token_estimate, created_at)
            VALUES (?, ?, ?, 'live', 0, 0, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
+        );
+        const findChunkById = db.prepare(
+          'SELECT id FROM memory_chunks WHERE id = ?',
+        );
+        const findChunkByDoc = db.prepare(
+          'SELECT id FROM memory_chunks WHERE document_id = ? ORDER BY seq ASC LIMIT 1',
         );
         const insFact = db.prepare(
           `INSERT INTO memory_facts
@@ -990,28 +1266,79 @@ export function runSchemaMigrations(db: DatabaseSync): void {
            VALUES (?, ?, ?, NULL, 'live', ?, ?, ?, ?, 0.85, 'L2_verified', ?, NULL, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, 1)
            ON CONFLICT(id) DO NOTHING`,
         );
+        const insObs = db.prepare(
+          `INSERT INTO memory_observations
+           (id, hub_id, repo_id, execution_mode, kind, subject_key, title, statement, fts_tokens, belief_status, authority_tier, history_json, supporting_fact_ids_json, contradicting_fact_ids_json, entity_ids_json, path_anchors_json, stability_hours, recall_count, last_recalled_at, stale_suspect, updated_at, created_at)
+           VALUES (?, ?, ?, 'live', ?, ?, ?, ?, ?, 'active', 'L2_verified', '[]', ?, '[]', '[]', ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO NOTHING`,
+        );
+        const insVec = db.prepare(
+          `INSERT INTO memory_vectors
+           (id, hub_id, execution_mode, target_kind, target_id, embedding_space, dims, vector_blob, active, last_recalled_at, updated_at)
+           VALUES (?, ?, 'live', ?, ?, 'local-rp-128', 128, ?, 1, ?, ?)
+           ON CONFLICT(target_kind, target_id, embedding_space, dims) DO NOTHING`,
+        );
+
         for (const r of legacyRows) {
-          const id = String(r['id']);
-          const hubId = String(r['hub_id']);
-          const title = String(r['title'] ?? '');
-          const summary = String(r['summary'] ?? '');
-          const text = `${title}\n${summary}`.trim();
-          const createdAt = String(r['created_at'] ?? new Date().toISOString());
-          const docId = `doc-mig-${id}`;
-          const chunkId = `chk-mig-${id}`;
-          const sha = `mig-${id}`;
-          const tokens = text.toLowerCase();
+          const id = String(r['id'] ?? '');
+          const hubId = typeof r['hub_id'] === 'string' ? r['hub_id'] : '';
+          if (!id || !hubId || !validHubIds.has(hubId)) {
+            continue;
+          }
+          const title = typeof r['title'] === 'string' ? r['title'] : '';
+          const summary = typeof r['summary'] === 'string' ? r['summary'] : '';
+          const text = `${title}\n${summary}`.trim() || id;
+          const createdAt =
+            typeof r['created_at'] === 'string' && r['created_at']
+              ? r['created_at']
+              : new Date().toISOString();
+          const lastRecalledAt =
+            typeof r['last_recalled_at'] === 'string' && r['last_recalled_at']
+              ? r['last_recalled_at']
+              : createdAt;
+          const repoId =
+            typeof r['repo_id'] === 'string' && r['repo_id']
+              ? r['repo_id']
+              : null;
+          const pathAnchorsJson = sanitizeStringArrayJson(
+            r['path_anchors_json'],
+          );
+          const rawStability = Number(r['stability_hours']);
+          const stabilityHours =
+            Number.isFinite(rawStability) && rawStability > 0
+              ? rawStability
+              : 36;
+          const rawRecall = Number(r['recall_count']);
+          const recallCount =
+            Number.isFinite(rawRecall) && rawRecall >= 0
+              ? Math.trunc(rawRecall)
+              : 0;
+          const sha = sha256TextInline(text);
+          const tokens = buildFtsTokensInline(text);
+
+          const candidateDocId = `doc-mig-${id}`;
           insDoc.run(
-            docId,
+            candidateDocId,
             hubId,
-            r['repo_id'] ? String(r['repo_id']) : null,
+            repoId,
             createdAt,
             sha,
             text,
             createdAt,
           );
+          const resolvedDoc =
+            (findDocById.get(candidateDocId) as
+              Record<string, unknown> | undefined) ??
+            (findDocBySha.get(hubId, sha) as
+              Record<string, unknown> | undefined);
+          if (!resolvedDoc) {
+            continue;
+          }
+          const docId = String(resolvedDoc['id']);
+
+          const candidateChunkId = `chk-mig-${id}`;
           insChunk.run(
-            chunkId,
+            candidateChunkId,
             docId,
             hubId,
             text.length,
@@ -1020,33 +1347,113 @@ export function runSchemaMigrations(db: DatabaseSync): void {
             Math.max(1, Math.ceil(text.length / 4)),
             createdAt,
           );
+          const resolvedChunk =
+            (findChunkById.get(candidateChunkId) as
+              Record<string, unknown> | undefined) ??
+            (findChunkByDoc.get(docId) as Record<string, unknown> | undefined);
+          if (!resolvedChunk) {
+            continue;
+          }
+          const chunkId = String(resolvedChunk['id']);
+
           const kind =
             r['kind'] === 'pitfall_lesson'
               ? 'pitfall'
               : r['kind'] === 'adr'
                 ? 'decision'
                 : 'world';
+          const factId = `fact-mig-${id}`;
+          const validFrom =
+            typeof r['valid_from'] === 'string' && r['valid_from']
+              ? r['valid_from']
+              : createdAt;
+          const validUntil =
+            typeof r['valid_until'] === 'string' && r['valid_until']
+              ? r['valid_until']
+              : null;
+          const supersededBy =
+            typeof r['superseded_by_id'] === 'string' && r['superseded_by_id']
+              ? `fact-mig-${r['superseded_by_id']}`
+              : null;
+
           insFact.run(
-            `fact-mig-${id}`,
+            factId,
             hubId,
-            r['repo_id'] ? String(r['repo_id']) : null,
+            repoId,
             kind,
             `legacy:${id}`,
             text,
             tokens,
-            String(r['valid_from'] ?? createdAt),
+            validFrom,
             createdAt,
-            r['valid_until'] ? String(r['valid_until']) : null,
-            r['superseded_by_id']
-              ? `fact-mig-${String(r['superseded_by_id'])}`
-              : null,
+            validUntil,
+            supersededBy,
             docId,
             chunkId,
-            String(r['path_anchors_json'] ?? '[]'),
-            Number(r['stability_hours'] ?? 36),
-            Number(r['recall_count'] ?? 0),
-            String(r['last_recalled_at'] ?? createdAt),
+            pathAnchorsJson,
+            stabilityHours,
+            recallCount,
+            lastRecalledAt,
           );
+
+          if (validUntil === null) {
+            const obsId = `obs-mig-${id}`;
+            const obsTitle = title || `Legacy ${kind}`;
+            const obsStatement = summary || text;
+            const obsTokens = buildFtsTokensInline(
+              `${obsTitle} ${obsStatement}`,
+            );
+            const staleSuspect = Number(r['stale_suspect']) === 1 ? 1 : 0;
+
+            insObs.run(
+              obsId,
+              hubId,
+              repoId,
+              kind,
+              `legacy:${id}`,
+              obsTitle,
+              obsStatement,
+              obsTokens,
+              JSON.stringify([factId]),
+              pathAnchorsJson,
+              stabilityHours,
+              recallCount,
+              lastRecalledAt,
+              staleSuspect,
+              createdAt,
+              createdAt,
+            );
+
+            const textVec = embedTextLocal128Blob(text);
+            const obsVec = embedTextLocal128Blob(obsStatement);
+            insVec.run(
+              `vec-mig-chk-${id}`,
+              hubId,
+              'chunk',
+              chunkId,
+              textVec,
+              lastRecalledAt,
+              createdAt,
+            );
+            insVec.run(
+              `vec-mig-fact-${id}`,
+              hubId,
+              'fact',
+              factId,
+              textVec,
+              lastRecalledAt,
+              createdAt,
+            );
+            insVec.run(
+              `vec-mig-obs-${id}`,
+              hubId,
+              'observation',
+              obsId,
+              obsVec,
+              lastRecalledAt,
+              createdAt,
+            );
+          }
         }
       }
 

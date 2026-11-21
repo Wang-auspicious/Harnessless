@@ -2,6 +2,7 @@ const CJK_RANGE = /[\u4e00-\u9fff]/;
 
 function splitIdentifierSubtokens(word: string): string[] {
   const parts = word
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/[_\-./]+/g, ' ')
     .split(/\s+/)
@@ -62,9 +63,8 @@ export function buildFtsMatchQuery(rawQuery: string): string {
 }
 
 export function canonicalEntityKey(raw: string): string {
-  const trimmed = raw.trim();
-  if (CJK_RANGE.test(trimmed)) {
-    return trimmed.replace(/\s+/g, '');
-  }
-  return trimmed.toLowerCase().replace(/[_\-\s./]+/g, '');
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[_\-\s./]+/g, '');
 }

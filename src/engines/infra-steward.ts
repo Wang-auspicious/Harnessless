@@ -18,6 +18,7 @@ import type {
   PermissionTier,
   SkillEntry,
 } from '../shared/types.ts';
+import type {ExecutionMode} from '../shared/v3-types.ts';
 import type {ForgeStore} from '../store/database.ts';
 import type {RequirementClosureEngine} from './requirement-closure.ts';
 
@@ -138,11 +139,16 @@ export class InfraStewardEngine {
       return null;
     }
 
+    const executionMode: ExecutionMode = change.executionMode ?? 'live';
     const allRepos = this.store.listRepositories(hub.id);
     const terms = this.store.listDomainTerms(hub.id);
     const certifiedChanges = this.store
       .listChanges(hub.id, true)
-      .filter(c => c.status === 'certified')
+      .filter(
+        c =>
+          c.status === 'certified' &&
+          (c.executionMode ?? 'live') === executionMode,
+      )
       .slice(0, 6);
 
     const compressedWiki = [
@@ -169,11 +175,13 @@ export class InfraStewardEngine {
       ),
     ].join('\n');
 
-    this.store.updateHubWiki(hub.id, compressedWiki);
+    if (executionMode === 'live') {
+      this.store.updateHubWiki(hub.id, compressedWiki);
+    }
     this.store.memory.upsertLivingDoc({
       hubId: hub.id,
       repoId: repo.id,
-      executionMode: change.executionMode ?? 'live',
+      executionMode,
       docKind: 'agent_wiki',
       slug: 'agent-wiki',
       title: `${hub.name} Agent-Wiki`,
@@ -184,16 +192,31 @@ export class InfraStewardEngine {
       stale: false,
     });
 
-    // Record reusable architectural memory from this certified change.
-    this.store.recordSemanticMemory({
-      hubId: hub.id,
-      repoId: repo.id,
-      kind: 'architecture',
-      title: `${change.code} Certified Contract (${repo.name})`,
-      summary: `Completed "${change.title}" in bounded context ${repo.boundedContext}. Verify gate: ${change.verifyCommand}.`,
-      pathAnchors: [repo.name],
-      stabilityHours: 72,
-    });
+    const staleDocs = this.store.memory.markLivingDocsStaleByKinds(
+      hub.id,
+      executionMode,
+      ['pitfall_runbook'],
+    );
+    if (staleDocs.length > 0) {
+      this.store.enqueueEffect(
+        'memory.refresh_docs',
+        `refresh_docs:${hub.id}:${executionMode}`,
+        {hubId: hub.id, executionMode},
+      );
+    }
+
+    // Record reusable architectural memory only for live certified changes.
+    if (executionMode === 'live') {
+      this.store.recordSemanticMemory({
+        hubId: hub.id,
+        repoId: repo.id,
+        kind: 'architecture',
+        title: `${change.code} Certified Contract (${repo.name})`,
+        summary: `Completed "${change.title}" in bounded context ${repo.boundedContext}. Verify gate: ${change.verifyCommand}.`,
+        pathAnchors: [repo.name],
+        stabilityHours: 72,
+      });
+    }
 
     const existingRetro = this.store
       .listSkills()
@@ -224,7 +247,8 @@ export class InfraStewardEngine {
     return {
       hubId: hub.id,
       changeId: change.id,
-      updatedWikiSummary: compressedWiki,
+      updatedWikiSummary:
+        executionMode === 'live' ? compressedWiki : hub.agentWikiSummary,
       updatedSkill,
       auditEntry,
     };

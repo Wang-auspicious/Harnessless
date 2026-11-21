@@ -5,11 +5,13 @@
 
 import {
   buildRehydrationCapsule,
+  computeLinesEntropyContribution,
   computeRetentionScore,
 } from '../core/cognitive.ts';
 import type {HindsightEngine} from '../memory/hindsight-engine.ts';
 import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import type {RehydrationCapsule} from '../shared/types.ts';
+import type {ExecutionMode} from '../shared/v3-types.ts';
 import type {ForgeStore} from '../store/database.ts';
 
 export interface DreamConsolidationReport {
@@ -39,17 +41,27 @@ export class DreamingEngine {
    * Builds live Human Ebbinghaus Re-hydration Capsules across all active
    * Federation Hubs so multi-project context switches take <30 seconds.
    */
-  buildAllCapsules(nowMs = Date.now()): RehydrationCapsule[] {
+  buildAllCapsules(
+    nowMs = Date.now(),
+    executionMode: ExecutionMode = 'live',
+  ): RehydrationCapsule[] {
     if (this.hindsight) {
-      return this.hindsight.buildAllCapsules(nowMs);
+      return this.hindsight.buildAllCapsules(nowMs, executionMode);
     }
     const hubs = this.store.listHubs(false);
     const openAttention = this.store.listAttentionItems(false);
 
     return hubs.map(hub => {
       const anchorMs = Date.parse(hub.lastHumanInteractionAt);
-      const changes = this.store.listChanges(hub.id, false);
+      const changes = this.store
+        .listChanges(hub.id, false)
+        .filter(c => (c.executionMode ?? 'live') === executionMode);
       const audits = this.store.listAuditLedger(50, hub.id);
+      const diffTotals = this.store.getTotalChangeLinesForHub(
+        hub.id,
+        executionMode,
+        hub.lastHumanInteractionAt,
+      );
 
       let tasksCertifiedSinceAnchor = 0;
       let ghostAmendmentsSinceAnchor = 0;
@@ -106,7 +118,15 @@ export class DreamingEngine {
           tasksCertifiedSinceAnchor,
           ghostAmendmentsSinceAnchor,
           adrUpdatesSinceAnchor,
-          linesChangedSinceAnchor: tasksCertifiedSinceAnchor * 85,
+          linesChangedSinceAnchor: (() => {
+            const linesChanged = computeLinesEntropyContribution(
+              diffTotals.linesAdded,
+              diffTotals.linesDeleted,
+            );
+            return linesChanged > 0
+              ? linesChanged
+              : tasksCertifiedSinceAnchor * 85;
+          })(),
         },
         deltaHighlights:
           deltaHighlights.length > 0
@@ -139,9 +159,12 @@ export class DreamingEngine {
       for (const hub of this.store.listHubs(false)) {
         if (this.hindsight) {
           for (const mode of ['live', 'simulation'] as const) {
-            const report = this.hindsight.consolidatePendingFacts(hub.id, mode);
+            const report = await this.hindsight.consolidatePendingFactsAsync(
+              hub.id,
+              mode,
+            );
             supersededDriftedMemories += report.supersededObservations;
-            this.hindsight.refreshStaleLivingDocs(hub.id, mode);
+            await this.hindsight.refreshStaleLivingDocsAsync(hub.id, mode);
           }
         }
         const existingTitles = new Set(
@@ -150,8 +173,11 @@ export class DreamingEngine {
             .map(m => m.title),
         );
 
-        // 1. Extract pitfall lessons from retried-then-certified task nodes.
+        // 1. Extract pitfall lessons from retried-then-certified live task nodes.
         for (const chg of this.store.listChanges(hub.id, false)) {
+          if ((chg.executionMode ?? 'live') === 'simulation') {
+            continue;
+          }
           const nodes = this.store.listGraphNodes(chg.id);
           for (const node of nodes) {
             if (node.status === 'certified' && node.attemptCount > 1) {
