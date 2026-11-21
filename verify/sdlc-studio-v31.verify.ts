@@ -437,7 +437,7 @@ describe('SDLC Studio v3.1 End-to-End Capabilities', () => {
       assert.equal(passedHandover.ok, true);
       assert.equal(passedHandover.verifyPassed, true);
       assert.ok(passedHandover.checkpointSha);
-      assert.ok(passedHandover.checkpointTag?.includes('HANDOVER-'));
+      assert.ok(passedHandover.checkpointTag?.includes('handover-'));
       assert.equal(passedHandover.memoryRetained, true);
 
       const updatedNode = runtime.store
