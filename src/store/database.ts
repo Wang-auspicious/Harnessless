@@ -63,6 +63,8 @@ import type {
 import {HamaRepository} from './hama-repo.ts';
 import {MemoryRepository} from './memory-repo.ts';
 import {MissionRepository} from './mission-repo.ts';
+import {V4Repository} from './v4-repo.ts';
+import {initV4Schema} from './v4-schema.ts';
 import type {StoreContext} from './repo-helpers.ts';
 
 export interface OutboxEffectRow {
@@ -115,6 +117,7 @@ export class ForgeStore {
   readonly missions: MissionRepository;
   readonly hama: HamaRepository;
   readonly memory: MemoryRepository;
+  readonly v4: V4Repository;
   private txDepth = 0;
   private postCommitQueue: Array<() => void> = [];
   private outboxWakeup: (() => void) | null = null;
@@ -127,6 +130,7 @@ export class ForgeStore {
     this.db = new DatabaseSync(dbPath);
     try {
       runSchemaMigrations(this.db);
+      initV4Schema(this.db);
 
       const ctx: StoreContext = {
         db: this.db,
@@ -137,6 +141,7 @@ export class ForgeStore {
       this.missions = new MissionRepository(ctx);
       this.hama = new HamaRepository(ctx);
       this.memory = new MemoryRepository(ctx);
+      this.v4 = new V4Repository(ctx);
       this.seedDefaults();
     } catch (err) {
       this.closed = true;

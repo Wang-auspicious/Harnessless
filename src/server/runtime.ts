@@ -10,10 +10,12 @@ import {
   OutboxWorker,
   RequirementClosureEngine,
 } from '../engines/index.ts';
+import {MasterAgentEngine} from '../engines/master-agent.ts';
 import {HindsightEngine} from '../memory/hindsight-engine.ts';
 import {HamaEngine} from '../requirements/hama-engine.ts';
 import {GitWorktreeManager, SandboxProcessRunner} from '../sandbox/index.ts';
 import type {ForgeSseEvent} from '../shared/api.ts';
+import type {NativeRuntimeBridge, V4SseEvent} from '../shared/v4-types.ts';
 import {ForgeStore} from '../store/database.ts';
 import {ForgeHttpServer} from './http-router.ts';
 import {EngineeringRoomsService} from './rooms-service.ts';
@@ -24,6 +26,7 @@ export interface ForgeRuntimeOptions {
   readonly seedDemoOnEmpty?: boolean;
   readonly sessionToken?: string;
   readonly maxConcurrentSlots?: number;
+  readonly collabBridge?: NativeRuntimeBridge;
 }
 
 export class ForgeRuntime {
@@ -45,6 +48,7 @@ export class ForgeRuntime {
   readonly continuity: ContinuityEngine;
   readonly outboxWorker: OutboxWorker;
   readonly missions: MissionOrchestrator;
+  readonly master: MasterAgentEngine;
   readonly rooms: EngineeringRoomsService;
   readonly httpServer: ForgeHttpServer;
 
@@ -153,6 +157,20 @@ export class ForgeRuntime {
       runner: this.runner,
       rootSignal: this.rootAbortController.signal,
     });
+    const publishV4 = (ev: V4SseEvent): void => {
+      this.httpServer.broadcast(ev);
+    };
+
+    this.master = new MasterAgentEngine({
+      store: this.store,
+      worktrees: this.worktrees,
+      runner: this.runner,
+      adapters: this.adapters,
+      worktreesRoot: this.worktreesRoot,
+      dataDir: this.dataDir,
+      publish: publishV4,
+      collabBridge: options.collabBridge,
+    });
     this.rooms = new EngineeringRoomsService({
       store: this.store,
       adapters: this.adapters,
@@ -176,6 +194,7 @@ export class ForgeRuntime {
       hindsight: this.hindsight,
       hama: this.hama,
       missions: this.missions,
+      master: this.master,
       worktreesRoot: this.worktreesRoot,
       sessionToken: options.sessionToken,
     });
