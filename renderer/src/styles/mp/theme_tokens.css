@@ -83,27 +83,14 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: "ForgeOps Han Serif";
-  src:
-    local("Source Han Serif SC"),
-    local("Source Han Serif CN"),
-    local("思源宋体"),
-    local("思源宋体 CN"),
-    local("Noto Serif SC");
-  font-weight: 300 800;
-  font-style: normal;
-  font-display: swap;
-}
-
 :root,
 :root[data-theme="light"],
 :root[data-theme="dark"],
 :root[data-mode="light"],
 :root[data-mode="dark"] {
-  --cds-font-sans: "Anthropic Serif", "ForgeOps Han Serif", "Source Han Serif SC", "Source Han Serif CN", "Noto Serif SC", "思源宋体", "anthropic-sans", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
-  --cds-font-sans-display: "Anthropic Serif", "ForgeOps Han Serif", "Source Han Serif SC", "思源宋体", "anthropic-sans-display", "anthropic-sans", Georgia, serif;
-  --cds-font-mono: "anthropic-mono", "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --cds-font-sans: "anthropic-sans", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --cds-font-sans-display: "anthropic-sans-display", "anthropic-sans", "Anthropic Sans", var(--cds-font-sans);
+  --cds-font-mono: "anthropic-mono", "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
   --mp-font-mono: var(--cds-font-mono);
 }
 

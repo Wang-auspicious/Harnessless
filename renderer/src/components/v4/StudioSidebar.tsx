@@ -1,21 +1,63 @@
 import {useEffect, useRef, useState, type ReactElement} from 'react';
 import type {
   HostedAppCard,
+  KernelId,
   MasterSession,
   NativeKernelCard,
   SessionMode,
 } from '../../api/v4-types.ts';
+import {AgentBrandIcon} from './AgentAvatar.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
+import type {SettingsPageId} from './SettingsModal.tsx';
 import {sessionStatusDot} from './v4-labels.ts';
 
 export type SidebarNavView =
-  'chat' | 'projects' | 'tasks' | 'artifacts' | 'kernels' | 'customize';
+  | 'chat'
+  | 'projects'
+  | 'tasks'
+  | 'artifacts'
+  | 'triage'
+  | 'kernels'
+  | 'customize';
+
+export type ChannelId =
+  'general' | 'architecture' | 'code-review' | 'ship-triage';
+
+export const CHANNELS: readonly {
+  readonly id: ChannelId;
+  readonly name: string;
+  readonly subtitle: string;
+  readonly defaultTab?: 'board' | 'code' | 'verify' | 'tasks';
+}[] = [
+  {id: 'general', name: 'general', subtitle: '主控协同'},
+  {
+    id: 'architecture',
+    name: 'architecture',
+    subtitle: '白板与 Spec',
+    defaultTab: 'board',
+  },
+  {
+    id: 'code-review',
+    name: 'code-review',
+    subtitle: 'Diff 评审',
+    defaultTab: 'code',
+  },
+  {
+    id: 'ship-triage',
+    name: 'ship-triage',
+    subtitle: 'Ship 验收',
+    defaultTab: 'verify',
+  },
+];
 
 export interface StudioSidebarProps {
   readonly mode: SessionMode;
   readonly onChangeMode: (mode: SessionMode) => void;
   readonly activeNav: SidebarNavView;
   readonly onSelectNav: (nav: SidebarNavView) => void;
+  readonly activeChannel: ChannelId;
+  readonly onSelectChannel: (channel: ChannelId) => void;
+  readonly onMentionAgent: (kernelId: KernelId) => void;
   readonly sessions: readonly MasterSession[];
   readonly activeSessionId: string | null;
   readonly onSelectSession: (sessionId: string) => void;
@@ -24,11 +66,13 @@ export interface StudioSidebarProps {
   readonly catchupOnly: boolean;
   readonly onToggleCatchup: () => void;
   readonly pendingApprovalsCount: number;
+  readonly openTriageCount: number;
   readonly kernels: readonly NativeKernelCard[];
   readonly hostedApps: readonly HostedAppCard[];
   readonly searchQuery: string;
   readonly theme: 'light' | 'dark';
   readonly onToggleTheme: () => void;
+  readonly onOpenSettings: (page?: SettingsPageId) => void;
   readonly onSwitchToLegacy: () => void;
   readonly onDemoRun: () => Promise<void>;
   readonly busy: boolean;
@@ -53,6 +97,9 @@ export function StudioSidebar({
   onChangeMode,
   activeNav,
   onSelectNav,
+  activeChannel,
+  onSelectChannel,
+  onMentionAgent,
   sessions,
   activeSessionId,
   onSelectSession,
@@ -61,20 +108,26 @@ export function StudioSidebar({
   catchupOnly,
   onToggleCatchup,
   pendingApprovalsCount,
+  openTriageCount,
   kernels,
   hostedApps,
   searchQuery,
   theme,
   onToggleTheme,
+  onOpenSettings,
   onSwitchToLegacy,
   onDemoRun,
   busy,
 }: StudioSidebarProps): ReactElement {
-  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(
+    () => window.location.hash === '#smoke-home',
+  );
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<
     Record<string, boolean>
   >({});
+  const [localSearch, setLocalSearch] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
   const [folderNote, setFolderNote] = useState<string | null>(null);
   const footRef = useRef<HTMLDivElement | null>(null);
   const moreRef = useRef<HTMLDivElement | null>(null);
@@ -103,10 +156,10 @@ export function StudioSidebar({
       return;
     }
     onSelectNav('projects');
-    setFolderNote('当前浏览器模式请在右侧/Projects 面板输入本地路径。');
+    setFolderNote('请在 Projects 面板输入本地工程目录路径。');
   };
 
-  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const normalizedQuery = (localSearch || searchQuery).trim().toLowerCase();
   const visibleSessions = sessions.filter(s => {
     if (catchupOnly && s.stage !== 'spec' && s.stage !== 'review') {
       return false;
@@ -121,7 +174,6 @@ export function StudioSidebar({
     );
   });
 
-  // Group sessions by repository folder name (matching MP .mpw-project groups)
   const grouped = new Map<string, MasterSession[]>();
   for (const s of visibleSessions) {
     const groupName = repoBaseName(s.workspacePath);
@@ -133,6 +185,10 @@ export function StudioSidebar({
   const readyKernels = kernels.filter(
     k => k.status === 'ready' || k.status === 'builtin',
   ).length;
+
+  const toggleGroup = (key: string): void => {
+    setCollapsedGroups(prev => ({...prev, [key]: !prev[key]}));
+  };
 
   return (
     <aside
@@ -201,17 +257,6 @@ export function StudioSidebar({
             <span className="mp-nav-label">Projects</span>
           </button>
 
-          <button
-            type="button"
-            className={`mpw-customize ${activeNav === 'tasks' ? 'is-on' : ''}`}
-            onClick={() => onSelectNav('tasks')}
-          >
-            <span className="mp-nav-leading">
-              <CdsIcon name="Tasks" size="small" anim="ANIM" />
-            </span>
-            <span className="mp-nav-label">Tasks</span>
-          </button>
-
           <div className="mp-nav-row">
             <button
               type="button"
@@ -227,7 +272,7 @@ export function StudioSidebar({
               type="button"
               className="mp-nav-create"
               aria-label="Run Demo Pipeline"
-              title="一键生成示例交付与 Spec"
+              title="一键生成示例交付与白板"
               disabled={busy}
               onClick={() => void onDemoRun()}
             >
@@ -237,15 +282,16 @@ export function StudioSidebar({
 
           <button
             type="button"
-            className={`mpw-customize ${activeNav === 'kernels' ? 'is-on' : ''}`}
-            onClick={() => onSelectNav('kernels')}
+            className={`mpw-customize ${activeNav === 'triage' ? 'is-on' : ''}`}
+            onClick={() => onSelectNav('triage')}
           >
             <span className="mp-nav-leading">
-              <CdsIcon name="Clock" size="small" anim="ANIM" />
+              <CdsIcon name="Inbox" size="small" />
             </span>
-            <span className="mp-nav-label">
-              Kernels ({readyKernels}/{kernels.length})
-            </span>
+            <span className="mp-nav-label">Triage</span>
+            {openTriageCount > 0 ? (
+              <span className="sd-nav-count">{openTriageCount}</span>
+            ) : null}
           </button>
 
           <button
@@ -275,12 +321,48 @@ export function StudioSidebar({
                 {pendingApprovalsCount > 0 ? ` (${pendingApprovalsCount})` : ''}
               </span>
             </button>
+
             {moreMenuOpen ? (
               <div
                 className="mp-account-menu"
                 role="menu"
                 style={{top: 30, left: 0}}
               >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    onSelectNav('kernels');
+                  }}
+                >
+                  <CdsIcon name="CommandLinePrompt" size="small" />
+                  <span>
+                    Kernels &amp; Bus ({readyKernels}/{kernels.length})
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    onSelectNav('tasks');
+                  }}
+                >
+                  <CdsIcon name="Tasks" size="small" />
+                  <span>Tasks &amp; Checkpoints</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    onSelectNav('artifacts');
+                  }}
+                >
+                  <CdsIcon name="Box" size="small" />
+                  <span>已交付应用 ({hostedApps.length})</span>
+                </button>
                 <button
                   type="button"
                   role="menuitem"
@@ -296,29 +378,19 @@ export function StudioSidebar({
                       : `仅看审批待办 (${pendingApprovalsCount})`}
                   </span>
                 </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    void handleOpenFolder();
-                  }}
-                >
-                  <CdsIcon name="FolderPlus" size="small" />
-                  <span>打开本地项目…</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    onSelectNav('artifacts');
-                  }}
-                >
-                  <CdsIcon name="Box" size="small" />
-                  <span>已交付应用 ({hostedApps.length})</span>
-                </button>
                 <hr />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    onOpenSettings('general');
+                  }}
+                >
+                  <CdsIcon name="Settings" size="small" />
+                  <span>Settings</span>
+                  <kbd>Ctrl+,</kbd>
+                </button>
                 <button
                   type="button"
                   role="menuitem"
@@ -327,8 +399,8 @@ export function StudioSidebar({
                     onSwitchToLegacy();
                   }}
                 >
-                  <CdsIcon name="Wrench" size="small" />
-                  <span>ForgeOps 专家视图</span>
+                  <CdsIcon name="Code" size="small" />
+                  <span>ForgeOps v3.1 专家模式</span>
                 </button>
               </div>
             ) : null}
@@ -336,9 +408,45 @@ export function StudioSidebar({
         </nav>
 
         <section
-          className="mpw-workspace-browser"
-          aria-label="Conversation browser"
+          className={`mpw-workspace-browser ${searchFocused || localSearch ? 'is-searching' : ''}`}
+          aria-label="Workspace, Channels and Agents"
         >
+          <div className="mpw-workspace-header">
+            <span className="mp-projects-label">Workspace</span>
+            <div className="mpw-workspace-search">
+              <button
+                type="button"
+                className="mpw-workspace-search-button"
+                id="side-search-toggle"
+                aria-label="Search sessions"
+                title="搜索会话或项目"
+                onClick={() => setSearchFocused(prev => !prev)}
+              >
+                <CdsIcon name="Search" size="small" />
+              </button>
+              <input
+                id="side-search"
+                type="search"
+                value={localSearch}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setSearchFocused(Boolean(localSearch))}
+                onChange={e => setLocalSearch(e.target.value)}
+                placeholder="Filter…"
+                aria-label="Filter sessions"
+              />
+            </div>
+            <button
+              type="button"
+              className="mpw-workspace-action"
+              id="workspace-add"
+              aria-label="Open project"
+              title="打开本地项目文件夹"
+              onClick={() => void handleOpenFolder()}
+            >
+              <CdsIcon name="FolderPlus" size="small" />
+            </button>
+          </div>
+
           {folderNote ? (
             <p className="mpw-workspace-note" role="status">
               {folderNote}
@@ -347,6 +455,101 @@ export function StudioSidebar({
 
           <div className="mpw-session-list-seat">
             <div id="side-convos">
+              {/* Slack/Raft Channels group */}
+              {mode === 'team' ? (
+                <div
+                  className="mpw-project"
+                  data-open={!collapsedGroups['__channels'] ? 'true' : 'false'}
+                >
+                  <div className="mpw-project-row">
+                    <button
+                      type="button"
+                      className="mpw-project-toggle"
+                      onClick={() => toggleGroup('__channels')}
+                    >
+                      <span className="mpw-project-chevron">
+                        <CdsIcon name="CaretRight" size="xs" />
+                      </span>
+                      <span className="mpw-project-name">Channels</span>
+                    </button>
+                  </div>
+                  <div className="mpw-project-sessions">
+                    {CHANNELS.map(ch => {
+                      const isSel =
+                        activeNav === 'chat' && activeChannel === ch.id;
+                      return (
+                        <button
+                          key={ch.id}
+                          type="button"
+                          className={`side-item sd-channel-row ${isSel ? 'is-on' : ''}`}
+                          onClick={() => {
+                            onSelectNav('chat');
+                            onSelectChannel(ch.id);
+                          }}
+                          title={`${ch.name} — ${ch.subtitle}`}
+                        >
+                          <span className="sd-channel-hash">#</span>
+                          <span className="side-title">{ch.name}</span>
+                          <span className="sd-channel-hint">{ch.subtitle}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Multi-Agent Direct Messages group with authentic SVG brand icons */}
+              <div
+                className="mpw-project"
+                data-open={!collapsedGroups['__agents'] ? 'true' : 'false'}
+              >
+                <div className="mpw-project-row">
+                  <button
+                    type="button"
+                    className="mpw-project-toggle"
+                    onClick={() => toggleGroup('__agents')}
+                  >
+                    <span className="mpw-project-chevron">
+                      <CdsIcon name="CaretRight" size="xs" />
+                    </span>
+                    <span className="mpw-project-name">Agents</span>
+                  </button>
+                  <div className="mpw-project-actions">
+                    <button
+                      type="button"
+                      aria-label="Configure kernels"
+                      title="配置模型与原生内核"
+                      onClick={() => onOpenSettings('models')}
+                    >
+                      <CdsIcon name="Settings" size="small" />
+                    </button>
+                  </div>
+                </div>
+                <div className="mpw-project-sessions">
+                  {kernels.slice(0, 6).map(k => (
+                    <button
+                      key={k.kernelId}
+                      type="button"
+                      className="side-item sd-agent-dm-row"
+                      onClick={() => {
+                        onSelectNav('chat');
+                        onMentionAgent(k.kernelId);
+                      }}
+                      title={`在对话中 @${k.displayName} (${k.status})`}
+                    >
+                      <AgentBrandIcon
+                        kernelId={k.kernelId}
+                        theme={theme}
+                        size={15}
+                        status={k.status}
+                      />
+                      <span className="side-title">{k.displayName}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Project Folders & Sessions tree */}
               {grouped.size === 0 ? (
                 <div className="side-empty">No matching sessions</div>
               ) : (
@@ -362,12 +565,7 @@ export function StudioSidebar({
                         <button
                           type="button"
                           className="mpw-project-toggle"
-                          onClick={() =>
-                            setCollapsedGroups(prev => ({
-                              ...prev,
-                              [groupName]: !prev[groupName],
-                            }))
-                          }
+                          onClick={() => toggleGroup(groupName)}
                         >
                           <span className="mpw-project-chevron">
                             <CdsIcon name="CaretRight" size="xs" />
@@ -393,7 +591,8 @@ export function StudioSidebar({
                         {items.map(s => {
                           const dot = sessionStatusDot(s.stage);
                           const status = mapSessionStatus(dot);
-                          const isSelected = s.id === activeSessionId;
+                          const isSelected =
+                            activeNav === 'chat' && s.id === activeSessionId;
                           return (
                             <button
                               key={s.id}
@@ -436,7 +635,7 @@ export function StudioSidebar({
             onClick={() => setAccountMenuOpen(prev => !prev)}
           >
             <span className="mp-account-mark" aria-hidden="true">
-              S
+              F
             </span>
             <span>
               <strong>SDLC-Studio</strong>
@@ -454,40 +653,52 @@ export function StudioSidebar({
               style={{bottom: 48, left: 8}}
             >
               <p className="mp-account-menu-header">
-                SDLC-Studio · Gateway ({readyKernels} kernels ready)
+                SDLC-Studio · {readyKernels}/{kernels.length} Kernels
               </p>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   setAccountMenuOpen(false);
-                  onSelectNav('customize');
+                  onOpenSettings('general');
                 }}
               >
                 <CdsIcon name="Settings" size="small" />
-                <span>模型与角色路由</span>
+                <span>Settings</span>
+                <kbd>Ctrl+,</kbd>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   setAccountMenuOpen(false);
-                  onSelectNav('kernels');
+                  onOpenSettings('models');
                 }}
               >
-                <CdsIcon name="Wrench" size="small" />
-                <span>原生 Agent 探测</span>
+                <CdsIcon name="Agent" size="small" />
+                <span>Models &amp; Kernels</span>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   setAccountMenuOpen(false);
-                  onSelectNav('projects');
+                  onOpenSettings('permissions');
                 }}
               >
-                <CdsIcon name="FolderOpen" size="small" />
-                <span>项目工作区</span>
+                <CdsIcon name="LockShield" size="small" />
+                <span>Permissions &amp; Ship</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setAccountMenuOpen(false);
+                  onOpenSettings('usage');
+                }}
+              >
+                <CdsIcon name="BarChart" size="small" />
+                <span>Usage &amp; Activity</span>
               </button>
               <hr />
               <button
@@ -499,7 +710,7 @@ export function StudioSidebar({
                 }}
               >
                 <CdsIcon name="Code" size="small" />
-                <span>切换 v3.1 专家路由</span>
+                <span>v3.1 专家控制台</span>
               </button>
             </div>
           ) : null}

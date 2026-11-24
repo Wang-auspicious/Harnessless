@@ -1,4 +1,4 @@
-/* SDLC-Studio v4 minimal bridge extensions strictly using MP / CDS tokens */
+/* SDLC-Studio v5 bridge extensions strictly using Magic Pointer & CDS tokens */
 
 body.studio {
   background: var(--mp-page);
@@ -8,7 +8,7 @@ body.studio {
   line-height: var(--mp-leading-body);
 }
 
-/* Home heading uses editorial Anthropic Serif + Han Serif matching MP Learn/Home */
+/* Editorial Anthropic Serif reserved strictly for Home Hero and Library titles */
 body.studio .mp-home-heading h1 {
   font-family: var(--mp-font-serif);
   font-size: 26px;
@@ -18,7 +18,7 @@ body.studio .mp-home-heading h1 {
   color: var(--mp-text);
 }
 
-/* Keep composer visible centered beneath Home greeting when no session messages exist */
+/* Home composer centered below Home greeting */
 body.studio #view-chat[data-home="true"] .mpw-scrollbody {
   justify-content: center;
   align-items: center;
@@ -59,19 +59,315 @@ body.studio #view-chat[data-home="true"] .mp-home-stats {
   background: transparent;
 }
 
-/* Inspector width driven smoothly by drag handle */
+/* Dynamic Inspector width driven by drag handle */
 body.studio .mp-inspector {
-  width: var(--mp-inspector-width, 500px);
+  width: var(--mp-inspector-width, 540px);
 }
 
-/* Shared minimal SDLC Inspector inner layout */
+body.studio .mpw-workspace-tab {
+  min-width: 0;
+  max-width: none;
+}
+
+body.studio .mpw-workspace-tab-select {
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+body.studio .mp-decision-card {
+  max-height: min(520px, 58dvh);
+}
+
+/* Sidebar Channels, Agents & Nav badge extensions using MP 26px row tokens */
+.sd-nav-count {
+  margin-left: auto;
+  min-width: 18px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mp-clay) 14%, transparent);
+  color: var(--mp-clay-strong);
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 17px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.sd-channel-row {
+  gap: 6px;
+}
+
+.sd-channel-hash {
+  color: var(--mp-text-muted);
+  font-family: var(--mp-font-mono);
+  font-size: 12px;
+  font-weight: 550;
+  flex: none;
+}
+
+.sd-channel-hint {
+  margin-left: auto;
+  color: var(--mp-text-muted);
+  font-size: 11px;
+  flex: none;
+}
+
+.sd-agent-dm-row {
+  gap: 8px;
+}
+
+/* Authentic multi-agent brand avatar */
+.sd-agent-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 6px;
+}
+
+.sd-agent-avatar.is-framed {
+  background: var(--mp-panel-subtle);
+  border: 1px solid var(--mp-rule);
+}
+
+.sd-agent-avatar.is-human {
+  border-radius: 50%;
+  background: var(--mp-clay);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.sd-agent-svg {
+  display: block;
+  object-fit: contain;
+}
+
+.sd-agent-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--mp-sidebar);
+}
+
+/* Chat Header Channel Pill & Pinned Canvas Quick-Button */
+.sd-header-channel-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--mp-panel-subtle);
+  color: var(--mp-text);
+  font-family: var(--mp-font-mono);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.sd-pinned-canvas-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 999px;
+  background: var(--mp-panel);
+  color: var(--mp-text-secondary);
+  font-size: 11.5px;
+  font-weight: 520;
+  transition: background var(--mp-dur-fast), color var(--mp-dur-fast), border-color var(--mp-dur-fast);
+}
+
+.sd-pinned-canvas-btn:hover,
+.sd-pinned-canvas-btn.is-on {
+  background: var(--mp-hover);
+  border-color: var(--mp-rule-strong);
+  color: var(--mp-text);
+}
+
+.sd-canvas-count {
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--mp-clay);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+body.studio .mpw-title-cluster {
+  min-width: 0;
+  gap: 6px;
+}
+
+body.studio .mpw-title {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.studio .mp-chat-project {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.studio .mpw-header-actions {
+  gap: 2px;
+}
+
+/* Slack / Raft Human-Agent Message & Structured 6-Field Decision Brief */
+.sd-slack-msg {
+  gap: 6px;
+}
+
+.sd-slack-msg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.sd-slack-author {
+  font-size: 13px;
+  font-weight: 580;
+  color: var(--mp-text);
+}
+
+.sd-slack-time {
+  font-size: 11.5px;
+  color: var(--mp-text-muted);
+}
+
+.sd-mention-chip {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--mp-focus) 12%, transparent);
+  color: var(--mp-focus);
+  font-weight: 520;
+}
+
+.sd-decision-box {
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  background: var(--mp-panel);
+  overflow: hidden;
+}
+
+.sd-decision-box-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--mp-rule);
+  background: var(--mp-panel-subtle);
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.sd-decision-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  padding: 11px 12px;
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.sd-decision-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sd-decision-cell.is-wide {
+  grid-column: 1 / -1;
+}
+
+.sd-decision-k {
+  font-size: 11px;
+  font-weight: 560;
+  color: var(--mp-text-muted);
+}
+
+.sd-decision-v {
+  color: var(--mp-text);
+}
+
+.sd-decision-v.is-strong {
+  font-weight: 560;
+}
+
+.sd-thread-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.sd-thread-trigger,
+.sd-thread-action-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  color: var(--mp-text-muted);
+  transition: background var(--mp-dur-fast), color var(--mp-dur-fast);
+}
+
+.sd-thread-trigger:hover,
+.sd-thread-action-link:hover {
+  background: var(--mp-hover);
+  color: var(--mp-text);
+}
+
+.sd-thread-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--mp-rule-strong);
+  border-radius: 0 8px 8px 0;
+  background: var(--mp-panel-subtle);
+}
+
+.sd-thread-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 17px;
+  flex-wrap: wrap;
+}
+
+/* Inspector Pane Shared Controls (explicit sans-serif, compact pill selects) */
 .sd-pane {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   padding: 14px 16px 24px;
   min-width: 0;
   color: var(--mp-text);
+  font-family: var(--mp-font-ui);
+}
+
+.sd-pane-fullboard {
+  height: 100%;
+  padding: 12px 14px 12px;
 }
 
 .sd-pane-head {
@@ -80,6 +376,7 @@ body.studio .mp-inspector {
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+  flex: none;
 }
 
 .sd-pane-title-group {
@@ -111,7 +408,6 @@ body.studio .mp-inspector {
   flex-wrap: wrap;
 }
 
-/* Monochrome ghost + subtle pill controls matching MP .mp-decision-button */
 .sd-btn {
   display: inline-flex;
   align-items: center;
@@ -123,6 +419,7 @@ body.studio .mp-inspector {
   border-radius: 6px;
   background: var(--mp-panel);
   color: var(--mp-text-secondary);
+  font-family: var(--mp-font-ui);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
@@ -158,10 +455,6 @@ body.studio .mp-inspector {
   color: var(--mp-page);
 }
 
-.sd-btn.is-ink:hover:not(:disabled) {
-  opacity: 0.88;
-}
-
 .sd-pill {
   display: inline-flex;
   align-items: center;
@@ -171,36 +464,11 @@ body.studio .mp-inspector {
   border-radius: 5px;
   background: var(--mp-panel-subtle);
   color: var(--mp-text-secondary);
+  font-family: var(--mp-font-ui);
   font-size: 11px;
   line-height: 15px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-}
-
-.sd-board-svg text,
-.sd-board-svg marker path,
-.sd-board-svg circle[fill] {
-  stroke: none;
-}
-
-.sd-starburst svg,
-svg[data-cds="Spark"] {
-  fill: currentColor;
-  stroke: none;
-}
-
-body.studio .mpw-workspace-tab {
-  min-width: 0;
-  max-width: none;
-}
-
-body.studio .mpw-workspace-tab-select {
-  padding: 0 9px;
-  font-size: 12px;
-}
-
-body.studio .mp-decision-card {
-  max-height: min(520px, 58dvh);
 }
 
 .sd-pill.is-success {
@@ -226,12 +494,24 @@ body.studio .mp-decision-card {
   border-radius: 6px;
   background: var(--mp-panel);
   color: var(--mp-text);
+  font-family: var(--mp-font-ui);
   font-size: 12px;
 }
 
-.sd-input:focus,
-.sd-select:focus {
-  border-color: var(--mp-rule-strong);
+/* Override MP .settings-select full min-width inside dense toolbars */
+.settings-select.sd-compact-select {
+  width: auto;
+  min-width: 112px;
+  height: 28px;
+  display: inline-flex;
+}
+
+.settings-select.sd-compact-select select {
+  height: 28px;
+  padding: 0 26px 0 9px;
+  font-family: var(--mp-font-ui);
+  font-size: 12px;
+  line-height: 26px;
 }
 
 .sd-card {
@@ -250,7 +530,7 @@ body.studio .mp-decision-card {
   border-bottom: 1px solid var(--mp-rule);
   background: var(--mp-panel-subtle);
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 560;
   color: var(--mp-text);
 }
 
@@ -258,12 +538,205 @@ body.studio .mp-decision-card {
   padding: 10px 12px;
 }
 
+/* Verify Tab — Clean Three-Power Strip & Horizontal Toolbar */
+.sd-power-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mp-rule);
+  flex-wrap: wrap;
+}
+
+.sd-power-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.sd-power-role {
+  color: var(--mp-text-muted);
+  font-size: 11px;
+  font-weight: 560;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.sd-verify-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  flex-wrap: wrap;
+  background: var(--mp-panel);
+}
+
+.sd-verify-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sd-verify-label {
+  font-size: 11.5px;
+  color: var(--mp-text-muted);
+}
+
+.sd-verify-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sd-verify-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.sd-step-num {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--mp-panel-subtle);
+  border: 1px solid var(--mp-rule);
+  color: var(--mp-text);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sd-verify-step strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+.sd-verify-step p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--mp-text-muted);
+}
+
+/* Excalidraw Whiteboard Container & Anchored Pin Overlay */
+.sd-excalidraw-host {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 460px;
+  height: 100%;
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--mp-page);
+}
+
+.sd-excalidraw-fallback {
+  padding: 24px;
+  text-align: center;
+  color: var(--mp-text-muted);
+}
+
+.sd-board-top-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.sd-pin-capture {
+  position: absolute;
+  inset: 52px 0 36px;
+  z-index: 12;
+  cursor: crosshair;
+  background: color-mix(in srgb, var(--mp-clay) 4%, transparent);
+}
+
+.sd-pin-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  pointer-events: none;
+}
+
+.sd-pin-anchor {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+}
+
+.sd-pin-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #ffffff;
+  background: var(--mp-clay);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+  cursor: pointer;
+}
+
+.sd-pin-badge.is-resolved {
+  background: var(--mp-git-added);
+}
+
+.sd-pin-badge.is-active {
+  transform: scale(1.12);
+}
+
+.sd-pin-popover {
+  position: absolute;
+  top: 26px;
+  left: -12px;
+  width: 260px;
+  padding: 10px 12px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  background: var(--mp-panel);
+  box-shadow: var(--mp-shadow-menu);
+  font-size: 12px;
+  color: var(--mp-text);
+  z-index: 25;
+}
+
+.sd-pin-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.sd-pin-popover-text {
+  margin: 0;
+  line-height: 17px;
+  color: var(--mp-text);
+}
+
+.sd-pin-popover-reply {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--mp-panel-subtle);
+  color: var(--mp-text-secondary);
+  font-size: 11.5px;
+}
+
 /* Task WBS row inside Inspector */
 .sd-wbs-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 9px 10px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--mp-rule);
   transition: background var(--mp-dur-fast);
 }
@@ -354,11 +827,10 @@ body.studio .mp-decision-card {
   user-select: none;
 }
 
-/* Prose / Spec reader typography matching MP learn study artifact */
 .sd-spec-doc {
-  font-family: var(--mp-font-serif);
-  font-size: 13.5px;
-  line-height: 1.72;
+  font-family: var(--mp-font-ui);
+  font-size: 13px;
+  line-height: 1.65;
   color: var(--mp-text);
 }
 
@@ -366,10 +838,10 @@ body.studio .mp-decision-card {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: var(--mp-font-serif);
+  font-family: var(--mp-font-mono);
 }
 
-/* Segmented pills (subtabs inside Board & Spec or Preview) */
+/* Segmented pills */
 .sd-subtabs {
   display: inline-flex;
   align-items: center;
@@ -384,6 +856,7 @@ body.studio .mp-decision-card {
   padding: 0 9px;
   border-radius: 5px;
   color: var(--mp-text-muted);
+  font-family: var(--mp-font-ui);
   font-size: 12px;
   font-weight: 500;
 }
@@ -394,7 +867,6 @@ body.studio .mp-decision-card {
   box-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.08);
 }
 
-/* Chat handoff line (clean inline disclosure style, never noisy box) */
 .sd-handoff-row {
   display: flex;
   align-items: center;
@@ -418,13 +890,14 @@ body.studio .mp-decision-card {
   flex: none;
 }
 
-/* Chat markdown light polish */
 .sd-msg-prose p {
   margin: 0 0 8px;
 }
+
 .sd-msg-prose p:last-child {
   margin-bottom: 0;
 }
+
 .sd-msg-prose code {
   padding: 1px 5px;
   border-radius: 4px;
@@ -434,13 +907,18 @@ body.studio .mp-decision-card {
   font-size: 12px;
 }
 
-/* Starburst SVG inline */
 .sd-starburst {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--mp-clay);
   flex: none;
+}
+
+.sd-starburst svg,
+svg[data-cds="Spark"] {
+  fill: currentColor;
+  stroke: none;
 }
 
 .sd-starburst.is-spinning svg {
@@ -453,7 +931,7 @@ body.studio .mp-decision-card {
   }
 }
 
-/* Library subviews inside center col when user clicks Projects / Tasks / Artifacts / Kernels / Customize */
+/* Library Subviews & Discourse-Style Triage View */
 .sd-library-page {
   flex: 1 1 auto;
   min-height: 0;
@@ -462,16 +940,16 @@ body.studio .mp-decision-card {
 }
 
 .sd-library-inner {
-  width: min(860px, 100%);
+  width: min(920px, 100%);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
 .sd-library-header {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 12px;
@@ -481,9 +959,160 @@ body.studio .mp-decision-card {
 .sd-library-header h1 {
   margin: 0;
   font-family: var(--mp-font-serif);
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 480;
-  line-height: 28px;
+  line-height: 30px;
+}
+
+.sd-triage-subtitle {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--mp-text-muted);
+}
+
+.sd-triage-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-triage-row {
+  cursor: pointer;
+  transition: background var(--mp-dur-fast);
+}
+
+.sd-triage-row:hover {
+  background: var(--mp-hover);
+}
+
+.sd-triage-row.is-selected {
+  background: var(--mp-selected);
+}
+
+.sd-triage-title {
+  font-size: 13.5px;
+  font-weight: 540;
+  color: var(--mp-text);
+  margin-bottom: 4px;
+}
+
+.sd-triage-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sd-triage-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--mp-text-secondary);
+}
+
+.sd-triage-cat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.sd-triage-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--mp-panel-subtle);
+  color: var(--mp-text-muted);
+  font-family: var(--mp-font-mono);
+  font-size: 11px;
+}
+
+.sd-triage-avatars {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Artifact Template Cards & Customize Connector Strip */
+.sd-artifact-template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.sd-template-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  background: var(--mp-panel);
+  text-align: left;
+  transition: background var(--mp-dur-fast), border-color var(--mp-dur-fast);
+}
+
+.sd-template-card:hover {
+  background: var(--mp-hover);
+  border-color: var(--mp-rule-strong);
+}
+
+.sd-template-preview {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--mp-panel-subtle);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mp-clay);
+}
+
+.sd-template-copy strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.sd-template-copy small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--mp-text-muted);
+}
+
+.sd-connector-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.sd-connector-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  background: var(--mp-panel);
+}
+
+.sd-connector-card > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.sd-connector-card strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 560;
+}
+
+.sd-connector-card small {
+  display: block;
+  font-size: 11px;
+  color: var(--mp-text-muted);
 }
 
 .sd-table {
@@ -494,7 +1123,7 @@ body.studio .mp-decision-card {
 
 .sd-table th,
 .sd-table td {
-  padding: 7px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--mp-rule);
   text-align: left;
   vertical-align: middle;

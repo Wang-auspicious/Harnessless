@@ -1,5 +1,14 @@
-import {useEffect, useRef, useState, type ReactElement} from 'react';
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import type {
+  ArtifactPin,
+  CollabFeedItem,
   GrillingCardPayload,
   KernelId,
   MasterChatMessage,
@@ -10,12 +19,17 @@ import type {
   TurnDiffSnapshot,
   WorkspaceTabId,
 } from '../../api/v4-types.ts';
+import {AgentBrandIcon} from './AgentAvatar.tsx';
 import {CdsIcon, StarburstMark} from './CdsIcon.tsx';
+import type {SettingsPageId} from './SettingsModal.tsx';
+import {CHANNELS, type ChannelId} from './StudioSidebar.tsx';
 import {kernelLabel} from './v4-labels.ts';
 
 export interface MasterChatPaneProps {
   readonly session: MasterSession | null;
   readonly messages: readonly MasterChatMessage[];
+  readonly collabFeed: readonly CollabFeedItem[];
+  readonly pins: readonly ArtifactPin[];
   readonly diffs: readonly TurnDiffSnapshot[];
   readonly kernels: readonly NativeKernelCard[];
   readonly sessionCount: number;
@@ -24,6 +38,12 @@ export interface MasterChatPaneProps {
   readonly pendingApprovalsCount: number;
   readonly inspectorOpen: boolean;
   readonly activeTab: WorkspaceTabId;
+  readonly activeChannel: ChannelId;
+  readonly theme: 'light' | 'dark';
+  readonly prefillMention: {
+    readonly kernelId: KernelId;
+    readonly nonce: number;
+  } | null;
   readonly busy: boolean;
   readonly errorText: string | null;
   readonly onDismissError: () => void;
@@ -31,6 +51,8 @@ export interface MasterChatPaneProps {
   readonly onOpenFolderPrompt: () => Promise<void>;
   readonly onToggleTab: (tab: WorkspaceTabId) => void;
   readonly onOpenTab: (tab: WorkspaceTabId) => void;
+  readonly onOpenSettings: (page?: SettingsPageId) => void;
+  readonly onFileInTriage: (title: string, kernel: KernelId) => void;
   readonly onSendTurn: (
     text: string,
     opts?: {
@@ -58,6 +80,7 @@ const KERNEL_OPTIONS: readonly {
   {id: 'claude-code', label: 'Claude Code', key: '@claude'},
   {id: 'codex', label: 'Codex CLI', key: '@codex'},
   {id: 'gemini-cli', label: 'Gemini CLI', key: '@gemini'},
+  {id: 'opencode', label: 'OpenCode', key: '@opencode'},
 ];
 
 const SLASH_COMMANDS: readonly {
@@ -106,13 +129,28 @@ function repoShortName(pathStr?: string): string {
   return parts[parts.length - 1] ?? 'Local';
 }
 
+function renderWithMentions(text: string): ReactNode {
+  const parts = text.split(
+    /(@(?:master|claude|codex|gemini|opencode|channel|[A-Za-z0-9_-]+))/gi,
+  );
+  return parts.map((part, idx) =>
+    part.startsWith('@') ? (
+      <span key={idx} className="sd-mention-chip">
+        {part}
+      </span>
+    ) : (
+      <Fragment key={idx}>{part}</Fragment>
+    ),
+  );
+}
+
 function renderMessageText(text: string): ReactElement {
   const paragraphs = text.split(/\n{2,}/).filter(p => p.trim().length > 0);
   return (
     <div className="mp-chat-markdown sd-msg-prose">
       {paragraphs.map((p, idx) => (
         <p key={idx} style={{whiteSpace: 'pre-wrap'}}>
-          {p}
+          {renderWithMentions(p)}
         </p>
       ))}
     </div>
@@ -371,6 +409,8 @@ function GrillingCard({
 export function MasterChatPane({
   session,
   messages,
+  collabFeed,
+  pins,
   diffs,
   kernels,
   sessionCount,
@@ -379,6 +419,9 @@ export function MasterChatPane({
   pendingApprovalsCount,
   inspectorOpen,
   activeTab,
+  activeChannel,
+  theme,
+  prefillMention,
   busy,
   errorText,
   onDismissError,
@@ -386,6 +429,8 @@ export function MasterChatPane({
   onOpenFolderPrompt,
   onToggleTab,
   onOpenTab,
+  onOpenSettings,
+  onFileInTriage,
   onSendTurn,
   onSubmitGrilling,
   onRerunQuantize,
@@ -395,6 +440,7 @@ export function MasterChatPane({
   const [targetKernel, setTargetKernel] = useState<KernelId>('master');
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState('');
+  const [mentionOpen, setMentionOpen] = useState(false);
   const [permMenuOpen, setPermMenuOpen] = useState(false);
   const [permPreset, setPermPreset] = useState<'Auto' | 'Plan' | 'Strict'>(
     'Auto',
@@ -403,10 +449,33 @@ export function MasterChatPane({
   const [prMenuOpen, setPrMenuOpen] = useState(false);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [worktreeEnabled, setWorktreeEnabled] = useState(true);
+  const [expandedThreads, setExpandedThreads] = useState<
+    Record<string, boolean>
+  >({});
+  const [threadReplies, setThreadReplies] = useState<Record<string, string>>(
+    {},
+  );
 
   const streamEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!prefillMention) {
+      return;
+    }
+    const opt = KERNEL_OPTIONS.find(k => k.id === prefillMention.kernelId);
+    const mentionTag = opt?.key ?? `@${prefillMention.kernelId}`;
+    setTargetKernel(prefillMention.kernelId);
+    setDraft(prev => {
+      if (prev.includes(mentionTag)) {
+        return prev;
+      }
+      return prev.trim() ? `${mentionTag} ${prev}` : `${mentionTag} `;
+    });
+    inputRef.current?.focus();
+  }, [prefillMention]);
 
   useEffect(() => {
     streamEndRef.current?.scrollIntoView({behavior: 'smooth', block: 'end'});
@@ -419,6 +488,7 @@ export function MasterChatPane({
         !composerRef.current.contains(e.target as Node)
       ) {
         setSlashOpen(false);
+        setMentionOpen(false);
         setPermMenuOpen(false);
         setModelMenuOpen(false);
         setPrMenuOpen(false);
@@ -438,6 +508,7 @@ export function MasterChatPane({
     }
     setDraft('');
     setSlashOpen(false);
+    setMentionOpen(false);
     const matchedCmd = SLASH_COMMANDS.find(c => trimmed === c.cmd);
     if (matchedCmd) {
       if (matchedCmd.action === 'demo') {
@@ -470,6 +541,12 @@ export function MasterChatPane({
   const hasMessages = Boolean(session && messages.length > 0);
   const executionMode = session?.executionMode ?? 'auto';
   const repoName = repoShortName(session?.workspacePath);
+  const openPinsCount = pins.filter(p => p.status !== 'resolved').length;
+  const channelMeta = CHANNELS.find(c => c.id === activeChannel) ?? {
+    id: 'general' as const,
+    name: 'general',
+    subtitle: '主控协同',
+  };
 
   const diffAdded = diffs.reduce(
     (sum, d) => sum + d.files.reduce((fs, f) => fs + f.added, 0),
@@ -512,6 +589,16 @@ export function MasterChatPane({
     {tab: 'dag', icon: 'GitBranch', label: 'DAG · 断点执行图'},
   ];
 
+  const insertMention = (kernelId: KernelId, tag: string): void => {
+    setTargetKernel(kernelId);
+    setMentionOpen(false);
+    setDraft(prev => {
+      const cleaned = prev.endsWith('@') ? prev.slice(0, -1) : prev;
+      return cleaned.trim() ? `${cleaned.trim()} ${tag} ` : `${tag} `;
+    });
+    inputRef.current?.focus();
+  };
+
   return (
     <section
       className="mpw-conversation"
@@ -523,13 +610,34 @@ export function MasterChatPane({
       <header className="mpw-header" ref={headerRef}>
         <div className="mpw-title-row">
           <div className="mpw-title-cluster">
-            <CdsIcon name="Laptop" size="small" />
+            {session?.mode === 'team' ? (
+              <span className="sd-header-channel-pill">
+                #{channelMeta.name}
+              </span>
+            ) : (
+              <CdsIcon name="Laptop" size="small" />
+            )}
             <b className="mpw-title" id="chat-title">
               {session?.title ?? 'New chat'}
             </b>
             <span className="mp-chat-project">
               <span>{repoName}</span>
             </span>
+
+            {session ? (
+              <button
+                type="button"
+                className={`sd-pinned-canvas-btn ${inspectorOpen && activeTab === 'board' ? 'is-on' : ''}`}
+                title="打开置顶频道白板 (Excalidraw Canvas × Spec IR)"
+                onClick={() => onOpenTab('board')}
+              >
+                <CdsIcon name="Pin" size="xs" />
+                <span>Canvas</span>
+                {openPinsCount > 0 ? (
+                  <span className="sd-canvas-count">{openPinsCount}</span>
+                ) : null}
+              </button>
+            ) : null}
           </div>
 
           <div className="mpw-header-actions">
@@ -592,6 +700,15 @@ export function MasterChatPane({
               }}
             >
               <span>打开并接入本地目录</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setThreadMenuOpen(false);
+                onOpenSettings('models');
+              }}
+            >
+              <span>配置原生内核与角色路由…</span>
             </button>
             {session ? (
               <>
@@ -693,7 +810,9 @@ export function MasterChatPane({
                   >
                     <span className="mp-home-state-dot" aria-hidden="true" />
                     <strong>一键跑通示例项目全流程</strong>
-                    <span>Spec IR → WBS → Worktree Diff → Ship HTML</span>
+                    <span>
+                      Excalidraw 白板 → Spec IR → Worktree Diff → Ship HTML
+                    </span>
                     <span className="mp-home-row-arrow" aria-hidden="true">
                       <CdsIcon name="ArrowRight" size="small" />
                     </span>
@@ -717,12 +836,13 @@ export function MasterChatPane({
                   <button
                     type="button"
                     className="mp-home-attention-row"
-                    onClick={() => onOpenTab('kernels')}
+                    onClick={() => onOpenSettings('models')}
                   >
-                    <CdsIcon name="CommandLinePrompt" size="small" />
-                    <strong>查看已挂载原生 Agent 内核 (Orca 架构)</strong>
+                    <CdsIcon name="Agent" size="small" />
+                    <strong>配置多内核原生 Agent 路由 (Orca 架构)</strong>
                     <span>
-                      {readyKernelsCount} 个可用内核 · Claude / Codex / Gemini
+                      {readyKernelsCount} 个可用内核 · Claude / Codex / Gemini /
+                      OpenCode
                     </span>
                     <span className="mp-home-row-arrow" aria-hidden="true">
                       <CdsIcon name="ArrowRight" size="small" />
@@ -765,23 +885,54 @@ export function MasterChatPane({
           <div className="mpw-blank" aria-hidden="true" />
           <div className="mp-chat-flow">
             {messages.map(msg => {
-              if (msg.role === 'human') {
-                return (
-                  <div key={msg.id} className="mp-chat-user">
-                    <div className="mp-chat-user-stack">
-                      <div className="mp-chat-bubble">{msg.content}</div>
-                    </div>
-                  </div>
-                );
-              }
-
               const msgTime = new Date(msg.createdAt).toLocaleTimeString([], {
                 hour: '2-digit',
                 minute: '2-digit',
               });
 
+              if (msg.role === 'human') {
+                return (
+                  <div key={msg.id} className="mp-chat-user">
+                    <div className="mp-chat-user-stack">
+                      <div className="mp-chat-bubble">
+                        {renderWithMentions(msg.content)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              const relatedReplies = collabFeed.filter(
+                c =>
+                  c.fromKernel === msg.agentKernel ||
+                  c.toKernel === msg.agentKernel,
+              );
+              const isThreadOpen = Boolean(expandedThreads[msg.id]);
+
               return (
-                <article key={msg.id} className="mp-chat-assistant">
+                <article
+                  key={msg.id}
+                  className="mp-chat-assistant sd-slack-msg"
+                >
+                  <div className="sd-slack-msg-head">
+                    <AgentBrandIcon
+                      kernelId={msg.agentKernel}
+                      theme={theme}
+                      size={20}
+                      framed
+                    />
+                    <strong className="sd-slack-author">
+                      {kernelLabel(msg.agentKernel)}
+                    </strong>
+                    <span className="sd-pill">
+                      {msg.agentKernel === 'master' ? 'ORCHESTRATOR' : 'AGENT'}
+                    </span>
+                    <span className="sd-slack-time">{msgTime}</span>
+                    {session?.mode === 'team' ? (
+                      <span className="sd-slack-time">#{channelMeta.name}</span>
+                    ) : null}
+                  </div>
+
                   <div className="mp-chat-assistant-body">
                     {msg.kind === 'trace_summary' &&
                     msg.traceItems &&
@@ -802,76 +953,51 @@ export function MasterChatPane({
                     ) : null}
 
                     {msg.kind === 'decision_card' && msg.decisionCard ? (
-                      <div className="sd-card">
-                        <div className="sd-card-head">
-                          <span>Master 决策卡 · 6 维结构化摘要</span>
+                      <div className="sd-decision-box">
+                        <div className="sd-decision-box-head">
+                          <span>结构化决策摘要 · Consensus Brief</span>
                           <span className="sd-pill is-clay">Decision</span>
                         </div>
-                        <div
-                          className="sd-card-body"
-                          style={{
-                            display: 'grid',
-                            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                            gap: 10,
-                            fontSize: 12.5,
-                          }}
-                        >
-                          <div style={{gridColumn: '1 / -1'}}>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: 'var(--mp-text-muted)',
-                              }}
-                            >
-                              Conclusion · 结论
-                            </div>
-                            <div style={{fontWeight: 550}}>
+                        <div className="sd-decision-grid">
+                          <div className="sd-decision-cell is-wide">
+                            <span className="sd-decision-k">Conclusion</span>
+                            <span className="sd-decision-v is-strong">
                               {msg.decisionCard.conclusion}
-                            </div>
+                            </span>
                           </div>
-                          <div>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: 'var(--mp-text-muted)',
-                              }}
-                            >
-                              Evidence · 依据
-                            </div>
-                            <div>{msg.decisionCard.evidence.join('；')}</div>
+                          <div className="sd-decision-cell">
+                            <span className="sd-decision-k">Evidence</span>
+                            <span className="sd-decision-v">
+                              {msg.decisionCard.evidence.join('；')}
+                            </span>
                           </div>
-                          <div>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: 'var(--mp-text-muted)',
-                              }}
-                            >
-                              Recommendation · 建议
-                            </div>
-                            <div>{msg.decisionCard.recommendation}</div>
+                          <div className="sd-decision-cell">
+                            <span className="sd-decision-k">
+                              Recommendation
+                            </span>
+                            <span className="sd-decision-v">
+                              {msg.decisionCard.recommendation}
+                            </span>
                           </div>
-                          <div>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: 'var(--mp-text-muted)',
-                              }}
-                            >
-                              Risk · 风险
-                            </div>
-                            <div>{msg.decisionCard.risk}</div>
+                          <div className="sd-decision-cell">
+                            <span className="sd-decision-k">Risk</span>
+                            <span className="sd-decision-v">
+                              {msg.decisionCard.risk}
+                            </span>
                           </div>
-                          <div>
-                            <div
-                              style={{
-                                fontSize: 11,
-                                color: 'var(--mp-text-muted)',
-                              }}
-                            >
-                              Decision Needed · 待决策
-                            </div>
-                            <div>{msg.decisionCard.decisionNeeded}</div>
+                          <div className="sd-decision-cell">
+                            <span className="sd-decision-k">
+                              Decision needed
+                            </span>
+                            <span className="sd-decision-v">
+                              {msg.decisionCard.decisionNeeded}
+                            </span>
+                          </div>
+                          <div className="sd-decision-cell is-wide">
+                            <span className="sd-decision-k">Action needed</span>
+                            <span className="sd-decision-v">
+                              {msg.decisionCard.actionNeeded || 'None.'}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -895,7 +1021,11 @@ export function MasterChatPane({
                           onOpenTab(resolveTab(msg.collabMeta?.targetTab))
                         }
                       >
-                        <CdsIcon name="ArrowSplitRight" size="xs" />
+                        <AgentBrandIcon
+                          kernelId={msg.collabMeta.fromKernel}
+                          theme={theme}
+                          size={15}
+                        />
                         <span>
                           <strong>
                             {kernelLabel(msg.collabMeta.fromKernel)}
@@ -939,21 +1069,105 @@ export function MasterChatPane({
                       </div>
                     ) : null}
 
-                    <div
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        marginTop: 2,
-                        fontSize: 11.5,
-                        color: 'var(--mp-text-muted)',
-                      }}
-                    >
-                      <StarburstMark size={13} />
-                      <span>
-                        {kernelLabel(msg.agentKernel)} · {msgTime}
-                      </span>
+                    {/* Slack-style thread summary & quick collaboration actions */}
+                    <div className="sd-thread-bar">
+                      <button
+                        type="button"
+                        className="sd-thread-trigger"
+                        onClick={() =>
+                          setExpandedThreads(prev => ({
+                            ...prev,
+                            [msg.id]: !prev[msg.id],
+                          }))
+                        }
+                      >
+                        <CdsIcon name="MessageSquare" size="xs" />
+                        <span>
+                          {relatedReplies.length > 0
+                            ? `${relatedReplies.length} 条内核线程回复`
+                            : '展开线程讨论'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="sd-thread-action-link"
+                        onClick={() => onOpenTab('board')}
+                      >
+                        关联白板
+                      </button>
+
+                      <button
+                        type="button"
+                        className="sd-thread-action-link"
+                        onClick={() =>
+                          onFileInTriage(
+                            msg.decisionCard?.conclusion ??
+                              msg.content.slice(0, 90),
+                            msg.agentKernel,
+                          )
+                        }
+                      >
+                        转入 Triage 追踪
+                      </button>
                     </div>
+
+                    {isThreadOpen ? (
+                      <div className="sd-thread-drawer">
+                        {relatedReplies.slice(0, 4).map(item => (
+                          <div key={item.id} className="sd-thread-item">
+                            <AgentBrandIcon
+                              kernelId={item.fromKernel}
+                              theme={theme}
+                              size={14}
+                            />
+                            <strong>{kernelLabel(item.fromKernel)}</strong>
+                            <span>→ @{kernelLabel(item.toKernel)}:</span>
+                            <span style={{color: 'var(--mp-text-secondary)'}}>
+                              {item.content}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="sd-toolbar-row" style={{marginTop: 6}}>
+                          <input
+                            type="text"
+                            className="sd-input"
+                            style={{flex: 1}}
+                            value={threadReplies[msg.id] ?? ''}
+                            onChange={e =>
+                              setThreadReplies(prev => ({
+                                ...prev,
+                                [msg.id]: e.target.value,
+                              }))
+                            }
+                            placeholder={`在线程中回复 @${kernelLabel(msg.agentKernel)}…`}
+                          />
+                          <button
+                            type="button"
+                            className="sd-btn is-primary"
+                            disabled={
+                              busy || !(threadReplies[msg.id] ?? '').trim()
+                            }
+                            onClick={() => {
+                              const reply = (
+                                threadReplies[msg.id] ?? ''
+                              ).trim();
+                              if (!reply) return;
+                              setThreadReplies(prev => ({
+                                ...prev,
+                                [msg.id]: '',
+                              }));
+                              void onSendTurn(reply, {
+                                targetKernel: msg.agentKernel,
+                                action: 'chat',
+                              });
+                            }}
+                          >
+                            回复线程
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </article>
               );
@@ -1097,7 +1311,7 @@ export function MasterChatPane({
               <button
                 type="button"
                 className="mp-composer-environment"
-                onClick={() => onOpenTab('kernels')}
+                onClick={() => onOpenSettings('models')}
               >
                 <CdsIcon name="Laptop" size="small" />
                 <span>Local</span>
@@ -1167,6 +1381,7 @@ export function MasterChatPane({
                     <div className="mpw-input-line">
                       <div className="mpw-grow">
                         <textarea
+                          ref={inputRef}
                           className="mpw-input"
                           rows={1}
                           maxLength={12000}
@@ -1178,6 +1393,10 @@ export function MasterChatPane({
                             if (val.startsWith('/')) {
                               setSlashOpen(true);
                               setSlashFilter(val);
+                              setMentionOpen(false);
+                            } else if (val.endsWith('@')) {
+                              setMentionOpen(true);
+                              setSlashOpen(false);
                             }
                           }}
                           onKeyDown={e => {
@@ -1186,7 +1405,7 @@ export function MasterChatPane({
                               void handleSubmit();
                             }
                           }}
-                          placeholder="Type / for commands"
+                          placeholder="输入需求、@ 召唤 Agent 协同或 / 执行指令…"
                           aria-label="Continue conversation"
                         />
                       </div>
@@ -1216,10 +1435,54 @@ export function MasterChatPane({
                         aria-label="Commands and workflow shortcuts"
                         title="工作流快捷指令 (/spec, /decompose, /execute, /ship)"
                         aria-expanded={slashOpen}
-                        onClick={() => setSlashOpen(prev => !prev)}
+                        onClick={() => {
+                          setMentionOpen(false);
+                          setSlashOpen(prev => !prev);
+                        }}
                       >
                         <CdsIcon name="Add" size="small" />
                       </button>
+
+                      <button
+                        type="button"
+                        className="mpw-add mp-composer-secondary"
+                        id="composer-mention"
+                        aria-label="Mention agent"
+                        title="@ 指定协同 Agent 内核"
+                        aria-expanded={mentionOpen}
+                        onClick={() => {
+                          setSlashOpen(false);
+                          setMentionOpen(prev => !prev);
+                        }}
+                      >
+                        <CdsIcon name="At" size="small" />
+                      </button>
+
+                      {mentionOpen ? (
+                        <div
+                          className="mpw-model-menu"
+                          role="listbox"
+                          aria-label="Mention agent"
+                          style={{bottom: 36, left: 28}}
+                        >
+                          {KERNEL_OPTIONS.map(k => (
+                            <button
+                              key={k.id}
+                              type="button"
+                              className="mpw-model-row"
+                              onClick={() => insertMention(k.id, k.key)}
+                            >
+                              <AgentBrandIcon
+                                kernelId={k.id}
+                                theme={theme}
+                                size={16}
+                              />
+                              <span className="mpw-model-name">{k.label}</span>
+                              <span className="mpw-model-key">{k.key}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
 
                       {slashOpen ? (
                         <div
@@ -1285,7 +1548,7 @@ export function MasterChatPane({
                         <div
                           className="mpw-perm-menu"
                           role="listbox"
-                          style={{bottom: 36, left: 32}}
+                          style={{bottom: 36, left: 68}}
                         >
                           {(['Auto', 'Plan', 'Strict'] as const).map(p => (
                             <button
@@ -1313,6 +1576,11 @@ export function MasterChatPane({
                         title="选择当前主对话 / @指定执行内核"
                         onClick={() => setModelMenuOpen(prev => !prev)}
                       >
+                        <AgentBrandIcon
+                          kernelId={targetKernel}
+                          theme={theme}
+                          size={14}
+                        />
                         <span className="mpw-perm-label">
                           {kernelLabel(targetKernel)}
                         </span>
@@ -1339,11 +1607,11 @@ export function MasterChatPane({
                                 setModelMenuOpen(false);
                               }}
                             >
-                              <span className="mpw-perm-check">
-                                {targetKernel === k.id ? (
-                                  <CdsIcon name="Check" size="small" />
-                                ) : null}
-                              </span>
+                              <AgentBrandIcon
+                                kernelId={k.id}
+                                theme={theme}
+                                size={15}
+                              />
                               <span className="mpw-model-name">{k.label}</span>
                               <span className="mpw-model-key">{k.key}</span>
                             </button>

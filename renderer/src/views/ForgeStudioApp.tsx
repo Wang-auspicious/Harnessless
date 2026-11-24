@@ -16,17 +16,30 @@ import type {
   NativeKernelCard,
   SessionExecutionMode,
   SessionMode,
+  ShipReviewFinding,
   TaskMutation,
   TaskNodeRole,
   V4SessionDetail,
   WorkspaceTabId,
 } from '../api/v4-types.ts';
 import {CdsIcon} from '../components/v4/CdsIcon.tsx';
+import {
+  FeedbackTriageView,
+  type TriageTopic,
+} from '../components/v4/FeedbackTriageView.tsx';
 import {LibraryViews} from '../components/v4/LibraryViews.tsx';
 import {MasterChatPane} from '../components/v4/MasterChatPane.tsx';
 import {RightWorkspacePane} from '../components/v4/RightWorkspacePane.tsx';
 import {
+  DEFAULT_PREFERENCES,
+  SettingsModal,
+  type SettingsPageId,
+  type StudioPreferences,
+} from '../components/v4/SettingsModal.tsx';
+import {
+  CHANNELS,
   StudioSidebar,
+  type ChannelId,
   type SidebarNavView,
 } from '../components/v4/StudioSidebar.tsx';
 import {TitleBar} from '../components/v4/TitleBar.tsx';
@@ -45,6 +58,44 @@ const DEFAULT_ROUTING: Record<TaskNodeRole, KernelId> = {
   steward: 'native-api',
 };
 
+const SEED_TRIAGE_TOPICS: readonly TriageTopic[] = [
+  {
+    id: 'triage-seed-1',
+    title: 'Worktree 并行执行完成前禁止 Reviewer 使用相同内核触发 Ship 自批',
+    category: 'verification',
+    status: 'open',
+    severity: 'critical',
+    author: 'claude-code',
+    participants: ['claude-code', 'codex', 'master'],
+    votes: 6,
+    tags: ['ship', 'anti-self-approval', 'http-409'],
+    body: '当编码内核为 Codex 时，Ship 审校门禁须自动锁定独立内核（Claude Code / Gemini CLI）执行跨内核复核，避免自写自审。',
+    createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+    replies: [
+      {
+        id: 'seed-r1',
+        author: 'master',
+        body: 'Enforced 模式已在后端 /api/v4/sessions/:id/ship 返回 HTTP 409 并前端提示三权隔离盾牌。',
+        createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      },
+    ],
+  },
+  {
+    id: 'triage-seed-2',
+    title: 'Excalidraw 白板模块拖拽后双向同步更新 Spec IR boundaryPseudocode',
+    category: 'architecture',
+    status: 'open',
+    severity: 'medium',
+    author: 'master',
+    participants: ['human', 'master'],
+    votes: 4,
+    tags: ['excalidraw', 'spec-ir', 'pin'],
+    body: '白板节点移动或插入评论 Pin 时，保持坐标锚点随缩放视图自动重算，并直接注入 Master Agent 决策队列。',
+    createdAt: new Date(Date.now() - 120 * 60 * 1000).toISOString(),
+    replies: [],
+  },
+];
+
 function readInitialTheme(): 'light' | 'dark' {
   try {
     const saved = window.localStorage.getItem('forgeops.v4.theme');
@@ -57,6 +108,33 @@ function readInitialTheme(): 'light' | 'dark' {
   return 'light';
 }
 
+function readPreferences(): StudioPreferences {
+  try {
+    const raw = window.localStorage.getItem('forgeops.v4.prefs');
+    if (raw) {
+      return {...DEFAULT_PREFERENCES, ...(JSON.parse(raw) as object)};
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+  return DEFAULT_PREFERENCES;
+}
+
+function readTriageTopics(): readonly TriageTopic[] {
+  try {
+    const raw = window.localStorage.getItem('forgeops.v4.triage.topics');
+    if (raw) {
+      const parsed = JSON.parse(raw) as TriageTopic[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+  return SEED_TRIAGE_TOPICS;
+}
+
 interface NavHistoryEntry {
   readonly nav: SidebarNavView;
   readonly sessionId: string | null;
@@ -66,11 +144,22 @@ export function ForgeStudioApp({
   onSwitchToLegacy,
 }: ForgeStudioAppProps): ReactElement {
   const [theme, setTheme] = useState<'light' | 'dark'>(readInitialTheme);
+  const [preferences, setPreferences] =
+    useState<StudioPreferences>(readPreferences);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState<SidebarNavView>('chat');
+  const [activeChannel, setActiveChannel] = useState<ChannelId>('general');
+  const [prefillMention, setPrefillMention] = useState<{
+    readonly kernelId: KernelId;
+    readonly nonce: number;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [preferredMode, setPreferredMode] = useState<SessionMode>('solo');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<SettingsPageId>('general');
+  const [preferredMode, setPreferredMode] = useState<SessionMode>(
+    preferences.defaultMode,
+  );
   const [catchupOnly, setCatchupOnly] = useState(false);
 
   const [sessions, setSessions] = useState<readonly MasterSession[]>([]);
@@ -81,10 +170,12 @@ export function ForgeStudioApp({
     useState<Record<TaskNodeRole, KernelId>>(DEFAULT_ROUTING);
   const [hostedApps, setHostedApps] = useState<readonly HostedAppCard[]>([]);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
+  const [triageTopics, setTriageTopics] =
+    useState<readonly TriageTopic[]>(readTriageTopics);
 
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('tasks');
-  const [rightWidthPx, setRightWidthPx] = useState(520);
+  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('board');
+  const [rightWidthPx, setRightWidthPx] = useState(560);
   const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
 
   const [navHistory, setNavHistory] = useState<readonly NavHistoryEntry[]>([
@@ -104,7 +195,6 @@ export function ForgeStudioApp({
   } | null>(null);
   const smokeHandledRef = useRef(false);
 
-  // Ensure body.studio and theme tokens stay synchronized cleanly
   useEffect(() => {
     document.body.classList.add('studio');
     return () => {
@@ -119,6 +209,18 @@ export function ForgeStudioApp({
     document.body.toggleAttribute('data-ds-dark-theme', theme === 'dark');
     void window.forgeops?.setWindowTheme?.(theme);
   }, [theme]);
+
+  const persistTopics = (next: readonly TriageTopic[]): void => {
+    setTriageTopics(next);
+    try {
+      window.localStorage.setItem(
+        'forgeops.v4.triage.topics',
+        JSON.stringify(next),
+      );
+    } catch {
+      // Ignore quota errors.
+    }
+  };
 
   const pushHistory = useCallback(
     (entry: NavHistoryEntry) => {
@@ -177,33 +279,65 @@ export function ForgeStudioApp({
     void loadBootstrap();
   }, [loadBootstrap]);
 
-  // Smoke verification hashes for clean Electron Home & Split Workspace screenshots
+  // Smoke verification hashes for clean Electron multi-screen visual audit
   useEffect(() => {
     if (smokeHandledRef.current) {
       return;
     }
     const hash = window.location.hash;
+    if (!hash.startsWith('#smoke-')) {
+      return;
+    }
+    smokeHandledRef.current = true;
+    setPreferredMode('team');
+
     if (hash === '#smoke-home') {
-      smokeHandledRef.current = true;
       setActiveNav('chat');
       setActiveSessionId(null);
       setDetail(null);
       setInspectorOpen(false);
-    } else if (hash === '#smoke-workspace') {
-      smokeHandledRef.current = true;
+    } else if (hash === '#smoke-settings') {
       setActiveNav('chat');
-      setInspectorOpen(true);
-      setActiveTab('board');
+      setSettingsPage('models');
+      setSettingsOpen(true);
+    } else if (hash === '#smoke-triage') {
+      setActiveNav('triage');
+      setInspectorOpen(false);
       void v4Api
-        .demoRun({mode: 'solo'})
+        .demoRun({mode: 'team'})
         .then(next => {
           setDetail(next);
           setActiveSessionId(next.session.id);
           void loadBootstrap();
         })
-        .catch(() => {
-          // Non-fatal fallback if already initialized
-        });
+        .catch(() => {});
+    } else if (hash === '#smoke-verify') {
+      setActiveNav('chat');
+      setInspectorOpen(true);
+      setActiveTab('verify');
+      setRightWidthPx(640);
+      void v4Api
+        .demoRun({mode: 'team'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          void loadBootstrap();
+        })
+        .catch(() => {});
+    } else if (hash === '#smoke-board' || hash === '#smoke-workspace') {
+      setActiveNav('chat');
+      setActiveChannel('architecture');
+      setInspectorOpen(true);
+      setActiveTab('board');
+      setRightWidthPx(660);
+      void v4Api
+        .demoRun({mode: 'team'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          void loadBootstrap();
+        })
+        .catch(() => {});
     }
   }, [loadBootstrap]);
 
@@ -234,7 +368,13 @@ export function ForgeStudioApp({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'k') {
+      if (mod && e.key === ',') {
+        e.preventDefault();
+        setSettingsOpen(prev => !prev);
+      } else if (mod && e.key === '\\') {
+        e.preventDefault();
+        setInspectorOpen(prev => !prev);
+      } else if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setSearchOpen(prev => !prev);
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') {
@@ -249,13 +389,14 @@ export function ForgeStudioApp({
         setActiveSessionId(null);
         setDetail(null);
         setInspectorOpen(false);
-      } else if (e.key === 'Escape' && searchOpen) {
-        setSearchOpen(false);
+      } else if (e.key === 'Escape') {
+        if (searchOpen) setSearchOpen(false);
+        if (settingsOpen) setSettingsOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [searchOpen]);
+  }, [searchOpen, settingsOpen]);
 
   useEffect(() => {
     if (!isDraggingSplitter) {
@@ -268,7 +409,7 @@ export function ForgeStudioApp({
       }
       const delta = start.x - e.clientX;
       const maxW = Math.max(360, Math.round(window.innerWidth * 0.72));
-      const clamped = Math.min(maxW, Math.max(300, start.width + delta));
+      const clamped = Math.min(maxW, Math.max(320, start.width + delta));
       setRightWidthPx(clamped);
     };
     const onUp = (): void => {
@@ -283,16 +424,34 @@ export function ForgeStudioApp({
     };
   }, [isDraggingSplitter]);
 
+  const changeTheme = (next: 'light' | 'dark'): void => {
+    setTheme(next);
+    try {
+      window.localStorage.setItem('forgeops.v4.theme', next);
+    } catch {
+      // Ignore storage errors.
+    }
+  };
+
   const toggleTheme = (): void => {
-    setTheme(prev => {
-      const next = prev === 'light' ? 'dark' : 'light';
+    changeTheme(theme === 'light' ? 'dark' : 'light');
+  };
+
+  const updatePreferences = (patch: Partial<StudioPreferences>): void => {
+    setPreferences(prev => {
+      const next = {...prev, ...patch};
       try {
-        window.localStorage.setItem('forgeops.v4.theme', next);
+        window.localStorage.setItem('forgeops.v4.prefs', JSON.stringify(next));
       } catch {
         // Ignore storage errors.
       }
       return next;
     });
+  };
+
+  const openSettings = (page: SettingsPageId = 'general'): void => {
+    setSettingsPage(page);
+    setSettingsOpen(true);
   };
 
   const withBusy = async (fn: () => Promise<void>): Promise<void> => {
@@ -331,6 +490,64 @@ export function ForgeStudioApp({
       setActiveTab(tab);
       setInspectorOpen(true);
     }
+  };
+
+  const handleSelectChannel = (ch: ChannelId): void => {
+    setActiveChannel(ch);
+    setActiveNav('chat');
+    const meta = CHANNELS.find(c => c.id === ch);
+    if (meta?.defaultTab && detail) {
+      setActiveTab(meta.defaultTab);
+      setInspectorOpen(true);
+    }
+  };
+
+  const handleMentionAgent = (kernelId: KernelId): void => {
+    setActiveNav('chat');
+    setPrefillMention({kernelId, nonce: Date.now()});
+  };
+
+  const handleFileInTriage = (title: string, kernel: KernelId): void => {
+    const newTopic: TriageTopic = {
+      id: `triage-${Date.now()}`,
+      title: title.slice(0, 96),
+      category: 'architecture',
+      status: 'open',
+      severity: 'medium',
+      author: kernel,
+      participants: ['human', kernel],
+      votes: 1,
+      tags: ['from-chat', kernel],
+      body: title,
+      createdAt: new Date().toISOString(),
+      replies: [],
+    };
+    persistTopics([newTopic, ...triageTopics]);
+    setActiveNav('triage');
+  };
+
+  const handleSendFindingToTriage = (finding: ShipReviewFinding): void => {
+    const newTopic: TriageTopic = {
+      id: `triage-finding-${finding.id}-${Date.now()}`,
+      title: `[Ship ${finding.severity.toUpperCase()}] ${finding.filePath} — ${finding.summary}`,
+      category: finding.category === 'security' ? 'bug' : 'verification',
+      status: finding.fixedBySteward ? 'resolved' : 'open',
+      severity:
+        finding.severity === 'blocker'
+          ? 'critical'
+          : finding.severity === 'warn'
+            ? 'high'
+            : 'medium',
+      author: 'claude-code',
+      participants: ['claude-code', 'master'],
+      votes: finding.severity === 'blocker' ? 4 : 2,
+      tags: ['ship-finding', finding.category],
+      body: `来源：Claude Ship 独立审校\n文件：${finding.filePath}\n摘要：${finding.summary}`,
+      createdAt: new Date().toISOString(),
+      replies: [],
+    };
+    persistTopics([newTopic, ...triageTopics]);
+    setActiveNav('triage');
   };
 
   const handleDemoRun = async (): Promise<void> => {
@@ -531,13 +748,20 @@ export function ForgeStudioApp({
     if (!detail) {
       return;
     }
-    await withBusy(async () => {
+    try {
       await v4Api.saveBoard(detail.session.id, {
         board: nextBoard,
         expectedRevision: detail.board.revision,
       });
       await loadSessionDetail(detail.session.id);
-    });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes('revision mismatch')) {
+        await loadSessionDetail(detail.session.id);
+        return;
+      }
+      setErrorText(msg);
+    }
   };
 
   const handleCreatePin = async (input: {
@@ -739,6 +963,9 @@ export function ForgeStudioApp({
 
   const tasks = detail?.activePlan?.tasks ?? [];
   const completedTasks = tasks.filter(t => t.status === 'completed').length;
+  const openTriageCount =
+    triageTopics.filter(t => t.status !== 'resolved').length +
+    (detail?.pins.filter(p => p.status !== 'resolved').length ?? 0);
 
   const qLower = searchQuery.trim().toLowerCase();
   const matchedSessions = sessions.filter(
@@ -780,6 +1007,7 @@ export function ForgeStudioApp({
         onToggleInspector={() => setInspectorOpen(prev => !prev)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        onOpenSettings={() => openSettings('general')}
         onSwitchToLegacy={onSwitchToLegacy}
         hasNativeOverlay={Boolean(window.forgeops?.hasNativeTitlebarOverlay)}
       />
@@ -789,6 +1017,9 @@ export function ForgeStudioApp({
         onChangeMode={m => void handleModeChange(m)}
         activeNav={activeNav}
         onSelectNav={handleSelectNav}
+        activeChannel={activeChannel}
+        onSelectChannel={handleSelectChannel}
+        onMentionAgent={handleMentionAgent}
         sessions={sessions}
         activeSessionId={activeSessionId}
         onSelectSession={handleSelectSession}
@@ -797,11 +1028,13 @@ export function ForgeStudioApp({
         catchupOnly={catchupOnly}
         onToggleCatchup={() => setCatchupOnly(prev => !prev)}
         pendingApprovalsCount={pendingApprovalsCount}
+        openTriageCount={openTriageCount}
         kernels={kernels}
         hostedApps={hostedApps}
         searchQuery={searchQuery}
         theme={theme}
         onToggleTheme={toggleTheme}
+        onOpenSettings={openSettings}
         onSwitchToLegacy={onSwitchToLegacy}
         onDemoRun={handleDemoRun}
         busy={busy}
@@ -812,6 +1045,8 @@ export function ForgeStudioApp({
           <MasterChatPane
             session={detail?.session ?? null}
             messages={detail?.messages ?? []}
+            collabFeed={detail?.collabFeed ?? []}
+            pins={detail?.pins ?? []}
             diffs={detail?.diffs ?? []}
             kernels={kernels}
             sessionCount={sessions.length}
@@ -820,6 +1055,9 @@ export function ForgeStudioApp({
             pendingApprovalsCount={pendingApprovalsCount}
             inspectorOpen={inspectorOpen}
             activeTab={activeTab}
+            activeChannel={activeChannel}
+            theme={theme}
+            prefillMention={prefillMention}
             busy={busy}
             errorText={errorText}
             onDismissError={() => setErrorText(null)}
@@ -827,10 +1065,83 @@ export function ForgeStudioApp({
             onOpenFolderPrompt={handleOpenFolderPrompt}
             onToggleTab={toggleInspectorTab}
             onOpenTab={openInspectorTab}
+            onOpenSettings={openSettings}
+            onFileInTriage={handleFileInTriage}
             onSendTurn={handleSendTurn}
             onSubmitGrilling={handleSubmitGrilling}
             onRerunQuantize={handleRunQuantize}
             onToggleExecutionMode={handleToggleExecutionMode}
+          />
+        ) : activeNav === 'triage' ? (
+          <FeedbackTriageView
+            theme={theme}
+            customTopics={triageTopics}
+            onCreateTopic={input => {
+              const created: TriageTopic = {
+                id: `triage-${Date.now()}`,
+                title: input.title,
+                category: input.category,
+                status: 'open',
+                severity: input.severity,
+                author: 'human',
+                participants: ['human', 'master'],
+                votes: 1,
+                tags: input.tags,
+                body: input.body,
+                createdAt: new Date().toISOString(),
+                replies: [],
+              };
+              persistTopics([created, ...triageTopics]);
+            }}
+            onVoteTopic={id => {
+              persistTopics(
+                triageTopics.map(t =>
+                  t.id === id ? {...t, votes: t.votes + 1} : t,
+                ),
+              );
+            }}
+            onToggleResolved={id => {
+              persistTopics(
+                triageTopics.map(t =>
+                  t.id === id
+                    ? {
+                        ...t,
+                        status: t.status === 'resolved' ? 'open' : 'resolved',
+                      }
+                    : t,
+                ),
+              );
+            }}
+            onReplyTopic={(id, body) => {
+              persistTopics(
+                triageTopics.map(t =>
+                  t.id === id
+                    ? {
+                        ...t,
+                        replies: [
+                          ...t.replies,
+                          {
+                            id: `rep-${Date.now()}`,
+                            author: 'human',
+                            body,
+                            createdAt: new Date().toISOString(),
+                          },
+                        ],
+                      }
+                    : t,
+                ),
+              );
+            }}
+            onDispatchToMaster={topic => {
+              setActiveNav('chat');
+              void handleSendTurn(
+                `请排查 Triage 议题「${topic.title}」：\n${topic.body}`,
+                {targetKernel: 'master', action: 'chat'},
+              );
+            }}
+            pins={detail?.pins ?? []}
+            findings={detail?.latestShip?.findings ?? []}
+            collabFeed={detail?.collabFeed ?? []}
           />
         ) : (
           <LibraryViews
@@ -840,6 +1151,7 @@ export function ForgeStudioApp({
             kernels={kernels}
             roleRouting={roleRouting}
             hostedApps={hostedApps}
+            theme={theme}
             busy={busy}
             onBackToChat={tab => {
               setActiveNav('chat');
@@ -856,6 +1168,9 @@ export function ForgeStudioApp({
             onPostCollab={handlePostCollab}
             onControlApp={handleControlApp}
             onRetryTask={taskId => handleExecuteTasks({taskIds: [taskId]})}
+            onOpenSettings={openSettings}
+            onSwitchToLegacy={onSwitchToLegacy}
+            onReportFinding={handleSendFindingToTriage}
           />
         )}
       </main>
@@ -871,6 +1186,7 @@ export function ForgeStudioApp({
         detail={detail}
         kernels={kernels}
         roleRouting={roleRouting}
+        theme={theme}
         selfApprovalBlockedMsg={selfApprovalBlockedMsg}
         busy={busy}
         onDecompose={handleDecompose}
@@ -883,9 +1199,30 @@ export function ForgeStudioApp({
         onRunShip={handleRunShip}
         onApproveAndDeliver={handleApproveAndDeliver}
         onRejectAndPin={handleRejectAndPin}
+        onSendFindingToTriage={handleSendFindingToTriage}
         onProbeKernels={handleProbeKernels}
         onUpdateRouting={handleUpdateRouting}
         onPostCollab={handlePostCollab}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        activePage={settingsPage}
+        onChangePage={setSettingsPage}
+        onClose={() => setSettingsOpen(false)}
+        theme={theme}
+        onChangeTheme={changeTheme}
+        preferences={preferences}
+        onUpdatePreferences={updatePreferences}
+        kernels={kernels}
+        roleRouting={roleRouting}
+        onUpdateRouting={handleUpdateRouting}
+        onProbeKernels={handleProbeKernels}
+        sessions={sessions}
+        hostedApps={hostedApps}
+        onOpenFolder={handleOpenFolderPrompt}
+        onSwitchToLegacy={onSwitchToLegacy}
+        busy={busy}
       />
 
       {searchOpen ? (
@@ -945,7 +1282,7 @@ export function ForgeStudioApp({
                   className="mp-global-search-row"
                   onClick={() => {
                     setSearchOpen(false);
-                    openInspectorTab('kernels');
+                    openSettings('models');
                   }}
                 >
                   <span className="mp-global-search-kind">KRN</span>

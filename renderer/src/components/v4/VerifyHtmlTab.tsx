@@ -1,10 +1,17 @@
 import {useState, type ReactElement} from 'react';
-import type {KernelId, ShipReviewBundle} from '../../api/v4-types.ts';
+import type {
+  KernelId,
+  ShipReviewBundle,
+  ShipReviewFinding,
+} from '../../api/v4-types.ts';
+import {AgentBrandIcon} from './AgentAvatar.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
 import {ALL_KERNELS, kernelLabel} from './v4-labels.ts';
 
 export interface VerifyHtmlTabProps {
   readonly latestShip: ShipReviewBundle | null;
+  readonly coderKernel?: KernelId;
+  readonly theme: 'light' | 'dark';
   readonly selfApprovalBlockedMsg: string | null;
   readonly busy: boolean;
   readonly onRunShip: (opts: {
@@ -14,17 +21,23 @@ export interface VerifyHtmlTabProps {
   }) => Promise<void>;
   readonly onApproveAndDeliver: (reviewId: string) => Promise<void>;
   readonly onRejectAndPin: (reviewId: string, comment: string) => Promise<void>;
+  readonly onSendFindingToTriage?: (finding: ShipReviewFinding) => void;
 }
 
 export function VerifyHtmlTab({
   latestShip,
+  coderKernel = 'codex',
+  theme,
   selfApprovalBlockedMsg,
   busy,
   onRunShip,
   onApproveAndDeliver,
   onRejectAndPin,
+  onSendFindingToTriage,
 }: VerifyHtmlTabProps): ReactElement {
-  const [reviewerKernel, setReviewerKernel] = useState<KernelId>('claude-code');
+  const [reviewerKernel, setReviewerKernel] = useState<KernelId>(
+    coderKernel === 'claude-code' ? 'codex' : 'claude-code',
+  );
   const [reviewDepth, setReviewDepth] = useState<'fast' | 'standard' | 'deep'>(
     'standard',
   );
@@ -33,56 +46,100 @@ export function VerifyHtmlTab({
   );
   const [rejectNote, setRejectNote] = useState('');
 
+  const sameKernelConflict = reviewerKernel === coderKernel;
+
   return (
-    <div className="sd-pane">
+    <div className="sd-pane" data-testid="v4-verify-tab">
       <div className="sd-pane-head">
         <div className="sd-pane-title-group">
           <h3>Claude Ship 三权审校 &amp; Answer-in-HTML</h3>
           <p>
-            强制 Coder Kernel ≠ Reviewer Kernel
-            物理防自批，并生成沙箱化的富交互验收报告。
+            强制 Coder ≠ Reviewer 物理防自批，独立审校后生成沙箱化交互验收报告。
           </p>
         </div>
+      </div>
 
-        <div className="sd-toolbar-row">
-          <select
-            aria-label="独立审校内核"
-            className="sd-select"
-            value={reviewerKernel}
-            onChange={e => setReviewerKernel(e.target.value as KernelId)}
-          >
-            {ALL_KERNELS.map(k => (
-              <option key={k} value={k}>
-                Reviewer: {kernelLabel(k)}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="审校深度"
-            className="sd-select"
-            value={reviewDepth}
-            onChange={e =>
-              setReviewDepth(e.target.value as 'fast' | 'standard' | 'deep')
+      {/* Compact Three-Power Separation & Controls Bar */}
+      <div className="sd-card">
+        <div className="sd-power-strip">
+          <div className="sd-power-actor">
+            <span className="sd-power-role">Coder</span>
+            <AgentBrandIcon kernelId={coderKernel} theme={theme} size={16} />
+            <strong>{kernelLabel(coderKernel)}</strong>
+          </div>
+
+          <span
+            className={`sd-pill ${sameKernelConflict ? 'is-danger' : 'is-success'}`}
+            title={
+              sameKernelConflict
+                ? '同内核冲突 — Enforced 模式将拦截 (HTTP 409)'
+                : '三权独立校验满足 (Coder ≠ Reviewer)'
             }
           >
-            <option value="fast">Fast</option>
-            <option value="standard">Standard</option>
-            <option value="deep">Deep</option>
-          </select>
-          <select
-            aria-label="策略模式"
-            className="sd-select"
-            value={policyMode}
-            onChange={e =>
-              setPolicyMode(e.target.value as 'shadow' | 'enforced')
-            }
-          >
-            <option value="shadow">Shadow</option>
-            <option value="enforced">Enforced</option>
-          </select>
+            {sameKernelConflict ? '=' : '≠'}
+          </span>
+
+          <div className="sd-power-actor">
+            <span className="sd-power-role">Reviewer</span>
+            <AgentBrandIcon kernelId={reviewerKernel} theme={theme} size={16} />
+            <label className="settings-select sd-compact-select">
+              <select
+                aria-label="独立审校内核"
+                value={reviewerKernel}
+                onChange={e => setReviewerKernel(e.target.value as KernelId)}
+              >
+                {ALL_KERNELS.map(k => (
+                  <option key={k} value={k}>
+                    {kernelLabel(k)}
+                  </option>
+                ))}
+              </select>
+              <CdsIcon name="CaretDownSmall" size="xs" />
+            </label>
+          </div>
+        </div>
+
+        <div className="sd-verify-toolbar">
+          <div className="sd-verify-control-group">
+            <span className="sd-verify-label">深度</span>
+            <div className="sd-subtabs" role="group" aria-label="审校深度">
+              {(['fast', 'standard', 'deep'] as const).map(depth => (
+                <button
+                  key={depth}
+                  type="button"
+                  className={reviewDepth === depth ? 'is-on' : ''}
+                  onClick={() => setReviewDepth(depth)}
+                >
+                  {depth === 'fast'
+                    ? 'Fast'
+                    : depth === 'standard'
+                      ? 'Standard'
+                      : 'Deep'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="sd-verify-control-group">
+            <span className="sd-verify-label">策略</span>
+            <div className="sd-subtabs" role="group" aria-label="策略模式">
+              {(['enforced', 'shadow'] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={policyMode === mode ? 'is-on' : ''}
+                  onClick={() => setPolicyMode(mode)}
+                >
+                  {mode === 'enforced' ? 'Enforced' : 'Shadow'}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <button
             type="button"
             className="sd-btn is-primary"
+            style={{marginLeft: 'auto'}}
             disabled={busy}
             onClick={() =>
               void onRunShip({reviewDepth, reviewerKernel, policyMode})
@@ -127,10 +184,37 @@ export function VerifyHtmlTab({
       ) : null}
 
       {!latestShip ? (
-        <p className="mp-inspector-empty">
-          尚未运行 Ship
-          独立审校。请选择与编码者不同的审校内核并点击「发起独立审校」。
-        </p>
+        <div className="sd-card">
+          <div className="sd-card-head">
+            <span>Ship 独立审校流程说明</span>
+            <span className="sd-pill">Ready</span>
+          </div>
+          <div className="sd-card-body sd-verify-steps">
+            <div className="sd-verify-step">
+              <span className="sd-step-num">1</span>
+              <div>
+                <strong>防自批验证</strong>
+                <p>确认编码与审校来自不同原生 Agent 内核，杜绝盲目自批。</p>
+              </div>
+            </div>
+            <div className="sd-verify-step">
+              <span className="sd-step-num">2</span>
+              <div>
+                <strong>契约与并发扫描</strong>
+                <p>
+                  核对 Spec IR I/O 边界、权限域交集与 Git Worktree 变更摘要。
+                </p>
+              </div>
+            </div>
+            <div className="sd-verify-step">
+              <span className="sd-step-num">3</span>
+              <div>
+                <strong>Answer-in-HTML 报告</strong>
+                <p>生成可审计 HTML 沙箱报告；缺陷可一键转发至 Triage。</p>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           <div className="sd-card">
@@ -160,13 +244,37 @@ export function VerifyHtmlTab({
             </div>
             <div
               className="sd-card-body"
-              style={{fontSize: 12, color: 'var(--mp-text-secondary)'}}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+                fontSize: 12,
+                color: 'var(--mp-text-secondary)',
+              }}
             >
-              Coder:{' '}
-              {latestShip.coderKernels.map(kernelLabel).join(', ') || 'none'} →
-              Reviewer: {kernelLabel(latestShip.reviewerKernel)} · Policy:{' '}
-              {latestShip.policyMode.toUpperCase()} · WouldApprove:{' '}
-              {latestShip.wouldApprove ? 'YES' : 'NO'}
+              <span>Coder:</span>
+              {latestShip.coderKernels.map(ck => (
+                <span key={ck} className="sd-pill">
+                  <AgentBrandIcon kernelId={ck} theme={theme} size={13} />
+                  <span>{kernelLabel(ck)}</span>
+                </span>
+              ))}
+              <span>→ Reviewer:</span>
+              <span className="sd-pill is-clay">
+                <AgentBrandIcon
+                  kernelId={latestShip.reviewerKernel}
+                  theme={theme}
+                  size={13}
+                />
+                <span>{kernelLabel(latestShip.reviewerKernel)}</span>
+              </span>
+              <span className="sd-pill">
+                Policy: {latestShip.policyMode.toUpperCase()}
+              </span>
+              <span className="sd-pill">
+                WouldApprove: {latestShip.wouldApprove ? 'YES' : 'NO'}
+              </span>
             </div>
           </div>
 
@@ -235,7 +343,7 @@ export function VerifyHtmlTab({
                     <th>类别</th>
                     <th>文件</th>
                     <th>摘要</th>
-                    <th>Steward</th>
+                    <th>处理</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -258,7 +366,21 @@ export function VerifyHtmlTab({
                         </span>
                       </td>
                       <td>{f.summary}</td>
-                      <td>{f.fixedBySteward ? '已自动修复' : '待处理'}</td>
+                      <td>
+                        {onSendFindingToTriage ? (
+                          <button
+                            type="button"
+                            className="sd-btn"
+                            onClick={() => onSendFindingToTriage(f)}
+                          >
+                            转入 Triage
+                          </button>
+                        ) : (
+                          <span>
+                            {f.fixedBySteward ? '已自动修复' : '待处理'}
+                          </span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

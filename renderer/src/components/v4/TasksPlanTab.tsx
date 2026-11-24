@@ -6,11 +6,13 @@ import type {
   TaskMutation,
   TaskNodeRole,
 } from '../../api/v4-types.ts';
+import {AgentBrandIcon} from './AgentAvatar.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
 import {ALL_KERNELS, ROLE_LABELS, kernelLabel} from './v4-labels.ts';
 
 export interface TasksPlanTabProps {
   readonly plan: TaskDecompositionPlan | null;
+  readonly theme?: 'light' | 'dark';
   readonly busy: boolean;
   readonly onDecompose: (force?: boolean) => Promise<void>;
   readonly onMutate: (mutation: TaskMutation) => Promise<void>;
@@ -30,6 +32,7 @@ const ROLES: readonly TaskNodeRole[] = [
 
 export function TasksPlanTab({
   plan,
+  theme = 'light',
   busy,
   onDecompose,
   onMutate,
@@ -287,25 +290,32 @@ export function TasksPlanTab({
                         </div>
 
                         <div className="sd-toolbar-row">
-                          <select
-                            aria-label={`选择 ${task.title} 的原生内核`}
-                            className="sd-select"
-                            disabled={busy}
-                            value={task.assignedKernel}
-                            onChange={e =>
-                              void onMutate({
-                                op: 'reassign_kernel',
-                                taskId: task.id,
-                                assignedKernel: e.target.value as KernelId,
-                              })
-                            }
-                          >
-                            {ALL_KERNELS.map(k => (
-                              <option key={k} value={k}>
-                                {kernelLabel(k)}
-                              </option>
-                            ))}
-                          </select>
+                          <AgentBrandIcon
+                            kernelId={task.assignedKernel}
+                            theme={theme}
+                            size={15}
+                          />
+                          <label className="settings-select sd-compact-select">
+                            <select
+                              aria-label={`选择 ${task.title} 的原生内核`}
+                              disabled={busy}
+                              value={task.assignedKernel}
+                              onChange={e =>
+                                void onMutate({
+                                  op: 'reassign_kernel',
+                                  taskId: task.id,
+                                  assignedKernel: e.target.value as KernelId,
+                                })
+                              }
+                            >
+                              {ALL_KERNELS.map(k => (
+                                <option key={k} value={k}>
+                                  {kernelLabel(k)}
+                                </option>
+                              ))}
+                            </select>
+                            <CdsIcon name="CaretDownSmall" size="xs" />
+                          </label>
 
                           <button
                             type="button"

@@ -7,6 +7,7 @@ import type {
   BoardSceneDoc,
   KernelId,
   NativeKernelCard,
+  ShipReviewFinding,
   TaskMutation,
   TaskNodeRole,
   V4SessionDetail,
@@ -31,6 +32,7 @@ export interface RightWorkspacePaneProps {
   readonly detail: V4SessionDetail | null;
   readonly kernels: readonly NativeKernelCard[];
   readonly roleRouting: Record<TaskNodeRole, KernelId>;
+  readonly theme: 'light' | 'dark';
   readonly selfApprovalBlockedMsg: string | null;
   readonly busy: boolean;
   readonly onDecompose: (force?: boolean) => Promise<void>;
@@ -55,6 +57,7 @@ export interface RightWorkspacePaneProps {
   }) => Promise<void>;
   readonly onApproveAndDeliver: (reviewId: string) => Promise<void>;
   readonly onRejectAndPin: (reviewId: string, comment: string) => Promise<void>;
+  readonly onSendFindingToTriage?: (finding: ShipReviewFinding) => void;
   readonly onProbeKernels: () => Promise<void>;
   readonly onUpdateRouting: (
     patch: Partial<Record<TaskNodeRole, KernelId>>,
@@ -81,6 +84,7 @@ export function RightWorkspacePane({
   detail,
   kernels,
   roleRouting,
+  theme,
   selfApprovalBlockedMsg,
   busy,
   onDecompose,
@@ -93,6 +97,7 @@ export function RightWorkspacePane({
   onRunShip,
   onApproveAndDeliver,
   onRejectAndPin,
+  onSendFindingToTriage,
   onProbeKernels,
   onUpdateRouting,
   onPostCollab,
@@ -104,6 +109,9 @@ export function RightWorkspacePane({
   const readyKernelCount = kernels.filter(
     k => k.status === 'ready' || k.status === 'builtin',
   ).length;
+  const primaryCoderKernel =
+    detail?.activePlan?.tasks.find(t => t.role === 'coder')?.assignedKernel ??
+    roleRouting.coder;
 
   const tabs: readonly {
     readonly id: WorkspaceTabId;
@@ -151,7 +159,6 @@ export function RightWorkspacePane({
                 role="tab"
                 aria-selected={activeTab === t.id}
                 className="mpw-workspace-tab-select"
-                style={{paddingRight: t.badge !== undefined ? 10 : 10}}
                 onClick={() => onSelectTab(t.id)}
               >
                 <span>{t.label}</span>
@@ -185,6 +192,7 @@ export function RightWorkspacePane({
         {activeTab === 'tasks' ? (
           <TasksPlanTab
             plan={detail?.activePlan ?? null}
+            theme={theme}
             busy={busy}
             onDecompose={onDecompose}
             onMutate={onMutateTasks}
@@ -195,10 +203,12 @@ export function RightWorkspacePane({
         {activeTab === 'board' ? (
           detail ? (
             <BoardSpecTab
+              sessionId={detail.session.id}
               board={detail.board ?? EMPTY_BOARD}
               specIR={detail.specIR}
               quantization={detail.quantization}
               pins={detail.pins}
+              theme={theme}
               busy={busy}
               onSaveBoard={onSaveBoard}
               onCreatePin={input => onCreatePin(input)}
@@ -207,7 +217,8 @@ export function RightWorkspacePane({
             />
           ) : (
             <p className="mp-inspector-empty">
-              打开本地目录或运行示例项目后，可在此联动编辑架构白板与 Spec IR。
+              打开本地目录或运行示例项目后，可在此联动编辑 Excalidraw 白板与
+              Spec IR。
             </p>
           )
         ) : null}
@@ -234,11 +245,14 @@ export function RightWorkspacePane({
         {activeTab === 'verify' ? (
           <VerifyHtmlTab
             latestShip={detail?.latestShip ?? null}
+            coderKernel={primaryCoderKernel}
+            theme={theme}
             selfApprovalBlockedMsg={selfApprovalBlockedMsg}
             busy={busy}
             onRunShip={onRunShip}
             onApproveAndDeliver={onApproveAndDeliver}
             onRejectAndPin={onRejectAndPin}
+            onSendFindingToTriage={onSendFindingToTriage}
           />
         ) : null}
 
@@ -248,6 +262,7 @@ export function RightWorkspacePane({
             kernels={kernels}
             roleRouting={roleRouting}
             collabFeed={detail?.collabFeed ?? []}
+            theme={theme}
             busy={busy}
             onProbeKernels={onProbeKernels}
             onUpdateRouting={onUpdateRouting}

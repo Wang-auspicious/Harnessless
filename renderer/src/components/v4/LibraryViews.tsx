@@ -4,23 +4,27 @@ import type {
   KernelId,
   MasterSession,
   NativeKernelCard,
+  ShipReviewFinding,
   TaskNodeRole,
   V4SessionDetail,
   WorkspaceTabId,
 } from '../../api/v4-types.ts';
+import {AgentBrandIcon, AppBrandIcon} from './AgentAvatar.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
 import {DagCheckpointTab} from './DagCheckpointTab.tsx';
 import {MountedKernelsTab} from './MountedKernelsTab.tsx';
+import type {SettingsPageId} from './SettingsModal.tsx';
 import type {SidebarNavView} from './StudioSidebar.tsx';
-import {STAGE_META} from './v4-labels.ts';
+import {STAGE_META, kernelLabel} from './v4-labels.ts';
 
 export interface LibraryViewsProps {
-  readonly view: Exclude<SidebarNavView, 'chat'>;
+  readonly view: Exclude<SidebarNavView, 'chat' | 'triage'>;
   readonly detail: V4SessionDetail | null;
   readonly sessions: readonly MasterSession[];
   readonly kernels: readonly NativeKernelCard[];
   readonly roleRouting: Record<TaskNodeRole, KernelId>;
   readonly hostedApps: readonly HostedAppCard[];
+  readonly theme: 'light' | 'dark';
   readonly busy: boolean;
   readonly onBackToChat: (openInspectorTab?: WorkspaceTabId) => void;
   readonly onSelectSession: (sessionId: string) => void;
@@ -42,6 +46,9 @@ export interface LibraryViewsProps {
     action: 'start' | 'stop' | 'restart' | 'fork_v2',
   ) => Promise<void>;
   readonly onRetryTask: (taskId: string) => Promise<void>;
+  readonly onOpenSettings: (page?: SettingsPageId) => void;
+  readonly onSwitchToLegacy: () => void;
+  readonly onReportFinding?: (finding: ShipReviewFinding) => void;
 }
 
 export function LibraryViews({
@@ -51,6 +58,7 @@ export function LibraryViews({
   kernels,
   roleRouting,
   hostedApps,
+  theme,
   busy,
   onBackToChat,
   onSelectSession,
@@ -61,6 +69,7 @@ export function LibraryViews({
   onPostCollab,
   onControlApp,
   onRetryTask,
+  onOpenSettings,
 }: LibraryViewsProps): ReactElement {
   const [folderPath, setFolderPath] = useState('');
 
@@ -79,7 +88,12 @@ export function LibraryViews({
       <section className="sd-library-page" data-testid="v4-view-projects">
         <div className="sd-library-inner">
           <header className="sd-library-header">
-            <h1>Projects</h1>
+            <div>
+              <h1>Projects</h1>
+              <p className="sd-triage-subtitle">
+                多仓代码工程接入、Git Worktree 上下文与协同会话目录
+              </p>
+            </div>
             <div className="sd-toolbar-row">
               <button
                 type="button"
@@ -105,7 +119,12 @@ export function LibraryViews({
 
           <div className="sd-card">
             <div className="sd-card-head">
-              <span>直接输入本地工程目录</span>
+              <span>接入本地代码工程</span>
+              <div className="sd-toolbar-row">
+                <AppBrandIcon app="vscode" theme={theme} size={14} />
+                <AppBrandIcon app="cursor" theme={theme} size={14} />
+                <AppBrandIcon app="github" theme={theme} size={14} />
+              </div>
             </div>
             <div className="sd-card-body">
               <div className="sd-toolbar-row">
@@ -179,7 +198,12 @@ export function LibraryViews({
       <section className="sd-library-page" data-testid="v4-view-tasks">
         <div className="sd-library-inner">
           <header className="sd-library-header">
-            <h1>Tasks &amp; Checkpoints</h1>
+            <div>
+              <h1>Tasks &amp; Checkpoints</h1>
+              <p className="sd-triage-subtitle">
+                WBS 任务依赖 DAG 与断点恢复状态视图
+              </p>
+            </div>
             <button
               type="button"
               className="sd-btn"
@@ -203,14 +227,19 @@ export function LibraryViews({
       <section className="sd-library-page" data-testid="v4-view-artifacts">
         <div className="sd-library-inner">
           <header className="sd-library-header">
-            <h1>Artifacts &amp; Shipped Apps</h1>
+            <div>
+              <h1>Artifacts &amp; Shipped Apps</h1>
+              <p className="sd-triage-subtitle">
+                Excalidraw 架构白板、Spec IR 契约、Answer-in-HTML 与托管版本
+              </p>
+            </div>
             <div className="sd-toolbar-row">
               <button
                 type="button"
                 className="sd-btn"
                 onClick={() => onBackToChat('board')}
               >
-                白板与 Spec IR
+                Excalidraw 白板
               </button>
               <button
                 type="button"
@@ -221,6 +250,50 @@ export function LibraryViews({
               </button>
             </div>
           </header>
+
+          <div className="sd-artifact-template-grid">
+            <button
+              type="button"
+              className="sd-template-card"
+              onClick={() => onBackToChat('board')}
+            >
+              <div className="sd-template-preview">
+                <CdsIcon name="Palette" size="large" />
+              </div>
+              <div className="sd-template-copy">
+                <strong>Architecture Whiteboard</strong>
+                <small>手绘风节点连线 · Pin 批注联动 Spec IR</small>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              className="sd-template-card"
+              onClick={() => onBackToChat('verify')}
+            >
+              <div className="sd-template-preview">
+                <CdsIcon name="Verified" size="large" />
+              </div>
+              <div className="sd-template-copy">
+                <strong>Answer-in-HTML Report</strong>
+                <small>三权独立审校产物与沙箱验收预览</small>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              className="sd-template-card"
+              onClick={() => onBackToChat('code')}
+            >
+              <div className="sd-template-preview">
+                <CdsIcon name="ChangesPlusMinus" size="large" />
+              </div>
+              <div className="sd-template-copy">
+                <strong>Worktree Diff Snapshot</strong>
+                <small>行级增量 Diff 与 Tree SHA 审计</small>
+              </div>
+            </button>
+          </div>
 
           <div className="sd-card">
             <div className="sd-card-head">
@@ -235,7 +308,7 @@ export function LibraryViews({
                 <div key={app.id} className="sd-wbs-row">
                   <div className="sd-wbs-top">
                     <div className="sd-wbs-title">
-                      <CdsIcon name="Artifacts" size="small" />
+                      <AppBrandIcon app="antigravity" theme={theme} size={18} />
                       <span>
                         {app.name} · {app.versionTag}
                       </span>
@@ -290,25 +363,77 @@ export function LibraryViews({
     <section className="sd-library-page" data-testid={`v4-view-${view}`}>
       <div className="sd-library-inner">
         <header className="sd-library-header">
-          <h1>
-            {view === 'kernels'
-              ? 'Native Agent Kernels (Orca)'
-              : 'Customize & Role Routing'}
-          </h1>
-          <button
-            type="button"
-            className="sd-btn"
-            onClick={() => onBackToChat('kernels')}
-          >
-            在分屏中查看
-          </button>
+          <div>
+            <h1>
+              {view === 'kernels'
+                ? 'Native Agent Kernels'
+                : 'Customize & Integrations'}
+            </h1>
+            <p className="sd-triage-subtitle">
+              原生 AI 编码内核、工具连接器与 Orca 多角色协作路由
+            </p>
+          </div>
+          <div className="sd-toolbar-row">
+            <button
+              type="button"
+              className="sd-btn"
+              onClick={() => onOpenSettings('models')}
+            >
+              在浮层设置中编辑
+            </button>
+            <button
+              type="button"
+              className="sd-btn is-primary"
+              onClick={() => onBackToChat('kernels')}
+            >
+              在分屏中查看
+            </button>
+          </div>
         </header>
+
+        {view === 'customize' ? (
+          <div className="sd-connector-strip">
+            <div className="sd-connector-card">
+              <AppBrandIcon app="slack" theme={theme} size={20} />
+              <div>
+                <strong>Slack / Thread Sync</strong>
+                <small>#general · #architecture · @mentions</small>
+              </div>
+              <span className="sd-pill is-success">Built-in</span>
+            </div>
+            <div className="sd-connector-card">
+              <AppBrandIcon app="linear" theme={theme} size={20} />
+              <div>
+                <strong>Issue Triage &amp; Ship</strong>
+                <small>Pins + Ship Findings → Triage</small>
+              </div>
+              <span className="sd-pill is-success">Active</span>
+            </div>
+            <div className="sd-connector-card">
+              <AppBrandIcon app="figma" theme={theme} size={20} />
+              <div>
+                <strong>Excalidraw Canvas</strong>
+                <small>Sketchy Nodes ↔ Spec IR</small>
+              </div>
+              <span className="sd-pill is-success">Ready</span>
+            </div>
+            <div className="sd-connector-card">
+              <AgentBrandIcon kernelId="claude-code" theme={theme} size={20} />
+              <div>
+                <strong>{kernelLabel(roleRouting.reviewer)}</strong>
+                <small>Reviewer Policy: Enforced</small>
+              </div>
+              <span className="sd-pill is-clay">Reviewer</span>
+            </div>
+          </div>
+        ) : null}
 
         <MountedKernelsTab
           sessionId={detail?.session.id ?? null}
           kernels={kernels}
           roleRouting={roleRouting}
           collabFeed={detail?.collabFeed ?? []}
+          theme={theme}
           busy={busy}
           onProbeKernels={onProbeKernels}
           onUpdateRouting={onUpdateRouting}

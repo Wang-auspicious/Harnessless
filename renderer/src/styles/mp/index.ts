@@ -13,4 +13,5 @@ import './studio_libraries.css';
 import './project_workspace.css';
 import './sidebar_menus.css';
 import './right_workspace.css';
+import './model_connections.css';
 import './forgeops_bridge.css';

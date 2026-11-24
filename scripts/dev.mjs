@@ -1,4 +1,6 @@
 import {spawn} from 'node:child_process';
+import {cp, mkdir} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {resolve} from 'node:path';
 import process from 'node:process';
@@ -8,6 +10,19 @@ import {build as esbuild} from 'esbuild';
 const root = resolve(import.meta.dirname, '..');
 const require = createRequire(import.meta.url);
 const electronBin = require('electron');
+
+const excalidrawFontsSrc = resolve(
+  root,
+  'node_modules/@excalidraw/excalidraw/dist/prod/fonts',
+);
+const publicExcalidrawFonts = resolve(
+  root,
+  'renderer/public/excalidraw-assets/fonts',
+);
+if (existsSync(excalidrawFontsSrc) && !existsSync(publicExcalidrawFonts)) {
+  await mkdir(publicExcalidrawFonts, {recursive: true});
+  await cp(excalidrawFontsSrc, publicExcalidrawFonts, {recursive: true});
+}
 
 await esbuild({
   entryPoints: [resolve(root, 'src/electron/main.ts')],

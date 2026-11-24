@@ -16,6 +16,7 @@ export interface TitleBarProps {
   readonly onToggleInspector: () => void;
   readonly theme: 'light' | 'dark';
   readonly onToggleTheme: () => void;
+  readonly onOpenSettings: () => void;
   readonly onSwitchToLegacy: () => void;
   readonly hasNativeOverlay: boolean;
 }
@@ -35,6 +36,7 @@ export function TitleBar({
   onToggleInspector,
   theme,
   onToggleTheme,
+  onOpenSettings,
   onSwitchToLegacy,
   hasNativeOverlay,
 }: TitleBarProps): ReactElement {
@@ -185,6 +187,16 @@ export function TitleBar({
             >
               <span>{theme === 'light' ? '切换深色外观' : '切换浅色外观'}</span>
               <kbd />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenSettings();
+              }}
+            >
+              <span>打开设置 (Settings)</span>
+              <kbd>Ctrl+,</kbd>
             </button>
             <hr />
             <button
