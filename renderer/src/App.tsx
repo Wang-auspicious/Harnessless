@@ -47,6 +47,7 @@ import {
 import {AgentFactoryView} from './views/AgentFactoryView.tsx';
 import {ChangeDashboardView} from './views/ChangeDashboardView.tsx';
 import {ControlTaskView} from './views/ControlTaskView.tsx';
+import {ForgeStudioApp} from './views/ForgeStudioApp.tsx';
 import {InfraCenterView} from './views/InfraCenterView.tsx';
 import {MissionStudioView} from './views/MissionStudioView.tsx';
 import {RegistryView} from './views/RegistryView.tsx';
@@ -85,6 +86,41 @@ function readInitialLang(): UiLang {
 }
 
 export function App(): ReactElement {
+  const [expertMode, setExpertMode] = useState(false);
+
+  if (!expertMode) {
+    return <ForgeStudioApp onSwitchToLegacy={() => setExpertMode(true)} />;
+  }
+
+  return (
+    <div style={{position: 'relative', width: '100vw', height: '100vh'}}>
+      <button
+        type="button"
+        onClick={() => setExpertMode(false)}
+        style={{
+          position: 'fixed',
+          right: 16,
+          bottom: 16,
+          zIndex: 9999,
+          padding: '6px 12px',
+          borderRadius: 999,
+          border: '1px solid rgba(217, 119, 87, 0.45)',
+          background: '#D97757',
+          color: '#FFFFFF',
+          fontSize: 12,
+          fontWeight: 600,
+          boxShadow: '0 4px 14px rgba(0, 0, 0, 0.16)',
+          cursor: 'pointer',
+        }}
+      >
+        返回 SDLC-Studio v4
+      </button>
+      <LegacyForgeOpsApp />
+    </div>
+  );
+}
+
+function LegacyForgeOpsApp(): ReactElement {
   const [snapshot, setSnapshot] = useState<BootstrapSnapshot | null>(null);
   const [route, setRoute] = useState<NavRoute>('missions');
   const [prevRouteBeforeDash, setPrevRouteBeforeDash] =
