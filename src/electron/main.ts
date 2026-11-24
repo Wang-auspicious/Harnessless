@@ -36,6 +36,8 @@ let runtime: ForgeRuntime | null = null;
 let mainWindow: BrowserWindow | null = null;
 
 const isSmoke = process.env['FORGEOPS_SMOKE_EXIT'] === '1';
+const smokeScreenshotPath = process.env['FORGEOPS_SMOKE_SCREENSHOT'] ?? '';
+const showOnSmoke = process.env['FORGEOPS_SMOKE_SHOW'] === '1';
 
 function loadWindowBounds(boundsPath: string): PersistedWindowBounds {
   try {
@@ -181,6 +183,9 @@ function isTrustedSenderFrame(
     }
   }
   const baseFrameUrl = frameUrl.split('#')[0] ?? frameUrl;
+  if (process.platform === 'win32') {
+    return baseFrameUrl.toLowerCase() === allowedFileUrl.toLowerCase();
+  }
   return baseFrameUrl === allowedFileUrl;
 }
 
@@ -302,17 +307,17 @@ async function bootstrapDesktop(): Promise<void> {
     y: savedBounds.y,
     minWidth: 1180,
     minHeight: 720,
-    show: !isSmoke,
-    title: 'ForgeOps Console',
-    backgroundColor: '#f8fafc',
+    show: !isSmoke || showOnSmoke,
+    title: 'SDLC-Studio — ForgeOps Collaborative IDE',
+    backgroundColor: '#FFFFFF',
     autoHideMenuBar: true,
     ...(useWinOverlay
       ? {
           titleBarStyle: 'hidden',
           titleBarOverlay: {
-            color: '#ffffff',
-            symbolColor: '#334155',
-            height: 47,
+            color: '#FFFFFF',
+            symbolColor: '#3D3D3A',
+            height: 36,
           },
         }
       : {}),
@@ -352,7 +357,12 @@ async function bootstrapDesktop(): Promise<void> {
       } catch {
         // Fall through to prevent navigation.
       }
-    } else if ((targetUrl.split('#')[0] ?? targetUrl) === allowedFileUrl) {
+    } else if (
+      process.platform === 'win32'
+        ? (targetUrl.split('#')[0] ?? targetUrl).toLowerCase() ===
+          allowedFileUrl.toLowerCase()
+        : (targetUrl.split('#')[0] ?? targetUrl) === allowedFileUrl
+    ) {
       return;
     }
     ev.preventDefault();
@@ -381,13 +391,27 @@ async function bootstrapDesktop(): Promise<void> {
   }
 
   if (isSmoke) {
+    const smokeDelayMs = Math.max(
+      500,
+      Math.min(
+        15_000,
+        Number.parseInt(process.env['FORGEOPS_SMOKE_DELAY_MS'] ?? '2000', 10) ||
+          2000,
+      ),
+    );
     setTimeout(() => {
       void (async () => {
         try {
           const domText = (await mainWindow?.webContents.executeJavaScript(
             'document.body ? document.body.innerText : ""',
           )) as string;
-          const ok = domText.includes('ForgeOps');
+          if (smokeScreenshotPath && mainWindow) {
+            mkdirSync(dirname(smokeScreenshotPath), {recursive: true});
+            const image = await mainWindow.webContents.capturePage();
+            writeFileSync(smokeScreenshotPath, image.toPNG());
+          }
+          const ok =
+            domText.includes('SDLC-Studio') || domText.includes('ForgeOps');
           process.stdout.write(
             `FORGEOPS_ELECTRON_SMOKE_OK:${ok}:${domText.slice(0, 120).replace(/\s+/g, ' ')}\n`,
           );
@@ -400,7 +424,7 @@ async function bootstrapDesktop(): Promise<void> {
           app.quit();
         }
       })();
-    }, 1500);
+    }, smokeDelayMs);
   }
 }
 

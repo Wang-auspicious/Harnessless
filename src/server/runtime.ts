@@ -1,6 +1,14 @@
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {AgentAdapterHub, McpStationServer} from '../adapters/index.ts';
+import {
+  AgentAdapterHub,
+  CollabBus,
+  McpStationServer,
+  isValidAudienceScope,
+  probeNativeKernels,
+  type AudienceScope,
+  type CollabMessage,
+} from '../adapters/index.ts';
 import {
   CompletionCertifier,
   ContinuityEngine,
@@ -15,11 +23,62 @@ import {HindsightEngine} from '../memory/hindsight-engine.ts';
 import {HamaEngine} from '../requirements/hama-engine.ts';
 import {GitWorktreeManager, SandboxProcessRunner} from '../sandbox/index.ts';
 import type {ForgeSseEvent} from '../shared/api.ts';
-import type {NativeRuntimeBridge, V4SseEvent} from '../shared/v4-types.ts';
+import type {
+  CollabFeedItem,
+  KernelId,
+  NativeKernelCard,
+  NativeRuntimeBridge,
+  TaskNodeRole,
+  V4SseEvent,
+} from '../shared/v4-types.ts';
 import {ForgeStore} from '../store/database.ts';
 import {ForgeHttpServer} from './http-router.ts';
 import {EngineeringRoomsService} from './rooms-service.ts';
 import {HostSecretVault} from './secret-vault.ts';
+
+const VALID_KERNEL_IDS = new Set<string>([
+  'master',
+  'claude-code',
+  'codex',
+  'gemini-cli',
+  'opencode',
+  'pi',
+  'native-api',
+]);
+
+function asKernelId(raw: string | null | undefined): KernelId {
+  if (raw && VALID_KERNEL_IDS.has(raw)) {
+    return raw as KernelId;
+  }
+  return 'native-api';
+}
+
+function mapAdapterRoles(roles: readonly string[]): readonly TaskNodeRole[] {
+  const mapped = new Set<TaskNodeRole>();
+  for (const r of roles) {
+    if (r === 'lead') mapped.add('architect');
+    else if (r === 'worker') mapped.add('coder');
+    else if (r === 'evaluator') mapped.add('reviewer');
+    else if (r === 'infra_steward') mapped.add('steward');
+    else if (r === 'specialist') mapped.add('tester');
+  }
+  return mapped.size > 0 ? Array.from(mapped) : ['coder'];
+}
+
+function toCollabFeedItem(msg: CollabMessage): CollabFeedItem {
+  return {
+    id: msg.id,
+    sessionId: msg.missionId,
+    seq: msg.seq,
+    fromKernel: asKernelId(msg.fromKernel),
+    toKernel: msg.toAgent ? asKernelId(msg.toAgent) : 'all',
+    kind: msg.kind,
+    taskId: msg.taskId,
+    audienceScope: msg.audienceScope,
+    content: msg.summary,
+    createdAt: msg.createdAt,
+  };
+}
 
 export interface ForgeRuntimeOptions {
   readonly dataDir: string;
@@ -38,6 +97,7 @@ export class ForgeRuntime {
   readonly runner: SandboxProcessRunner;
   readonly worktrees: GitWorktreeManager;
   readonly mcpStation: McpStationServer;
+  readonly collabBus: CollabBus;
   readonly adapters: AgentAdapterHub;
   readonly hindsight: HindsightEngine;
   readonly hama: HamaEngine;
@@ -67,6 +127,7 @@ export class ForgeRuntime {
     this.vault = new HostSecretVault(join(this.dataDir, 'secrets.vault.json'));
     this.runner = new SandboxProcessRunner();
     this.worktrees = new GitWorktreeManager(this.runner);
+    this.collabBus = new CollabBus();
     this.mcpStation = new McpStationServer(this.store, this.worktrees);
     const maxSlots = Math.max(
       1,
@@ -161,6 +222,63 @@ export class ForgeRuntime {
       this.httpServer.broadcast(ev);
     };
 
+    const defaultBridge: NativeRuntimeBridge = {
+      probeKernels: async (): Promise<readonly NativeKernelCard[]> => {
+        const probed = await probeNativeKernels(
+          this.runner,
+          this.store.listAdapterProfiles(),
+        );
+        const now = new Date().toISOString();
+        return probed
+          .filter(k => VALID_KERNEL_IDS.has(k.id))
+          .map(k => ({
+            kernelId: asKernelId(k.id),
+            displayName: k.label,
+            command: k.command,
+            installed: k.available,
+            version: k.version,
+            binaryPath: k.resolvedPath,
+            defaultRoles: mapAdapterRoles(k.supportedRoles),
+            status:
+              k.transport === 'native-api'
+                ? 'builtin'
+                : k.available
+                  ? 'ready'
+                  : 'missing',
+            lastCheckedAt: now,
+          }));
+      },
+      postCollab: input => {
+        const audienceScope: AudienceScope = isValidAudienceScope(
+          input.audienceScope,
+        )
+          ? input.audienceScope
+          : 'team';
+        const posted = this.collabBus.post({
+          missionId: input.sessionId,
+          taskId: input.taskId ?? null,
+          fromAgent: input.fromKernel,
+          fromKernel: input.fromKernel,
+          toAgent: input.toKernel === 'all' ? null : input.toKernel,
+          kind: input.kind,
+          audienceScope,
+          allowedReaders: input.allowedReaders,
+          summary: input.content,
+        });
+        return toCollabFeedItem(posted);
+      },
+      queryCollab: input =>
+        this.collabBus
+          .query({
+            missionId: input.sessionId,
+            readerId: input.readerPrincipal,
+            limit: input.limit,
+          })
+          .map(toCollabFeedItem),
+      subscribeCollab: cb =>
+        this.collabBus.subscribe(msg => cb(toCollabFeedItem(msg))),
+    };
+
     this.master = new MasterAgentEngine({
       store: this.store,
       worktrees: this.worktrees,
@@ -169,7 +287,7 @@ export class ForgeRuntime {
       worktreesRoot: this.worktreesRoot,
       dataDir: this.dataDir,
       publish: publishV4,
-      collabBridge: options.collabBridge,
+      collabBridge: options.collabBridge ?? defaultBridge,
     });
     this.rooms = new EngineeringRoomsService({
       store: this.store,

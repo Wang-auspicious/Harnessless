@@ -426,9 +426,46 @@ export class MasterAgentEngine {
     }
   }
 
+  private getFastInitialKernels(): readonly NativeKernelCard[] {
+    const checkedAt = nowIso();
+    return BUILTIN_KERNEL_SPECS.map(spec => {
+      if (spec.builtin) {
+        return {
+          kernelId: spec.kernelId,
+          displayName: spec.displayName,
+          command: spec.command,
+          installed: true,
+          version: 'v4.0-builtin',
+          binaryPath: null,
+          defaultRoles: spec.defaultRoles,
+          status: 'builtin' as const,
+          lastCheckedAt: checkedAt,
+        };
+      }
+      const resolved = this.runner.resolveExecutable(spec.command);
+      return {
+        kernelId: spec.kernelId,
+        displayName: spec.displayName,
+        command: spec.command,
+        installed: Boolean(resolved),
+        version: null,
+        binaryPath: resolved,
+        defaultRoles: spec.defaultRoles,
+        status: resolved ? ('ready' as const) : ('missing' as const),
+        lastCheckedAt: checkedAt,
+      };
+    });
+  }
+
   async getBootstrap(): Promise<V4BootstrapPayload> {
     const sessions = this.store.v4.listSessions();
-    const kernels = this.cachedKernels ?? (await this.probeKernels());
+    let kernels: readonly NativeKernelCard[];
+    if (this.cachedKernels) {
+      kernels = this.cachedKernels;
+    } else {
+      kernels = this.getFastInitialKernels();
+      void this.probeKernels().catch(() => undefined);
+    }
     const hostedApps = this.store.v4.listHostedApps();
     let pendingApprovalsCount = 0;
     for (const s of sessions) {

@@ -172,7 +172,7 @@
   box-sizing: border-box;
 }
 
-.cds-studio-root button {
+:where(.cds-studio-root button) {
   font: inherit;
   color: inherit;
   background: transparent;
@@ -181,14 +181,14 @@
   cursor: pointer;
 }
 
-.cds-studio-root button:disabled {
+:where(.cds-studio-root button:disabled) {
   cursor: default;
   opacity: 0.45;
 }
 
-.cds-studio-root input,
-.cds-studio-root textarea,
-.cds-studio-root select {
+:where(.cds-studio-root input),
+:where(.cds-studio-root textarea),
+:where(.cds-studio-root select) {
   font: inherit;
   color: var(--cds-text);
 }
