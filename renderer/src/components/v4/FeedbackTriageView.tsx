@@ -56,11 +56,11 @@ const CATEGORY_META: Record<
   TriageCategory,
   {readonly label: string; readonly color: string}
 > = {
-  bug: {label: 'Bug Report', color: '#CD2054'},
-  'spec-gap': {label: 'Spec Gap', color: '#D97757'},
-  architecture: {label: 'Architecture', color: '#2566D0'},
-  verification: {label: 'Ship Verify', color: '#1E9E3C'},
-  ux: {label: 'Workflow UX', color: '#7C3AED'},
+  bug: {label: '缺陷反馈', color: '#CD2054'},
+  'spec-gap': {label: '需求缺口', color: '#5E5D59'},
+  architecture: {label: '架构讨论', color: '#2566D0'},
+  verification: {label: '独立审校', color: '#1E9E3C'},
+  ux: {label: '交互体验', color: '#7C3AED'},
 };
 
 function formatRelative(iso: string): string {
@@ -210,10 +210,9 @@ export function FeedbackTriageView({
       <div className="sd-library-inner">
         <header className="sd-library-header">
           <div>
-            <h1>Feedback &amp; Issue Triage</h1>
+            <h1>议题与缺陷追踪</h1>
             <p className="sd-triage-subtitle">
-              统一汇聚多 Agent 审校发现、白板 Pin 疑难与工程缺陷追踪 · Inspired
-              by Antigravity Triage Forum
+              统一汇聚多角色审校发现、画布与文档批注以及研发待办问题
             </p>
           </div>
           <div className="sd-toolbar-row">
@@ -223,7 +222,7 @@ export function FeedbackTriageView({
               onClick={() => setComposerOpen(prev => !prev)}
             >
               <CdsIcon name="Add" size="xs" />
-              <span>新建议题 New Topic</span>
+              <span>新建议题</span>
             </button>
           </div>
         </header>
@@ -315,7 +314,7 @@ export function FeedbackTriageView({
                   disabled={!draftTitle.trim()}
                   onClick={submitNewTopic}
                 >
-                  提交至 Triage 看板
+                  提交议题
                 </button>
               </div>
             </div>
@@ -484,9 +483,9 @@ export function FeedbackTriageView({
                       </td>
                       <td>
                         <span
-                          className={`sd-pill ${topic.status === 'resolved' ? 'is-success' : 'is-clay'}`}
+                          className={`sd-pill ${topic.status === 'resolved' ? 'is-success' : ''}`}
                         >
-                          {topic.status === 'resolved' ? 'Resolved' : 'Open'}
+                          {topic.status === 'resolved' ? '已解决' : '待处理'}
                         </span>
                       </td>
                       <td
@@ -524,7 +523,7 @@ export function FeedbackTriageView({
                   onClick={() => onDispatchToMaster(selectedTopic)}
                 >
                   <CdsIcon name="ArrowRight" size="xs" />
-                  <span>派发给 @Master 修复</span>
+                  <span>派发给研发团队处理</span>
                 </button>
                 {!selectedTopic.readonlySource ? (
                   <button

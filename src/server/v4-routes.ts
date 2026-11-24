@@ -6,6 +6,7 @@ import type {IncomingMessage, ServerResponse} from 'node:http';
 import type {MasterAgentEngine} from '../engines/master-agent.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {
+  AgentBindingKind,
   ArtifactPinStatus,
   ArtifactSurfaceType,
   BoardSceneDoc,
@@ -16,6 +17,9 @@ import type {
   KernelId,
   MasterExecutionMode,
   MasterSessionMode,
+  PostAttachment,
+  ProviderPresetKind,
+  RoutingStrategy,
   ShipReviewDepth,
   SpecIRContract,
   TaskMutation,
@@ -621,6 +625,454 @@ export async function handleV4Route(
       versionTag: optString(body, 'versionTag', '', 40) || undefined,
     });
     helpers.sendJson(res, 200, result);
+    return true;
+  }
+
+  // =========================================================================
+  // Magpie-Inspired Model Gateway, Providers, Routing, Profiles, Agents, Connectors
+  // =========================================================================
+  if (method === 'GET' && path === '/api/v4/gateway') {
+    helpers.sendJson(res, 200, master.gateway.getSnapshot());
+    return true;
+  }
+
+  if (method === 'GET' && path === '/api/v4/dashboard') {
+    helpers.sendJson(res, 200, master.collab.getDashboardSummary());
+    return true;
+  }
+
+  if (path === '/api/v4/providers') {
+    if (method === 'GET') {
+      helpers.sendJson(res, 200, {providers: master.gateway.listProviders()});
+      return true;
+    }
+    if (method === 'POST' || method === 'PUT') {
+      const body = asRecord(await helpers.readJsonBody(req));
+      const kind =
+        (optString(
+          body,
+          'kind',
+          'openai-compatible',
+          40,
+        ) as ProviderPresetKind) || 'openai-compatible';
+      const provider = master.gateway.upsertProvider({
+        id: optString(body, 'id', '', 80) || undefined,
+        name: reqString(body, 'name', 120),
+        kind,
+        baseUrl: reqString(body, 'baseUrl', 500),
+        newApiKey: optString(body, 'newApiKey', '', 500) || undefined,
+        newKeyLabel: optString(body, 'newKeyLabel', '', 80) || undefined,
+        apiKeys: Array.isArray(body['apiKeys'])
+          ? (body['apiKeys'] as never[])
+          : undefined,
+        models: Array.isArray(body['models'])
+          ? (body['models'] as never[])
+          : undefined,
+        enabled:
+          typeof body['enabled'] === 'boolean' ? body['enabled'] : undefined,
+        priority:
+          typeof body['priority'] === 'number' ? body['priority'] : undefined,
+      });
+      helpers.sendJson(res, 200, {
+        provider,
+        gateway: master.gateway.getSnapshot(),
+      });
+      return true;
+    }
+  }
+
+  const provTestMatch = /^\/api\/v4\/providers\/([^/]+)\/test$/.exec(path);
+  if (method === 'POST' && provTestMatch) {
+    const provider = await master.gateway.testProviderConnection(
+      decodeURIComponent(provTestMatch[1]!),
+    );
+    helpers.sendJson(res, 200, {
+      provider,
+      gateway: master.gateway.getSnapshot(),
+    });
+    return true;
+  }
+
+  const provItemMatch = /^\/api\/v4\/providers\/([^/]+)$/.exec(path);
+  if (method === 'DELETE' && provItemMatch) {
+    master.gateway.deleteProvider(decodeURIComponent(provItemMatch[1]!));
+    helpers.sendJson(res, 200, {gateway: master.gateway.getSnapshot()});
+    return true;
+  }
+
+  if (path === '/api/v4/routing-groups') {
+    if (method === 'GET') {
+      helpers.sendJson(res, 200, {
+        routingGroups: master.gateway.listRoutingGroups(),
+      });
+      return true;
+    }
+    if (method === 'POST' || method === 'PUT') {
+      const body = asRecord(await helpers.readJsonBody(req));
+      const strategy = optEnum(body, 'strategy', [
+        'order',
+        'rotate',
+        'context-tiered',
+      ] as const) as RoutingStrategy | undefined;
+      const group = master.gateway.upsertRoutingGroup({
+        id: optString(body, 'id', '', 80) || undefined,
+        name: reqString(body, 'name', 120),
+        strategy: strategy ?? 'order',
+        targets: Array.isArray(body['targets'])
+          ? (body['targets'] as never[])
+          : [],
+        failoverEnabled:
+          typeof body['failoverEnabled'] === 'boolean'
+            ? body['failoverEnabled']
+            : true,
+      });
+      helpers.sendJson(res, 200, {
+        group,
+        gateway: master.gateway.getSnapshot(),
+      });
+      return true;
+    }
+  }
+
+  const grpDeleteMatch = /^\/api\/v4\/routing-groups\/([^/]+)$/.exec(path);
+  if (method === 'DELETE' && grpDeleteMatch) {
+    master.gateway.deleteRoutingGroup(decodeURIComponent(grpDeleteMatch[1]!));
+    helpers.sendJson(res, 200, {gateway: master.gateway.getSnapshot()});
+    return true;
+  }
+
+  const profActivateMatch = /^\/api\/v4\/profiles\/([^/]+)\/activate$/.exec(
+    path,
+  );
+  if (method === 'POST' && profActivateMatch) {
+    const gateway = master.gateway.activateProfile(
+      decodeURIComponent(profActivateMatch[1]!),
+    );
+    helpers.sendJson(res, 200, {gateway});
+    return true;
+  }
+
+  if (method === 'GET' && path === '/api/v4/agents') {
+    helpers.sendJson(res, 200, {agents: master.gateway.listAgents()});
+    return true;
+  }
+
+  const agentMatch = /^\/api\/v4\/agents\/([^/]+)$/.exec(path);
+  if (method === 'PATCH' && agentMatch) {
+    const body = asRecord(await helpers.readJsonBody(req));
+    const bindingKind = optEnum(body, 'bindingKind', [
+      'provider_model',
+      'routing_group',
+      'cli_harness',
+    ] as const) as AgentBindingKind | undefined;
+    const harnessId = optEnum(body, 'harnessId', VALID_KERNELS);
+    const agent = master.gateway.updateAgentBinding(
+      decodeURIComponent(agentMatch[1]!),
+      {
+        displayName: optString(body, 'displayName', '', 80) || undefined,
+        bindingKind,
+        providerId:
+          body['providerId'] === null
+            ? null
+            : optString(body, 'providerId', '', 80) || undefined,
+        modelId:
+          body['modelId'] === null
+            ? null
+            : optString(body, 'modelId', '', 120) || undefined,
+        routingGroupId:
+          body['routingGroupId'] === null
+            ? null
+            : optString(body, 'routingGroupId', '', 80) || undefined,
+        harnessId: body['harnessId'] === null ? null : harnessId,
+        systemPrompt: optString(body, 'systemPrompt', '', 2000) || undefined,
+        enabled:
+          typeof body['enabled'] === 'boolean' ? body['enabled'] : undefined,
+      },
+    );
+    helpers.sendJson(res, 200, {
+      agent,
+      gateway: master.gateway.getSnapshot(),
+    });
+    return true;
+  }
+
+  const connectorMatch = /^\/api\/v4\/connectors\/([^/]+)$/.exec(path);
+  if (method === 'PUT' && connectorMatch) {
+    const body = asRecord(await helpers.readJsonBody(req));
+    const connector = master.gateway.updateConnector(
+      decodeURIComponent(connectorMatch[1]!),
+      {
+        enabled:
+          typeof body['enabled'] === 'boolean' ? body['enabled'] : undefined,
+        config:
+          body['config'] &&
+          typeof body['config'] === 'object' &&
+          !Array.isArray(body['config'])
+            ? (body['config'] as Record<string, string>)
+            : undefined,
+      },
+    );
+    helpers.sendJson(res, 200, {
+      connector,
+      gateway: master.gateway.getSnapshot(),
+    });
+    return true;
+  }
+
+  if (method === 'PUT' && path === '/api/v4/privacy-masking') {
+    const body = asRecord(await helpers.readJsonBody(req));
+    const privacyMasking = master.gateway.updatePrivacyMasking({
+      enabled:
+        typeof body['enabled'] === 'boolean' ? body['enabled'] : undefined,
+      maskSecrets:
+        typeof body['maskSecrets'] === 'boolean'
+          ? body['maskSecrets']
+          : undefined,
+      maskEmails:
+        typeof body['maskEmails'] === 'boolean'
+          ? body['maskEmails']
+          : undefined,
+    });
+    helpers.sendJson(res, 200, {
+      privacyMasking,
+      gateway: master.gateway.getSnapshot(),
+    });
+    return true;
+  }
+
+  // =========================================================================
+  // Vercel-Board Channels, Threads, Unread Queue, Schedules & Live Co-Edited PRD
+  // =========================================================================
+  const collabPostsMatch = /^\/api\/v4\/sessions\/([^/]+)\/collab\/posts$/.exec(
+    path,
+  );
+  if (collabPostsMatch) {
+    const sessionId = decodeURIComponent(collabPostsMatch[1]!);
+    if (method === 'GET') {
+      const channelId = url.searchParams.get('channelId') ?? undefined;
+      helpers.sendJson(res, 200, {
+        channels: master.collab.listChannels(sessionId),
+        posts: master.collab.listPosts(sessionId, channelId),
+      });
+      return true;
+    }
+    if (method === 'POST') {
+      const body = asRecord(await helpers.readJsonBody(req));
+      const resData = await master.collab.postToChannel(sessionId, {
+        channelId: optString(body, 'channelId', '', 120) || undefined,
+        content: optString(body, 'content', '', 8000),
+        parentPostId:
+          body['parentPostId'] === null
+            ? null
+            : optString(body, 'parentPostId', '', 120) || undefined,
+        authorName: optString(body, 'authorName', '', 80) || undefined,
+        attachments: Array.isArray(body['attachments'])
+          ? (body['attachments'] as readonly PostAttachment[])
+          : undefined,
+      });
+      helpers.sendJson(res, 201, {
+        ...resData,
+        detail: master.getSessionDetail(sessionId),
+      });
+      return true;
+    }
+  }
+
+  const postReactionMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/posts\/([^/]+)\/react$/.exec(path);
+  if (method === 'POST' && postReactionMatch) {
+    const sessionId = decodeURIComponent(postReactionMatch[1]!);
+    const postId = decodeURIComponent(postReactionMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const post = master.collab.toggleReaction(
+      sessionId,
+      postId,
+      reqString(body, 'emoji', 32),
+    );
+    helpers.sendJson(res, 200, {
+      post,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const postStatusMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/posts\/([^/]+)\/status$/.exec(path);
+  if (method === 'POST' && postStatusMatch) {
+    const sessionId = decodeURIComponent(postStatusMatch[1]!);
+    const postId = decodeURIComponent(postStatusMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const status = optEnum(body, 'status', ['open', 'resolved'] as const);
+    const post = master.collab.setThreadStatus(
+      sessionId,
+      postId,
+      status ?? 'resolved',
+    );
+    helpers.sendJson(res, 200, {
+      post,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const pollSelectMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/posts\/([^/]+)\/poll$/.exec(path);
+  if (method === 'POST' && pollSelectMatch) {
+    const sessionId = decodeURIComponent(pollSelectMatch[1]!);
+    const postId = decodeURIComponent(pollSelectMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const out = master.collab.selectPollOption(
+      sessionId,
+      postId,
+      reqString(body, 'attachmentId', 80),
+      reqString(body, 'optionId', 80),
+    );
+    helpers.sendJson(res, 200, {
+      ...out,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const mockupEditMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/posts\/([^/]+)\/mockup$/.exec(path);
+  if (method === 'PUT' && mockupEditMatch) {
+    const sessionId = decodeURIComponent(mockupEditMatch[1]!);
+    const postId = decodeURIComponent(mockupEditMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const post = master.collab.updateHtmlMockupAttachment(
+      sessionId,
+      postId,
+      reqString(body, 'attachmentId', 80),
+      reqString(body, 'htmlContent', 120_000),
+    );
+    helpers.sendJson(res, 200, {
+      post,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const unreadDrainMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/unread\/drain$/.exec(path);
+  if (method === 'POST' && unreadDrainMatch) {
+    const sessionId = decodeURIComponent(unreadDrainMatch[1]!);
+    const processed = await master.collab.drainUnreadQueue(sessionId);
+    helpers.sendJson(res, 200, {
+      processed,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const schListMatch = /^\/api\/v4\/sessions\/([^/]+)\/collab\/schedules$/.exec(
+    path,
+  );
+  if (schListMatch) {
+    const sessionId = decodeURIComponent(schListMatch[1]!);
+    if (method === 'GET') {
+      helpers.sendJson(res, 200, {
+        schedules: master.collab.listSchedules(sessionId),
+      });
+      return true;
+    }
+    if (method === 'POST') {
+      const body = asRecord(await helpers.readJsonBody(req));
+      const targetAgentId = optString(body, 'targetAgentId', 'agent-pm', 80);
+      const agent = master.gateway
+        .listAgents()
+        .find(a => a.id === targetAgentId || a.handle === targetAgentId);
+      const sch = master.collab.createSchedule({
+        sessionId,
+        channelId:
+          optString(body, 'channelId', '', 120) ||
+          `ch-${sessionId}-requirements`,
+        targetAgentId: agent?.id ?? targetAgentId,
+        targetAgentName: agent?.displayName ?? '需求分析官',
+        intervalLabel: reqString(body, 'intervalLabel', 40),
+        promptText: reqString(body, 'promptText', 500),
+      });
+      helpers.sendJson(res, 201, {
+        schedule: sch,
+        detail: master.getSessionDetail(sessionId),
+      });
+      return true;
+    }
+  }
+
+  const schRunMatch = /^\/api\/v4\/collab\/schedules\/([^/]+)\/run$/.exec(path);
+  if (method === 'POST' && schRunMatch) {
+    const schedule = await master.collab.runScheduleNow(
+      decodeURIComponent(schRunMatch[1]!),
+    );
+    helpers.sendJson(res, 200, {
+      schedule,
+      dashboard: master.collab.getDashboardSummary(),
+    });
+    return true;
+  }
+
+  const schDelMatch = /^\/api\/v4\/collab\/schedules\/([^/]+)$/.exec(path);
+  if (method === 'DELETE' && schDelMatch) {
+    master.collab.deleteSchedule(decodeURIComponent(schDelMatch[1]!));
+    helpers.sendJson(res, 200, {ok: true});
+    return true;
+  }
+
+  const docMatch = /^\/api\/v4\/sessions\/([^/]+)\/collab\/doc$/.exec(path);
+  if (method === 'GET' && docMatch) {
+    const sessionId = decodeURIComponent(docMatch[1]!);
+    helpers.sendJson(res, 200, {doc: master.collab.getCollabDoc(sessionId)});
+    return true;
+  }
+
+  const docBlockMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/doc\/blocks\/([^/]+)$/.exec(path);
+  if (method === 'PATCH' && docBlockMatch) {
+    const sessionId = decodeURIComponent(docBlockMatch[1]!);
+    const blockId = decodeURIComponent(docBlockMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const doc = master.collab.updateDocBlock(sessionId, blockId, {
+      markdown: optString(body, 'markdown', '', 40_000),
+      title: optString(body, 'title', '', 200) || undefined,
+      authorName: optString(body, 'authorName', '', 80) || undefined,
+    });
+    helpers.sendJson(res, 200, {
+      doc,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const docCommentMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/doc\/blocks\/([^/]+)\/comment$/.exec(
+      path,
+    );
+  if (method === 'POST' && docCommentMatch) {
+    const sessionId = decodeURIComponent(docCommentMatch[1]!);
+    const blockId = decodeURIComponent(docCommentMatch[2]!);
+    const body = asRecord(await helpers.readJsonBody(req));
+    const doc = await master.collab.addDocBlockComment(sessionId, blockId, {
+      text: reqString(body, 'text', 2000),
+      authorName: optString(body, 'authorName', '', 80) || undefined,
+      channelId: optString(body, 'channelId', '', 120) || undefined,
+    });
+    helpers.sendJson(res, 201, {
+      doc,
+      detail: master.getSessionDetail(sessionId),
+    });
+    return true;
+  }
+
+  const docCompileMatch =
+    /^\/api\/v4\/sessions\/([^/]+)\/collab\/doc\/compile-spec$/.exec(path);
+  if (method === 'POST' && docCompileMatch) {
+    const sessionId = decodeURIComponent(docCompileMatch[1]!);
+    const out = master.collab.compilePrdToSpec(sessionId);
+    helpers.sendJson(res, 200, {
+      ...out,
+      detail: master.getSessionDetail(sessionId),
+    });
     return true;
   }
 

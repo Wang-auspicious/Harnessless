@@ -3,18 +3,33 @@
  */
 
 import type {
+  AgentBindingKind,
   ArtifactPin,
   ArtifactSurfaceType,
   BoardSceneDoc,
   CatchupSummaryItem,
+  CollabDocSnapshot,
   CollabFeedItem,
+  CollabPostRecord,
   ConsensusLogEntry,
+  DashboardSummaryPayload,
+  ExternalConnectorRecord,
+  GatewaySnapshot,
   HostedAppCard,
   KanoAhpInputItem,
   KernelId,
   MasterSession,
+  ModelProviderRecord,
   NativeKernelCard,
+  PostAttachment,
+  PrivacyMaskingConfig,
+  ProviderModelEntry,
+  ProviderPresetKind,
   QuantizationResult,
+  RoutingGroupRecord,
+  RoutingStrategy,
+  RoutingTarget,
+  ScheduledTriggerRecord,
   SessionExecutionMode,
   SessionMode,
   ShipReviewBundle,
@@ -69,7 +84,7 @@ function getBridgeConfig(): {
 async function v4Fetch<T>(
   path: string,
   options?: {
-    readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
+    readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     readonly body?: unknown;
   },
 ): Promise<T> {
@@ -489,4 +504,256 @@ export const v4Api = {
     };
     return () => es.close();
   },
+
+  // Magpie-inspired Model Gateway, Providers, Routing, Profiles, Agents, Connectors
+  getGateway: (): Promise<GatewaySnapshot> =>
+    v4Fetch<GatewaySnapshot>('/api/v4/gateway'),
+
+  getDashboard: (): Promise<DashboardSummaryPayload> =>
+    v4Fetch<DashboardSummaryPayload>('/api/v4/dashboard'),
+
+  upsertProvider: (body: {
+    readonly id?: string;
+    readonly name: string;
+    readonly kind: ProviderPresetKind;
+    readonly baseUrl: string;
+    readonly newApiKey?: string;
+    readonly newKeyLabel?: string;
+    readonly models?: readonly ProviderModelEntry[];
+    readonly enabled?: boolean;
+  }): Promise<{
+    readonly provider: ModelProviderRecord;
+    readonly gateway: GatewaySnapshot;
+  }> => v4Fetch('/api/v4/providers', {method: 'PUT', body}),
+
+  testProvider: (
+    providerId: string,
+  ): Promise<{
+    readonly provider: ModelProviderRecord;
+    readonly gateway: GatewaySnapshot;
+  }> =>
+    v4Fetch(`/api/v4/providers/${encodeURIComponent(providerId)}/test`, {
+      method: 'POST',
+      body: {},
+    }),
+
+  deleteProvider: (
+    providerId: string,
+  ): Promise<{readonly gateway: GatewaySnapshot}> =>
+    v4Fetch(`/api/v4/providers/${encodeURIComponent(providerId)}`, {
+      method: 'DELETE',
+    }),
+
+  upsertRoutingGroup: (body: {
+    readonly id?: string;
+    readonly name: string;
+    readonly strategy: RoutingStrategy;
+    readonly targets: readonly RoutingTarget[];
+    readonly failoverEnabled?: boolean;
+  }): Promise<{
+    readonly group: RoutingGroupRecord;
+    readonly gateway: GatewaySnapshot;
+  }> => v4Fetch('/api/v4/routing-groups', {method: 'PUT', body}),
+
+  activateProfile: (
+    profileId: string,
+  ): Promise<{readonly gateway: GatewaySnapshot}> =>
+    v4Fetch(`/api/v4/profiles/${encodeURIComponent(profileId)}/activate`, {
+      method: 'POST',
+      body: {},
+    }),
+
+  updateAgentBinding: (
+    agentId: string,
+    body: {
+      readonly bindingKind?: AgentBindingKind;
+      readonly providerId?: string | null;
+      readonly modelId?: string | null;
+      readonly routingGroupId?: string | null;
+      readonly harnessId?: KernelId | null;
+      readonly systemPrompt?: string;
+      readonly enabled?: boolean;
+    },
+  ): Promise<{readonly gateway: GatewaySnapshot}> =>
+    v4Fetch(`/api/v4/agents/${encodeURIComponent(agentId)}`, {
+      method: 'PATCH',
+      body,
+    }),
+
+  updateConnector: (
+    connectorId: string,
+    body: {
+      readonly enabled?: boolean;
+      readonly config?: Readonly<Record<string, string>>;
+    },
+  ): Promise<{
+    readonly connector: ExternalConnectorRecord;
+    readonly gateway: GatewaySnapshot;
+  }> =>
+    v4Fetch(`/api/v4/connectors/${encodeURIComponent(connectorId)}`, {
+      method: 'PUT',
+      body,
+    }),
+
+  updatePrivacyMasking: (
+    body: Partial<PrivacyMaskingConfig>,
+  ): Promise<{
+    readonly privacyMasking: PrivacyMaskingConfig;
+    readonly gateway: GatewaySnapshot;
+  }> => v4Fetch('/api/v4/privacy-masking', {method: 'PUT', body}),
+
+  // Vercel-Board Channels, Threads, Reactions, Queues, Schedules & Co-Edited PRD
+  postChannelMessage: (
+    sessionId: string,
+    body: {
+      readonly channelId?: string;
+      readonly content: string;
+      readonly parentPostId?: string | null;
+      readonly attachments?: readonly PostAttachment[];
+    },
+  ): Promise<{
+    readonly post: CollabPostRecord;
+    readonly triggeredCommand: string | null;
+    readonly spawnedCount: number;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(`/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/posts`, {
+      method: 'POST',
+      body,
+    }),
+
+  reactToPost: (
+    sessionId: string,
+    postId: string,
+    emoji: string,
+  ): Promise<{
+    readonly post: CollabPostRecord;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/posts/${encodeURIComponent(postId)}/react`,
+      {method: 'POST', body: {emoji}},
+    ),
+
+  setPostThreadStatus: (
+    sessionId: string,
+    postId: string,
+    status: 'open' | 'resolved',
+  ): Promise<{
+    readonly post: CollabPostRecord;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/posts/${encodeURIComponent(postId)}/status`,
+      {method: 'POST', body: {status}},
+    ),
+
+  selectPollOption: (
+    sessionId: string,
+    postId: string,
+    attachmentId: string,
+    optionId: string,
+  ): Promise<{
+    readonly post: CollabPostRecord;
+    readonly doc: CollabDocSnapshot;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/posts/${encodeURIComponent(postId)}/poll`,
+      {method: 'POST', body: {attachmentId, optionId}},
+    ),
+
+  updateHtmlMockup: (
+    sessionId: string,
+    postId: string,
+    attachmentId: string,
+    htmlContent: string,
+  ): Promise<{
+    readonly post: CollabPostRecord;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/posts/${encodeURIComponent(postId)}/mockup`,
+      {method: 'PUT', body: {attachmentId, htmlContent}},
+    ),
+
+  drainUnreadQueue: (
+    sessionId: string,
+  ): Promise<{readonly processed: number; readonly detail: V4SessionDetail}> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/unread/drain`,
+      {method: 'POST', body: {}},
+    ),
+
+  createSchedule: (
+    sessionId: string,
+    body: {
+      readonly channelId?: string;
+      readonly targetAgentId: string;
+      readonly intervalLabel: string;
+      readonly promptText: string;
+    },
+  ): Promise<{
+    readonly schedule: ScheduledTriggerRecord;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/schedules`,
+      {method: 'POST', body},
+    ),
+
+  runScheduleNow: (
+    scheduleId: string,
+  ): Promise<{
+    readonly schedule: ScheduledTriggerRecord;
+    readonly dashboard: DashboardSummaryPayload;
+  }> =>
+    v4Fetch(`/api/v4/collab/schedules/${encodeURIComponent(scheduleId)}/run`, {
+      method: 'POST',
+      body: {},
+    }),
+
+  deleteSchedule: (scheduleId: string): Promise<{readonly ok: boolean}> =>
+    v4Fetch(`/api/v4/collab/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: 'DELETE',
+    }),
+
+  updateCollabDocBlock: (
+    sessionId: string,
+    blockId: string,
+    body: {readonly markdown: string; readonly title?: string},
+  ): Promise<{
+    readonly doc: CollabDocSnapshot;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/doc/blocks/${encodeURIComponent(blockId)}`,
+      {method: 'PATCH', body},
+    ),
+
+  commentCollabDocBlock: (
+    sessionId: string,
+    blockId: string,
+    body: {readonly text: string; readonly channelId?: string},
+  ): Promise<{
+    readonly doc: CollabDocSnapshot;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/doc/blocks/${encodeURIComponent(blockId)}/comment`,
+      {method: 'POST', body},
+    ),
+
+  compilePrdToSpec: (
+    sessionId: string,
+  ): Promise<{
+    readonly specIR: SpecIRContract;
+    readonly board: BoardSceneDoc;
+    readonly doc: CollabDocSnapshot;
+    readonly detail: V4SessionDetail;
+  }> =>
+    v4Fetch(
+      `/api/v4/sessions/${encodeURIComponent(sessionId)}/collab/doc/compile-spec`,
+      {method: 'POST', body: {}},
+    ),
 };

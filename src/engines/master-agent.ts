@@ -80,6 +80,8 @@ import type {
   WorkspaceFileEntry,
 } from '../shared/v4-types.ts';
 import type {ForgeStore} from '../store/database.ts';
+import {ModelGatewayEngine} from './model-gateway.ts';
+import {RequirementsCollabEngine} from './requirements-collab.ts';
 
 export interface MasterAgentEngineOptions {
   readonly store: ForgeStore;
@@ -395,6 +397,8 @@ export class MasterAgentEngine {
   private readonly dataDir: string;
   private readonly publish: (event: V4SseEvent) => void;
   private readonly collabBridge?: NativeRuntimeBridge;
+  readonly gateway: ModelGatewayEngine;
+  readonly collab: RequirementsCollabEngine;
   private cachedKernels: readonly NativeKernelCard[] | null = null;
   private roleRouting: Record<TaskNodeRole, KernelId>;
 
@@ -407,6 +411,16 @@ export class MasterAgentEngine {
     this.dataDir = options.dataDir;
     this.publish = options.publish;
     this.collabBridge = options.collabBridge;
+    this.gateway = new ModelGatewayEngine({
+      store: this.store,
+      runner: this.runner,
+      publish: this.publish,
+    });
+    this.collab = new RequirementsCollabEngine({
+      store: this.store,
+      gateway: this.gateway,
+      publish: this.publish,
+    });
 
     const savedRouting = this.store.v4.getRoleRoutingSetting();
     this.roleRouting = {
@@ -483,6 +497,8 @@ export class MasterAgentEngine {
       hostedApps,
       pendingApprovalsCount,
       activeSessionId: sessions[0]?.id ?? null,
+      gateway: this.gateway.getSnapshot(),
+      dashboard: this.collab.getDashboardSummary(),
     };
   }
 
@@ -543,6 +559,16 @@ export class MasterAgentEngine {
     const latestShip = this.store.v4.getLatestShipReview(sessionId);
     const collabFeed = this.listCollab(sessionId);
     const hostedApps = this.store.v4.listHostedApps(sessionId);
+    this.collab.ensureSessionInitialized(
+      sessionId,
+      session.title,
+      session.workspacePath,
+    );
+    const channels = this.collab.listChannels(sessionId);
+    const posts = this.collab.listPosts(sessionId);
+    const collabDoc = this.collab.getCollabDoc(sessionId);
+    const unreadQueue = this.collab.listUnreadQueue(sessionId);
+    const schedules = this.collab.listSchedules(sessionId);
 
     return {
       session,
@@ -557,6 +583,11 @@ export class MasterAgentEngine {
       latestShip,
       collabFeed,
       hostedApps,
+      channels,
+      posts,
+      collabDoc,
+      unreadQueue,
+      schedules,
     };
   }
 
@@ -917,9 +948,17 @@ export class MasterAgentEngine {
       executionMode: 'auto',
     });
 
+    await this.collab.postToChannel(detail.session.id, {
+      content:
+        '构建订单风控校验引擎与审批状态机，支持高危金额拦截、多角色并行协作编写 PRD 并完成独立交叉审校验收。 @pm @architect',
+    });
+    await this.collab.postToChannel(detail.session.id, {
+      content: '/mockup 订单风控工作台与交互对比方案',
+    });
+
     return this.handleTurn(
       detail.session.id,
-      '构建订单风控校验引擎与审批状态机 API，支持高危金额拦截、多内核并行开发、独立 Ship 审校与验收报告。',
+      '构建订单风控校验引擎与审批状态机 API，支持高危金额拦截、多角色并行开发与独立交叉审校验收。',
       {executionMode: 'auto'},
     );
   }
@@ -1135,7 +1174,7 @@ export class MasterAgentEngine {
         },
         {
           id: 'node-ship-gate',
-          label: 'Claude Ship 独立审校门禁',
+          label: '独立交叉审校门禁',
           kind: 'gate',
           x: 215,
           y: 230,
@@ -1143,7 +1182,7 @@ export class MasterAgentEngine {
           height: 82,
           specModuleId: 'mod-verify-gate',
           status: 'confirmed',
-          summary: 'Anti-self-approval + Answer-in-HTML',
+          summary: '编码与审校隔离 · 交互验收报告',
         },
       ],
       edges: [

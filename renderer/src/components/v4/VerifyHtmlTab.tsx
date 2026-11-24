@@ -52,9 +52,9 @@ export function VerifyHtmlTab({
     <div className="sd-pane" data-testid="v4-verify-tab">
       <div className="sd-pane-head">
         <div className="sd-pane-title-group">
-          <h3>Claude Ship 三权审校 &amp; Answer-in-HTML</h3>
+          <h3>独立交叉审校与验收报告</h3>
           <p>
-            强制 Coder ≠ Reviewer 物理防自批，独立审校后生成沙箱化交互验收报告。
+            强制编码与审校角色物理分离，防止自写自批，并生成沙箱化交互验收报告。
           </p>
         </div>
       </div>
@@ -186,31 +186,29 @@ export function VerifyHtmlTab({
       {!latestShip ? (
         <div className="sd-card">
           <div className="sd-card-head">
-            <span>Ship 独立审校流程说明</span>
-            <span className="sd-pill">Ready</span>
+            <span>独立交叉审校流程说明</span>
+            <span className="sd-pill">就绪</span>
           </div>
           <div className="sd-card-body sd-verify-steps">
             <div className="sd-verify-step">
               <span className="sd-step-num">1</span>
               <div>
                 <strong>防自批验证</strong>
-                <p>确认编码与审校来自不同原生 Agent 内核，杜绝盲目自批。</p>
+                <p>确认编码与审校由不同模型或引擎承担，杜绝盲目自批。</p>
               </div>
             </div>
             <div className="sd-verify-step">
               <span className="sd-step-num">2</span>
               <div>
                 <strong>契约与并发扫描</strong>
-                <p>
-                  核对 Spec IR I/O 边界、权限域交集与 Git Worktree 变更摘要。
-                </p>
+                <p>核对 Spec 接口边界、权限范围与隔离工作区变更摘要。</p>
               </div>
             </div>
             <div className="sd-verify-step">
               <span className="sd-step-num">3</span>
               <div>
-                <strong>Answer-in-HTML 报告</strong>
-                <p>生成可审计 HTML 沙箱报告；缺陷可一键转发至 Triage。</p>
+                <strong>交互式验收报告</strong>
+                <p>生成可审计 HTML 沙箱报告；发现项可一键转发至议题清单。</p>
               </div>
             </div>
           </div>
@@ -232,14 +230,14 @@ export function VerifyHtmlTab({
                 />
                 <span>
                   {latestShip.antiSelfApprovalPassed
-                    ? '三权分立校验通过 (Coder ≠ Reviewer)'
-                    : '检测到自批冲突'}
+                    ? '独立审校校验通过 (实现与审校已分离)'
+                    : '检测到同源角色冲突'}
                 </span>
               </span>
               <span
                 className={`sd-pill ${latestShip.antiSelfApprovalPassed ? 'is-success' : 'is-danger'}`}
               >
-                Verdict: {latestShip.verdict}
+                结论: {latestShip.verdict}
               </span>
             </div>
             <div
@@ -253,15 +251,15 @@ export function VerifyHtmlTab({
                 color: 'var(--mp-text-secondary)',
               }}
             >
-              <span>Coder:</span>
+              <span>实现方:</span>
               {latestShip.coderKernels.map(ck => (
                 <span key={ck} className="sd-pill">
                   <AgentBrandIcon kernelId={ck} theme={theme} size={13} />
                   <span>{kernelLabel(ck)}</span>
                 </span>
               ))}
-              <span>→ Reviewer:</span>
-              <span className="sd-pill is-clay">
+              <span>→ 审校方:</span>
+              <span className="sd-pill">
                 <AgentBrandIcon
                   kernelId={latestShip.reviewerKernel}
                   theme={theme}
@@ -270,17 +268,17 @@ export function VerifyHtmlTab({
                 <span>{kernelLabel(latestShip.reviewerKernel)}</span>
               </span>
               <span className="sd-pill">
-                Policy: {latestShip.policyMode.toUpperCase()}
+                策略: {latestShip.policyMode.toUpperCase()}
               </span>
               <span className="sd-pill">
-                WouldApprove: {latestShip.wouldApprove ? 'YES' : 'NO'}
+                自动建议通过: {latestShip.wouldApprove ? '是' : '否'}
               </span>
             </div>
           </div>
 
           <div className="sd-card">
             <div className="sd-card-head">
-              <span>Answer-in-HTML 沙箱交互验收报告</span>
+              <span>沙箱交互验收报告</span>
               <button
                 type="button"
                 className="sd-btn is-primary"
@@ -297,7 +295,7 @@ export function VerifyHtmlTab({
               style={{display: 'flex', flexDirection: 'column', gap: 10}}
             >
               <iframe
-                title="Answer-in-HTML Verification Report"
+                title="交互验收报告"
                 className="sd-verify-iframe"
                 sandbox="allow-scripts"
                 srcDoc={latestShip.answerHtml}
@@ -310,7 +308,7 @@ export function VerifyHtmlTab({
                   style={{flex: 1}}
                   value={rejectNote}
                   onChange={e => setRejectNote(e.target.value)}
-                  placeholder="若需驳回，输入修复意见自动创建 html_verify Pin…"
+                  placeholder="若需驳回，输入修改意见并自动创建待修批注…"
                 />
                 <button
                   type="button"
@@ -325,7 +323,7 @@ export function VerifyHtmlTab({
                     void onRejectAndPin(latestShip.id, note);
                   }}
                 >
-                  驳回并创建修复 Pin
+                  驳回并创建修复批注
                 </button>
               </div>
             </div>
@@ -351,7 +349,7 @@ export function VerifyHtmlTab({
                     <tr key={f.id}>
                       <td>
                         <span
-                          className={`sd-pill ${f.severity === 'blocker' ? 'is-danger' : f.severity === 'warn' ? 'is-clay' : ''}`}
+                          className={`sd-pill ${f.severity === 'blocker' ? 'is-danger' : ''}`}
                         >
                           {f.severity}
                         </span>
@@ -373,7 +371,7 @@ export function VerifyHtmlTab({
                             className="sd-btn"
                             onClick={() => onSendFindingToTriage(f)}
                           >
-                            转入 Triage
+                            转入议题追踪
                           </button>
                         ) : (
                           <span>
@@ -391,9 +389,7 @@ export function VerifyHtmlTab({
           {latestShip.stewardFixes.length > 0 ? (
             <div className="sd-card">
               <div className="sd-card-head">
-                <span>
-                  PR Steward 自动修复清单 ({latestShip.stewardFixes.length})
-                </span>
+                <span>自动修复建议清单 ({latestShip.stewardFixes.length})</span>
               </div>
               <div>
                 {latestShip.stewardFixes.map(fix => (

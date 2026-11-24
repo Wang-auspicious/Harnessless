@@ -1,13 +1,13 @@
 import type {KernelId, SessionStage, TaskNodeRole} from '../../api/v4-types.ts';
 
 export const KERNEL_LABELS: Record<KernelId, string> = {
-  master: 'Master Agent',
+  master: '统筹协调官',
   'claude-code': 'Claude Code',
   codex: 'Codex CLI',
   'gemini-cli': 'Gemini CLI',
   opencode: 'OpenCode',
-  pi: 'Pi Agent',
-  'native-api': 'Native API',
+  pi: 'Pi CLI',
+  'native-api': '直连模型引擎',
 };
 
 export const ALL_KERNELS: readonly KernelId[] = [
@@ -20,11 +20,11 @@ export const ALL_KERNELS: readonly KernelId[] = [
 ];
 
 export const ROLE_LABELS: Record<TaskNodeRole, string> = {
-  architect: '架构 Architect',
-  coder: '编码 Coder',
-  tester: '测试 Tester',
-  reviewer: '审校 Reviewer',
-  steward: '管家 Steward',
+  architect: '系统架构师',
+  coder: '开发工程师',
+  tester: '质量验证官',
+  reviewer: '独立审校官',
+  steward: '工程保障官',
 };
 
 export const STAGE_META: Record<
@@ -34,11 +34,11 @@ export const STAGE_META: Record<
     readonly tone: 'clay' | 'success' | 'warning' | 'neutral';
   }
 > = {
-  intent: {label: '需求构思', tone: 'neutral'},
-  spec: {label: 'Spec 共识', tone: 'warning'},
-  tasks: {label: '任务拆解', tone: 'clay'},
-  executing: {label: '并行执行中', tone: 'clay'},
-  review: {label: 'Ship 审校', tone: 'warning'},
+  intent: {label: '需求协同', tone: 'neutral'},
+  spec: {label: 'Spec 共识', tone: 'neutral'},
+  tasks: {label: '任务拆解', tone: 'neutral'},
+  executing: {label: '并行开发中', tone: 'neutral'},
+  review: {label: '交叉审校中', tone: 'warning'},
   delivered: {label: '已交付', tone: 'success'},
 };
 

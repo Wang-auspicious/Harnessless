@@ -446,7 +446,10 @@ async function bootstrapDesktop(): Promise<void> {
             writeFileSync(smokeScreenshotPath, image.toPNG());
           }
           const ok =
-            domText.includes('SDLC-Studio') || domText.includes('ForgeOps');
+            domText.includes('SDLC-Studio') ||
+            domText.includes('ForgeOps') ||
+            domText.includes('新建协同会话') ||
+            domText.includes('团队角色');
           process.stdout.write(
             `FORGEOPS_ELECTRON_SMOKE_OK:${ok}:${domText.slice(0, 120).replace(/\s+/g, ' ')}\n`,
           );

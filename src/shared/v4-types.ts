@@ -497,6 +497,11 @@ export interface V4SessionDetail {
   readonly latestShip: ShipReviewBundle | null;
   readonly collabFeed: readonly CollabFeedItem[];
   readonly hostedApps: readonly HostedAppCard[];
+  readonly channels?: readonly CollabChannelRecord[];
+  readonly posts?: readonly CollabPostRecord[];
+  readonly collabDoc?: CollabDocSnapshot;
+  readonly unreadQueue?: readonly UnreadQueueItem[];
+  readonly schedules?: readonly ScheduledTriggerRecord[];
 }
 
 export interface V4BootstrapPayload {
@@ -506,6 +511,8 @@ export interface V4BootstrapPayload {
   readonly hostedApps: readonly HostedAppCard[];
   readonly pendingApprovalsCount: number;
   readonly activeSessionId: string | null;
+  readonly gateway?: GatewaySnapshot;
+  readonly dashboard?: DashboardSummaryPayload;
 }
 
 export interface CatchupSummaryItem {
@@ -601,4 +608,345 @@ export type V4SseEvent =
   | {
       readonly type: 'v4.app.updated';
       readonly app: HostedAppCard;
+    }
+  | {
+      readonly type: 'v4.collab.post';
+      readonly sessionId: string;
+      readonly post: CollabPostRecord;
+    }
+  | {
+      readonly type: 'v4.collab.doc';
+      readonly sessionId: string;
+      readonly revision: number;
+    }
+  | {
+      readonly type: 'v4.gateway.updated';
+      readonly scope:
+        'providers' | 'routing' | 'profiles' | 'agents' | 'connectors';
     };
+
+// ============================================================================
+// Magpie-Inspired Model Gateway, Routing Groups, Profiles & Agent Roster
+// ============================================================================
+
+export type ProviderPresetKind =
+  | 'anthropic'
+  | 'openai'
+  | 'gemini'
+  | 'deepseek'
+  | 'moonshot'
+  | 'zhipu'
+  | 'openrouter'
+  | 'ollama'
+  | 'openai-compatible';
+
+export interface ProviderModelEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly contextK: number;
+  readonly supportsTools?: boolean;
+  readonly supportsReasoning?: boolean;
+}
+
+export interface ProviderApiKeyEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly keyPreview: string;
+  readonly rawKey?: string;
+  readonly enabled: boolean;
+  readonly quotaExhausted?: boolean;
+}
+
+export interface ModelProviderRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: ProviderPresetKind;
+  readonly baseUrl: string;
+  readonly apiKeys: readonly ProviderApiKeyEntry[];
+  readonly models: readonly ProviderModelEntry[];
+  readonly enabled: boolean;
+  readonly priority: number;
+  readonly healthStatus: 'untested' | 'ok' | 'degraded' | 'error';
+  readonly lastError: string | null;
+  readonly updatedAt: string;
+}
+
+export type RoutingStrategy = 'order' | 'rotate' | 'context-tiered';
+
+export interface RoutingTarget {
+  readonly id: string;
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly harnessId?: KernelId;
+  readonly maxContextK?: number;
+  readonly weight?: number;
+}
+
+export interface RoutingGroupRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly strategy: RoutingStrategy;
+  readonly targets: readonly RoutingTarget[];
+  readonly failoverEnabled: boolean;
+  readonly updatedAt: string;
+}
+
+export interface ModelProfileRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly bindings: Readonly<
+    Record<
+      string,
+      {
+        readonly bindingKind: AgentBindingKind;
+        readonly providerId?: string;
+        readonly modelId?: string;
+        readonly routingGroupId?: string;
+        readonly harnessId?: KernelId;
+      }
+    >
+  >;
+  readonly active: boolean;
+  readonly updatedAt: string;
+}
+
+export type AgentBindingKind =
+  'provider_model' | 'routing_group' | 'cli_harness';
+
+export type AgentRoleKey =
+  | 'coordinator'
+  | 'pm_analyst'
+  | 'architect'
+  | 'ui_prototyper'
+  | 'engineer'
+  | 'reviewer';
+
+export interface AgentPersonaRecord {
+  readonly id: string;
+  readonly displayName: string;
+  readonly handle: string;
+  readonly roleKey: AgentRoleKey;
+  readonly avatarKey: string;
+  readonly accentColor: string;
+  readonly bindingKind: AgentBindingKind;
+  readonly providerId: string | null;
+  readonly modelId: string | null;
+  readonly routingGroupId: string | null;
+  readonly harnessId: KernelId | null;
+  readonly systemPrompt: string;
+  readonly resolvedModelLabel: string;
+  readonly enabled: boolean;
+  readonly updatedAt: string;
+}
+
+export type ConnectorKind = 'slack' | 'github' | 'notion' | 'google_docs';
+
+export interface ExternalConnectorRecord {
+  readonly id: string;
+  readonly kind: ConnectorKind;
+  readonly displayName: string;
+  readonly enabled: boolean;
+  readonly config: Readonly<Record<string, string>>;
+  readonly status: 'disconnected' | 'configured' | 'synced';
+  readonly lastSyncAt: string | null;
+  readonly updatedAt: string;
+}
+
+export interface PrivacyMaskingConfig {
+  readonly enabled: boolean;
+  readonly maskSecrets: boolean;
+  readonly maskEmails: boolean;
+  readonly allowDomains: readonly string[];
+}
+
+export interface GatewaySnapshot {
+  readonly providers: readonly ModelProviderRecord[];
+  readonly routingGroups: readonly RoutingGroupRecord[];
+  readonly profiles: readonly ModelProfileRecord[];
+  readonly agents: readonly AgentPersonaRecord[];
+  readonly connectors: readonly ExternalConnectorRecord[];
+  readonly privacyMasking: PrivacyMaskingConfig;
+}
+
+// ============================================================================
+// Multi-Human / Multi-Agent Collaboration Channels, Rich Media & Live PRD Docs
+// ============================================================================
+
+export interface CollabChannelRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly slug: string;
+  readonly title: string;
+  readonly description: string;
+  readonly createdAt: string;
+}
+
+export type PostAttachmentKind =
+  | 'prd_card'
+  | 'spec_card'
+  | 'whiteboard_card'
+  | 'html_mockup'
+  | 'markdown_doc'
+  | 'image'
+  | 'video'
+  | 'decision_poll';
+
+export interface PostAttachment {
+  readonly id: string;
+  readonly kind: PostAttachmentKind;
+  readonly title: string;
+  readonly subtitle?: string;
+  readonly url?: string;
+  readonly htmlContent?: string;
+  readonly markdownContent?: string;
+  readonly blockId?: string;
+  readonly pollOptions?: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly description: string;
+    readonly votes: number;
+    readonly recommended?: boolean;
+  }[];
+  readonly selectedPollOptionId?: string;
+}
+
+export interface PostReaction {
+  readonly emoji: string;
+  readonly count: number;
+  readonly byViewer: boolean;
+  readonly actors: readonly string[];
+}
+
+export interface CollabPostRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly channelId: string;
+  readonly parentPostId: string | null;
+  readonly authorId: string;
+  readonly authorName: string;
+  readonly authorKind: 'human' | 'agent';
+  readonly authorAvatar: string;
+  readonly authorColor: string;
+  readonly modelLabel: string;
+  readonly content: string;
+  readonly attachments: readonly PostAttachment[];
+  readonly mentions: readonly string[];
+  readonly reactions: readonly PostReaction[];
+  readonly threadStatus: 'open' | 'resolved';
+  readonly resolvedBy: string | null;
+  readonly replyCount?: number;
+  readonly replyAvatars?: readonly string[];
+  readonly lastReplyAt?: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface UnreadQueueItem {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly channelId: string;
+  readonly postId: string;
+  readonly targetAgentId: string;
+  readonly targetAgentName: string;
+  readonly fromAuthor: string;
+  readonly summary: string;
+  readonly status: 'queued' | 'processing' | 'done';
+  readonly createdAt: string;
+  readonly processedAt: string | null;
+}
+
+export interface ScheduledTriggerRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly channelId: string;
+  readonly targetAgentId: string;
+  readonly targetAgentName: string;
+  readonly intervalLabel: string;
+  readonly promptText: string;
+  readonly enabled: boolean;
+  readonly runCount: number;
+  readonly lastRunAt: string | null;
+  readonly createdAt: string;
+}
+
+export type PrdSectionKey =
+  | 'overview'
+  | 'goals'
+  | 'user_stories'
+  | 'functional_scope'
+  | 'architecture'
+  | 'non_functional'
+  | 'acceptance_criteria'
+  | 'open_questions';
+
+export interface DocBlockComment {
+  readonly id: string;
+  readonly authorName: string;
+  readonly authorKind: 'human' | 'agent';
+  readonly authorColor: string;
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface CollabDocBlock {
+  readonly id: string;
+  readonly sectionKey: PrdSectionKey;
+  readonly title: string;
+  readonly markdown: string;
+  readonly lastAuthorId: string;
+  readonly lastAuthorName: string;
+  readonly lastAuthorKind: 'human' | 'agent';
+  readonly lastAuthorColor: string;
+  readonly lastModelLabel: string;
+  readonly lastEditedAt: string;
+  readonly revision: number;
+  readonly comments: readonly DocBlockComment[];
+}
+
+export interface DocLineDiffHunk {
+  readonly kind: 'context' | 'add' | 'del';
+  readonly text: string;
+}
+
+export interface CollabDocRevision {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly docKind: 'prd';
+  readonly revision: number;
+  readonly blockId: string;
+  readonly blockTitle: string;
+  readonly beforeMarkdown: string;
+  readonly afterMarkdown: string;
+  readonly diffHunks: readonly DocLineDiffHunk[];
+  readonly diffSummary: string;
+  readonly authorId: string;
+  readonly authorName: string;
+  readonly authorKind: 'human' | 'agent';
+  readonly authorColor: string;
+  readonly modelLabel: string;
+  readonly createdAt: string;
+}
+
+export interface CollabDocSnapshot {
+  readonly sessionId: string;
+  readonly docKind: 'prd';
+  readonly title: string;
+  readonly revision: number;
+  readonly blocks: readonly CollabDocBlock[];
+  readonly revisions: readonly CollabDocRevision[];
+  readonly updatedAt: string;
+}
+
+export interface DashboardSummaryPayload {
+  readonly agents: readonly (AgentPersonaRecord & {
+    readonly state: 'working' | 'queued' | 'idle';
+    readonly unreadCount: number;
+    readonly editCount: number;
+  })[];
+  readonly activeSessionsCount: number;
+  readonly queuedItems: readonly UnreadQueueItem[];
+  readonly schedules: readonly ScheduledTriggerRecord[];
+  readonly recentEdits: readonly CollabDocRevision[];
+  readonly recentPosts: readonly CollabPostRecord[];
+}

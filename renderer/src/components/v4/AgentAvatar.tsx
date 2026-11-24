@@ -33,7 +33,15 @@ export type AgentBrandId =
   | 'aider'
   | 'copilot'
   | 'deepseek'
-  | 'qwen';
+  | 'qwen'
+  | 'anthropic'
+  | 'openai'
+  | 'gemini'
+  | 'moonshot'
+  | 'zhipu'
+  | 'ollama'
+  | 'openrouter'
+  | 'openai-compatible';
 
 export type AppBrandId =
   'vscode' | 'cursor' | 'antigravity' | 'slack' | 'linear' | 'figma' | 'github';
@@ -63,14 +71,18 @@ export function GitHubIcon({
 }
 
 function resolveAgentAsset(
-  id: AgentBrandId,
+  id: AgentBrandId | string,
   theme: 'light' | 'dark',
 ): string | null {
   switch (id) {
+    case 'anthropic':
+      return claudeLogo;
     case 'claude-code':
       return claudeCodeLogo;
+    case 'openai':
     case 'codex':
       return codexLogo;
+    case 'gemini':
     case 'gemini-cli':
       return geminiLogo;
     case 'opencode':
@@ -93,6 +105,32 @@ function resolveAgentAsset(
     default:
       return null;
   }
+}
+
+export function resolveBrandForAgent(input: {
+  readonly avatarKey?: string;
+  readonly bindingKind?: string;
+  readonly providerId?: string | null;
+  readonly harnessId?: string | null;
+}): AgentBrandId {
+  if (input.bindingKind === 'cli_harness' && input.harnessId) {
+    return input.harnessId as AgentBrandId;
+  }
+  if (input.providerId) {
+    const p = input.providerId.replace(/^prov-/, '');
+    if (
+      p === 'anthropic' ||
+      p === 'openai' ||
+      p === 'gemini' ||
+      p === 'deepseek'
+    ) {
+      return p;
+    }
+  }
+  if (input.avatarKey) {
+    return input.avatarKey as AgentBrandId;
+  }
+  return 'master';
 }
 
 export interface AgentBrandIconProps {
@@ -134,28 +172,18 @@ export function AgentBrandIcon({
   const innerSize = framed ? Math.max(12, Math.round(size * 0.68)) : size;
   const asset = resolveAgentAsset(kernelId, theme);
 
-  const glyph =
-    kernelId === 'master' ? (
-      <img
-        src={claudeLogo}
-        alt=""
-        width={innerSize}
-        height={innerSize}
-        className="sd-agent-svg"
-        draggable={false}
-      />
-    ) : asset ? (
-      <img
-        src={asset}
-        alt=""
-        width={innerSize}
-        height={innerSize}
-        className="sd-agent-svg"
-        draggable={false}
-      />
-    ) : (
-      <StarburstMark size={innerSize} />
-    );
+  const glyph = asset ? (
+    <img
+      src={asset}
+      alt=""
+      width={innerSize}
+      height={innerSize}
+      className="sd-agent-svg"
+      draggable={false}
+    />
+  ) : (
+    <StarburstMark size={innerSize} />
+  );
 
   const statusColor =
     status === 'ready' || status === 'builtin'

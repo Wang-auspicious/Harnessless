@@ -172,5 +172,161 @@ export function initV4Schema(db: DatabaseSync): void {
       value_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS v4_model_providers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      api_keys_json TEXT NOT NULL,
+      models_json TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      priority INTEGER NOT NULL DEFAULT 100,
+      health_status TEXT NOT NULL DEFAULT 'untested',
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_routing_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      strategy TEXT NOT NULL CHECK(strategy IN ('order','rotate','context-tiered')),
+      targets_json TEXT NOT NULL,
+      failover_enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_model_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      bindings_json TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_agent_roster (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      handle TEXT NOT NULL,
+      role_key TEXT NOT NULL,
+      avatar_key TEXT NOT NULL,
+      accent_color TEXT NOT NULL,
+      binding_kind TEXT NOT NULL CHECK(binding_kind IN ('provider_model','routing_group','cli_harness')),
+      provider_id TEXT,
+      model_id TEXT,
+      routing_group_id TEXT,
+      harness_id TEXT,
+      system_prompt TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_connectors (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      config_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'disconnected',
+      last_sync_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_collab_channels (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      slug TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(session_id, slug)
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_collab_posts (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      channel_id TEXT NOT NULL,
+      parent_post_id TEXT,
+      author_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      author_kind TEXT NOT NULL CHECK(author_kind IN ('human','agent')),
+      author_avatar TEXT NOT NULL,
+      author_color TEXT NOT NULL,
+      model_label TEXT NOT NULL,
+      content TEXT NOT NULL,
+      attachments_json TEXT NOT NULL,
+      mentions_json TEXT NOT NULL,
+      reactions_json TEXT NOT NULL,
+      thread_status TEXT NOT NULL DEFAULT 'open' CHECK(thread_status IN ('open','resolved')),
+      resolved_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_v4_collab_posts_session
+      ON v4_collab_posts(session_id, channel_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS v4_collab_unread_queue (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      channel_id TEXT NOT NULL,
+      post_id TEXT NOT NULL,
+      target_agent_id TEXT NOT NULL,
+      target_agent_name TEXT NOT NULL,
+      from_author TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','processing','done')),
+      created_at TEXT NOT NULL,
+      processed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_v4_unread_session
+      ON v4_collab_unread_queue(session_id, status, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS v4_scheduled_triggers (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      channel_id TEXT NOT NULL,
+      target_agent_id TEXT NOT NULL,
+      target_agent_name TEXT NOT NULL,
+      interval_label TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      run_count INTEGER NOT NULL DEFAULT 0,
+      last_run_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_collab_docs (
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      doc_kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      blocks_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(session_id, doc_kind)
+    );
+
+    CREATE TABLE IF NOT EXISTS v4_collab_doc_revisions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES v4_master_sessions(id) ON DELETE CASCADE,
+      doc_kind TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      block_id TEXT NOT NULL,
+      block_title TEXT NOT NULL,
+      before_markdown TEXT NOT NULL,
+      after_markdown TEXT NOT NULL,
+      diff_summary TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      author_kind TEXT NOT NULL CHECK(author_kind IN ('human','agent')),
+      author_color TEXT NOT NULL,
+      model_label TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_v4_doc_revisions_session
+      ON v4_collab_doc_revisions(session_id, revision DESC);
   `);
 }

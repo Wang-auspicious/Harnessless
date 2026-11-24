@@ -8,12 +8,18 @@ import {
 } from 'react';
 import {v4Api} from '../api/v4-client.ts';
 import type {
+  AgentBindingKind,
   BoardSceneDoc,
+  DashboardSummaryPayload,
+  GatewaySnapshot,
   HostedAppCard,
   KanoAhpInputItem,
   KernelId,
   MasterSession,
   NativeKernelCard,
+  PostAttachment,
+  ProviderPresetKind,
+  RoutingStrategy,
   SessionExecutionMode,
   SessionMode,
   ShipReviewFinding,
@@ -22,6 +28,7 @@ import type {
   V4SessionDetail,
   WorkspaceTabId,
 } from '../api/v4-types.ts';
+import {AgentDashboardView} from '../components/v4/AgentDashboardView.tsx';
 import {CdsIcon} from '../components/v4/CdsIcon.tsx';
 import {
   FeedbackTriageView,
@@ -37,9 +44,7 @@ import {
   type StudioPreferences,
 } from '../components/v4/SettingsModal.tsx';
 import {
-  CHANNELS,
   StudioSidebar,
-  type ChannelId,
   type SidebarNavView,
 } from '../components/v4/StudioSidebar.tsx';
 import {TitleBar} from '../components/v4/TitleBar.tsx';
@@ -61,36 +66,36 @@ const DEFAULT_ROUTING: Record<TaskNodeRole, KernelId> = {
 const SEED_TRIAGE_TOPICS: readonly TriageTopic[] = [
   {
     id: 'triage-seed-1',
-    title: 'Worktree 并行执行完成前禁止 Reviewer 使用相同内核触发 Ship 自批',
+    title: '并行开发波次完成前，编码角色与独立审校角色须保持物理模型隔离',
     category: 'verification',
     status: 'open',
     severity: 'critical',
     author: 'claude-code',
     participants: ['claude-code', 'codex', 'master'],
     votes: 6,
-    tags: ['ship', 'anti-self-approval', 'http-409'],
-    body: '当编码内核为 Codex 时，Ship 审校门禁须自动锁定独立内核（Claude Code / Gemini CLI）执行跨内核复核，避免自写自审。',
+    tags: ['verification', 'anti-self-approval', 'http-409'],
+    body: '当编码工作由某个底层引擎或模型完成时，独立审校自动拦截自写自审（HTTP 409），确保需由不同供应商或内核完成复核。',
     createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
     replies: [
       {
         id: 'seed-r1',
         author: 'master',
-        body: 'Enforced 模式已在后端 /api/v4/sessions/:id/ship 返回 HTTP 409 并前端提示三权隔离盾牌。',
+        body: '严格模式已在后端验收接口执行防自批阻断，并在右侧审校面板提示物理隔离原因。',
         createdAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
       },
     ],
   },
   {
     id: 'triage-seed-2',
-    title: 'Excalidraw 白板模块拖拽后双向同步更新 Spec IR boundaryPseudocode',
+    title: '实时共编 PRD 修改与白板画布节点拖拽须双向同步更新 Spec 契约',
     category: 'architecture',
     status: 'open',
     severity: 'medium',
     author: 'master',
     participants: ['human', 'master'],
     votes: 4,
-    tags: ['excalidraw', 'spec-ir', 'pin'],
-    body: '白板节点移动或插入评论 Pin 时，保持坐标锚点随缩放视图自动重算，并直接注入 Master Agent 决策队列。',
+    tags: ['whiteboard', 'prd-spec', 'pin'],
+    body: '团队成员在左侧聊天或右侧 PRD 块中添加 @mention 批注、编辑 Markdown 或整理白板拓扑时，均会自动触发 Spec 契约同步与历史增量追踪。',
     createdAt: new Date(Date.now() - 120 * 60 * 1000).toISOString(),
     replies: [],
   },
@@ -148,9 +153,9 @@ export function ForgeStudioApp({
     useState<StudioPreferences>(readPreferences);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeNav, setActiveNav] = useState<SidebarNavView>('chat');
-  const [activeChannel, setActiveChannel] = useState<ChannelId>('general');
+  const [activeChannel, setActiveChannel] = useState<string>('requirements');
   const [prefillMention, setPrefillMention] = useState<{
-    readonly kernelId: KernelId;
+    readonly handle: string;
     readonly nonce: number;
   } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -168,13 +173,22 @@ export function ForgeStudioApp({
   const [kernels, setKernels] = useState<readonly NativeKernelCard[]>([]);
   const [roleRouting, setRoleRouting] =
     useState<Record<TaskNodeRole, KernelId>>(DEFAULT_ROUTING);
+  const [gateway, setGateway] = useState<GatewaySnapshot | null>(null);
+  const [dashboard, setDashboard] = useState<DashboardSummaryPayload | null>(
+    null,
+  );
   const [hostedApps, setHostedApps] = useState<readonly HostedAppCard[]>([]);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const [triageTopics, setTriageTopics] =
     useState<readonly TriageTopic[]>(readTriageTopics);
-
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('board');
+  const [activeTab, setActiveTab] = useState<WorkspaceTabId>('doc');
+  const [activeThreadRootId, setActiveThreadRootId] = useState<string | null>(
+    null,
+  );
+  const [focusedDocBlockId, setFocusedDocBlockId] = useState<string | null>(
+    null,
+  );
   const [rightWidthPx, setRightWidthPx] = useState(560);
   const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
 
@@ -206,6 +220,7 @@ export function ForgeStudioApp({
 
   useEffect(() => {
     document.documentElement.dataset['theme'] = theme;
+    document.documentElement.dataset['mode'] = theme;
     document.body.toggleAttribute('data-ds-dark-theme', theme === 'dark');
     void window.forgeops?.setWindowTheme?.(theme);
   }, [theme]);
@@ -259,6 +274,8 @@ export function ForgeStudioApp({
       setSessions(boot.sessions);
       setKernels(boot.kernels);
       setRoleRouting({...DEFAULT_ROUTING, ...boot.roleRouting});
+      setGateway(boot.gateway ?? null);
+      setDashboard(boot.dashboard ?? null);
       setHostedApps(boot.hostedApps);
       setPendingApprovalsCount(boot.pendingApprovalsCount);
       setActiveSessionId(prev => {
@@ -300,6 +317,17 @@ export function ForgeStudioApp({
       setActiveNav('chat');
       setSettingsPage('models');
       setSettingsOpen(true);
+    } else if (hash === '#smoke-dashboard') {
+      setActiveNav('dashboard');
+      setInspectorOpen(false);
+      void v4Api
+        .demoRun({mode: 'team'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          void loadBootstrap();
+        })
+        .catch(() => {});
     } else if (hash === '#smoke-triage') {
       setActiveNav('triage');
       setInspectorOpen(false);
@@ -308,6 +336,40 @@ export function ForgeStudioApp({
         .then(next => {
           setDetail(next);
           setActiveSessionId(next.session.id);
+          void loadBootstrap();
+        })
+        .catch(() => {});
+    } else if (hash === '#smoke-doc') {
+      setActiveNav('chat');
+      setActiveChannel('requirements');
+      setInspectorOpen(true);
+      setActiveTab('doc');
+      setRightWidthPx(660);
+      void v4Api
+        .demoRun({mode: 'team'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          const firstCh = next.channels?.[0]?.id;
+          if (firstCh) setActiveChannel(firstCh);
+          void loadBootstrap();
+        })
+        .catch(() => {});
+    } else if (hash === '#smoke-thread') {
+      setActiveNav('chat');
+      setActiveChannel('requirements');
+      setInspectorOpen(true);
+      setActiveTab('thread');
+      setRightWidthPx(560);
+      void v4Api
+        .demoRun({mode: 'team'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          const root =
+            next.posts?.find(p => !p.parentPostId && (p.replyCount ?? 0) > 0) ??
+            next.posts?.find(p => !p.parentPostId);
+          if (root) setActiveThreadRootId(root.id);
           void loadBootstrap();
         })
         .catch(() => {});
@@ -329,7 +391,7 @@ export function ForgeStudioApp({
       setActiveChannel('architecture');
       setInspectorOpen(true);
       setActiveTab('board');
-      setRightWidthPx(660);
+      setRightWidthPx(680);
       void v4Api
         .demoRun({mode: 'team'})
         .then(next => {
@@ -476,8 +538,17 @@ export function ForgeStudioApp({
     void loadBootstrap();
   };
 
-  const openInspectorTab = (tab: WorkspaceTabId): void => {
+  const openInspectorTab = (
+    tab: WorkspaceTabId,
+    extra?: {readonly blockId?: string; readonly threadId?: string},
+  ): void => {
     setActiveNav('chat');
+    if (extra?.blockId) {
+      setFocusedDocBlockId(extra.blockId);
+    }
+    if (extra?.threadId) {
+      setActiveThreadRootId(extra.threadId);
+    }
     setActiveTab(tab);
     setInspectorOpen(true);
   };
@@ -492,44 +563,32 @@ export function ForgeStudioApp({
     }
   };
 
-  const handleSelectChannel = (ch: ChannelId): void => {
+  const handleSelectChannel = (ch: string): void => {
     setActiveChannel(ch);
     setActiveNav('chat');
-    const meta = CHANNELS.find(c => c.id === ch);
-    if (meta?.defaultTab && detail) {
-      setActiveTab(meta.defaultTab);
+    if (detail) {
+      const matched = detail.channels?.find(c => c.id === ch || c.slug === ch);
+      const slug = matched?.slug ?? ch;
+      if (slug === 'architecture') {
+        setActiveTab('board');
+      } else if (slug === 'review') {
+        setActiveTab('verify');
+      } else {
+        setActiveTab('doc');
+      }
       setInspectorOpen(true);
     }
   };
 
-  const handleMentionAgent = (kernelId: KernelId): void => {
+  const handleMentionHandle = (handle: string): void => {
     setActiveNav('chat');
-    setPrefillMention({kernelId, nonce: Date.now()});
-  };
-
-  const handleFileInTriage = (title: string, kernel: KernelId): void => {
-    const newTopic: TriageTopic = {
-      id: `triage-${Date.now()}`,
-      title: title.slice(0, 96),
-      category: 'architecture',
-      status: 'open',
-      severity: 'medium',
-      author: kernel,
-      participants: ['human', kernel],
-      votes: 1,
-      tags: ['from-chat', kernel],
-      body: title,
-      createdAt: new Date().toISOString(),
-      replies: [],
-    };
-    persistTopics([newTopic, ...triageTopics]);
-    setActiveNav('triage');
+    setPrefillMention({handle, nonce: Date.now()});
   };
 
   const handleSendFindingToTriage = (finding: ShipReviewFinding): void => {
     const newTopic: TriageTopic = {
       id: `triage-finding-${finding.id}-${Date.now()}`,
-      title: `[Ship ${finding.severity.toUpperCase()}] ${finding.filePath} — ${finding.summary}`,
+      title: `[审校 ${finding.severity.toUpperCase()}] ${finding.filePath} — ${finding.summary}`,
       category: finding.category === 'security' ? 'bug' : 'verification',
       status: finding.fixedBySteward ? 'resolved' : 'open',
       severity:
@@ -541,8 +600,8 @@ export function ForgeStudioApp({
       author: 'claude-code',
       participants: ['claude-code', 'master'],
       votes: finding.severity === 'blocker' ? 4 : 2,
-      tags: ['ship-finding', finding.category],
-      body: `来源：Claude Ship 独立审校\n文件：${finding.filePath}\n摘要：${finding.summary}`,
+      tags: ['review-finding', finding.category],
+      body: `来源：交叉审校报告\n文件：${finding.filePath}\n摘要：${finding.summary}`,
       createdAt: new Date().toISOString(),
       replies: [],
     };
@@ -555,7 +614,11 @@ export function ForgeStudioApp({
       const next = await v4Api.demoRun({mode: preferredMode});
       applySessionDetail(next);
       setActiveNav('chat');
-      setActiveTab('board');
+      const firstCh = next.channels?.[0]?.id;
+      if (firstCh) {
+        setActiveChannel(firstCh);
+      }
+      setActiveTab('doc');
       setInspectorOpen(true);
       pushHistory({nav: 'chat', sessionId: next.session.id});
     });
@@ -570,7 +633,11 @@ export function ForgeStudioApp({
       });
       applySessionDetail(next);
       setActiveNav('chat');
-      setActiveTab('board');
+      const firstCh = next.channels?.[0]?.id;
+      if (firstCh) {
+        setActiveChannel(firstCh);
+      }
+      setActiveTab('doc');
       setInspectorOpen(true);
       pushHistory({nav: 'chat', sessionId: next.session.id});
     });
@@ -912,6 +979,300 @@ export function ForgeStudioApp({
     });
   };
 
+  const handlePostMessage = async (input: {
+    readonly channelId: string;
+    readonly content: string;
+    readonly attachments?: readonly PostAttachment[];
+  }): Promise<void> => {
+    await withBusy(async () => {
+      let sid = detail?.session.id ?? activeSessionId;
+      let resolvedChannelId: string | undefined = input.channelId;
+      if (!sid) {
+        const created = await v4Api.onboardFolder({
+          folderPath: '.',
+          title: input.content.trim().slice(0, 44) || '多人需求协同会话',
+          mode: preferredMode,
+          executionMode: 'auto',
+        });
+        applySessionDetail(created);
+        sid = created.session.id;
+        resolvedChannelId = created.channels?.[0]?.id ?? input.channelId;
+        if (resolvedChannelId) {
+          setActiveChannel(resolvedChannelId);
+        }
+      }
+      const res = await v4Api.postChannelMessage(sid, {
+        channelId: resolvedChannelId,
+        content: input.content,
+        attachments: input.attachments,
+      });
+      applySessionDetail(res.detail);
+      if (!inspectorOpen) {
+        setActiveTab('doc');
+        setInspectorOpen(true);
+      }
+    });
+  };
+
+  const handleReplyThread = async (
+    parentPostId: string,
+    text: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.postChannelMessage(detail.session.id, {
+        channelId: activeChannel,
+        parentPostId,
+        content: text,
+      });
+      applySessionDetail(res.detail);
+      setActiveThreadRootId(parentPostId);
+    });
+  };
+
+  const handleToggleResolveThread = async (
+    postId: string,
+    nextStatus: 'open' | 'resolved',
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.setPostThreadStatus(
+        detail.session.id,
+        postId,
+        nextStatus,
+      );
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleReactPost = async (
+    postId: string,
+    emoji: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.reactToPost(detail.session.id, postId, emoji);
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleSelectPollOption = async (
+    postId: string,
+    attachmentId: string,
+    optionId: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.selectPollOption(
+        detail.session.id,
+        postId,
+        attachmentId,
+        optionId,
+      );
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleSaveMockupHtml = async (
+    postId: string,
+    attachmentId: string,
+    htmlContent: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.updateHtmlMockup(
+        detail.session.id,
+        postId,
+        attachmentId,
+        htmlContent,
+      );
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleDrainUnread = async (sessionId?: string): Promise<void> => {
+    const sid = sessionId ?? detail?.session.id ?? activeSessionId;
+    if (!sid) return;
+    await withBusy(async () => {
+      const res = await v4Api.drainUnreadQueue(sid);
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleCreateSchedule = async (input: {
+    readonly targetAgentId: string;
+    readonly intervalLabel: string;
+    readonly promptText: string;
+  }): Promise<void> => {
+    const sid = detail?.session.id ?? activeSessionId ?? sessions[0]?.id;
+    if (!sid) return;
+    await withBusy(async () => {
+      const res = await v4Api.createSchedule(sid, {
+        channelId: activeChannel,
+        ...input,
+      });
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleRunScheduleNow = async (scheduleId: string): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.runScheduleNow(scheduleId);
+      setDashboard(res.dashboard);
+      if (detail) {
+        await loadSessionDetail(detail.session.id);
+      }
+      await loadBootstrap();
+    });
+  };
+
+  const handleDeleteSchedule = async (scheduleId: string): Promise<void> => {
+    await withBusy(async () => {
+      await v4Api.deleteSchedule(scheduleId);
+      await loadBootstrap();
+      if (detail) {
+        await loadSessionDetail(detail.session.id);
+      }
+    });
+  };
+
+  const handleSaveDocBlock = async (
+    blockId: string,
+    markdown: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.updateCollabDocBlock(detail.session.id, blockId, {
+        markdown,
+      });
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleAddDocComment = async (
+    blockId: string,
+    text: string,
+  ): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.commentCollabDocBlock(
+        detail.session.id,
+        blockId,
+        {text, channelId: activeChannel},
+      );
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleCompilePrdToSpec = async (): Promise<void> => {
+    if (!detail) return;
+    await withBusy(async () => {
+      const res = await v4Api.compilePrdToSpec(detail.session.id);
+      applySessionDetail(res.detail);
+    });
+  };
+
+  const handleUpsertProvider = async (input: {
+    readonly id?: string;
+    readonly name: string;
+    readonly kind: ProviderPresetKind;
+    readonly baseUrl: string;
+    readonly newApiKey?: string;
+    readonly newKeyLabel?: string;
+    readonly enabled?: boolean;
+  }): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.upsertProvider(input);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleTestProvider = async (providerId: string): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.testProvider(providerId);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleDeleteProvider = async (providerId: string): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.deleteProvider(providerId);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleActivateProfile = async (profileId: string): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.activateProfile(profileId);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleUpsertRoutingGroup = async (input: {
+    readonly id?: string;
+    readonly name: string;
+    readonly strategy: RoutingStrategy;
+    readonly targets: readonly {
+      readonly id: string;
+      readonly providerId: string;
+      readonly modelId: string;
+      readonly maxContextK?: number;
+    }[];
+  }): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.upsertRoutingGroup(input);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleUpdateAgentBinding = async (
+    agentId: string,
+    patch: {
+      readonly bindingKind?: AgentBindingKind;
+      readonly providerId?: string | null;
+      readonly modelId?: string | null;
+      readonly routingGroupId?: string | null;
+      readonly harnessId?: KernelId | null;
+    },
+  ): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.updateAgentBinding(agentId, patch);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleUpdateConnector = async (
+    connectorId: string,
+    patch: {
+      readonly enabled?: boolean;
+      readonly config?: Readonly<Record<string, string>>;
+    },
+  ): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.updateConnector(connectorId, patch);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
+  const handleUpdatePrivacyMasking = async (patch: {
+    readonly enabled?: boolean;
+    readonly maskSecrets?: boolean;
+    readonly maskEmails?: boolean;
+  }): Promise<void> => {
+    await withBusy(async () => {
+      const res = await v4Api.updatePrivacyMasking(patch);
+      setGateway(res.gateway);
+      await loadBootstrap();
+    });
+  };
+
   const handleSplitterMouseDown = (
     e: ReactMouseEvent<HTMLDivElement>,
   ): void => {
@@ -981,6 +1342,11 @@ export function ForgeStudioApp({
       k.kernelId.toLowerCase().includes(qLower),
   );
 
+  const queuedCount =
+    dashboard?.queuedItems.filter(q => q.status === 'queued').length ??
+    detail?.unreadQueue?.filter(q => q.status === 'queued').length ??
+    0;
+
   return (
     <div
       className="mpw-frame mp-shell"
@@ -1018,8 +1384,10 @@ export function ForgeStudioApp({
         activeNav={activeNav}
         onSelectNav={handleSelectNav}
         activeChannel={activeChannel}
+        channels={detail?.channels ?? []}
         onSelectChannel={handleSelectChannel}
-        onMentionAgent={handleMentionAgent}
+        agents={gateway?.agents ?? []}
+        onMentionHandle={handleMentionHandle}
         sessions={sessions}
         activeSessionId={activeSessionId}
         onSelectSession={handleSelectSession}
@@ -1027,7 +1395,7 @@ export function ForgeStudioApp({
         onOnboardFolder={handleOnboardFolder}
         catchupOnly={catchupOnly}
         onToggleCatchup={() => setCatchupOnly(prev => !prev)}
-        pendingApprovalsCount={pendingApprovalsCount}
+        queuedCount={queuedCount}
         openTriageCount={openTriageCount}
         kernels={kernels}
         hostedApps={hostedApps}
@@ -1044,11 +1412,17 @@ export function ForgeStudioApp({
         {activeNav === 'chat' ? (
           <MasterChatPane
             session={detail?.session ?? null}
+            specRevision={detail?.specIR.revision ?? 0}
             messages={detail?.messages ?? []}
+            posts={detail?.posts ?? []}
+            channels={detail?.channels ?? []}
+            agents={gateway?.agents ?? []}
+            collabDoc={detail?.collabDoc}
             collabFeed={detail?.collabFeed ?? []}
             pins={detail?.pins ?? []}
             diffs={detail?.diffs ?? []}
             kernels={kernels}
+            unreadQueue={detail?.unreadQueue ?? []}
             sessionCount={sessions.length}
             taskCount={tasks.length}
             completedTaskCount={completedTasks}
@@ -1063,14 +1437,34 @@ export function ForgeStudioApp({
             onDismissError={() => setErrorText(null)}
             onDemoRun={handleDemoRun}
             onOpenFolderPrompt={handleOpenFolderPrompt}
+            onSelectChannel={handleSelectChannel}
             onToggleTab={toggleInspectorTab}
             onOpenTab={openInspectorTab}
             onOpenSettings={openSettings}
-            onFileInTriage={handleFileInTriage}
             onSendTurn={handleSendTurn}
+            onPostMessage={handlePostMessage}
+            onReactPost={handleReactPost}
+            onToggleResolveThread={handleToggleResolveThread}
+            onSelectPollOption={handleSelectPollOption}
+            onSaveMockupHtml={handleSaveMockupHtml}
             onSubmitGrilling={handleSubmitGrilling}
             onRerunQuantize={handleRunQuantize}
             onToggleExecutionMode={handleToggleExecutionMode}
+            onDrainUnreadQueue={() => handleDrainUnread()}
+          />
+        ) : activeNav === 'dashboard' ? (
+          <AgentDashboardView
+            dashboard={dashboard}
+            activeSessionId={activeSessionId}
+            theme={theme}
+            busy={busy}
+            onRefresh={() => loadBootstrap()}
+            onDrainUnread={sid => handleDrainUnread(sid)}
+            onCreateSchedule={handleCreateSchedule}
+            onRunScheduleNow={handleRunScheduleNow}
+            onDeleteSchedule={handleDeleteSchedule}
+            onOpenSettings={page => openSettings(page ?? 'models')}
+            onBackToChat={() => setActiveNav('chat')}
           />
         ) : activeNav === 'triage' ? (
           <FeedbackTriageView
@@ -1182,13 +1576,24 @@ export function ForgeStudioApp({
         onStartResize={handleSplitterMouseDown}
         onClose={() => setInspectorOpen(false)}
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={openInspectorTab}
         detail={detail}
+        agents={gateway?.agents ?? []}
+        activeThreadRootId={activeThreadRootId}
+        focusedDocBlockId={focusedDocBlockId}
         kernels={kernels}
         roleRouting={roleRouting}
         theme={theme}
         selfApprovalBlockedMsg={selfApprovalBlockedMsg}
         busy={busy}
+        onSaveDocBlock={handleSaveDocBlock}
+        onAddDocComment={handleAddDocComment}
+        onCompilePrdToSpec={handleCompilePrdToSpec}
+        onReplyThread={handleReplyThread}
+        onToggleResolveThread={handleToggleResolveThread}
+        onReactPost={handleReactPost}
+        onSaveMockupHtml={handleSaveMockupHtml}
+        onSelectPollOption={handleSelectPollOption}
         onDecompose={handleDecompose}
         onMutateTasks={handleMutateTasks}
         onExecuteTasks={handleExecuteTasks}
@@ -1214,9 +1619,17 @@ export function ForgeStudioApp({
         onChangeTheme={changeTheme}
         preferences={preferences}
         onUpdatePreferences={updatePreferences}
+        gateway={gateway}
         kernels={kernels}
         roleRouting={roleRouting}
-        onUpdateRouting={handleUpdateRouting}
+        onUpsertProvider={handleUpsertProvider}
+        onTestProvider={handleTestProvider}
+        onDeleteProvider={handleDeleteProvider}
+        onActivateProfile={handleActivateProfile}
+        onUpsertRoutingGroup={handleUpsertRoutingGroup}
+        onUpdateAgentBinding={handleUpdateAgentBinding}
+        onUpdateConnector={handleUpdateConnector}
+        onUpdatePrivacyMasking={handleUpdatePrivacyMasking}
         onProbeKernels={handleProbeKernels}
         sessions={sessions}
         hostedApps={hostedApps}

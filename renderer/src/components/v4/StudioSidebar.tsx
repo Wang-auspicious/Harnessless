@@ -1,18 +1,21 @@
 import {useEffect, useRef, useState, type ReactElement} from 'react';
 import type {
+  AgentPersonaRecord,
+  CollabChannelRecord,
   HostedAppCard,
   KernelId,
   MasterSession,
   NativeKernelCard,
   SessionMode,
 } from '../../api/v4-types.ts';
-import {AgentBrandIcon} from './AgentAvatar.tsx';
+import {AgentBrandIcon, resolveBrandForAgent} from './AgentAvatar.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
 import type {SettingsPageId} from './SettingsModal.tsx';
 import {sessionStatusDot} from './v4-labels.ts';
 
 export type SidebarNavView =
   | 'chat'
+  | 'dashboard'
   | 'projects'
   | 'tasks'
   | 'artifacts'
@@ -20,34 +23,16 @@ export type SidebarNavView =
   | 'kernels'
   | 'customize';
 
-export type ChannelId =
-  'general' | 'architecture' | 'code-review' | 'ship-triage';
+export type ChannelId = 'requirements' | 'architecture' | 'review';
 
 export const CHANNELS: readonly {
   readonly id: ChannelId;
   readonly name: string;
   readonly subtitle: string;
-  readonly defaultTab?: 'board' | 'code' | 'verify' | 'tasks';
 }[] = [
-  {id: 'general', name: 'general', subtitle: '主控协同'},
-  {
-    id: 'architecture',
-    name: 'architecture',
-    subtitle: '白板与 Spec',
-    defaultTab: 'board',
-  },
-  {
-    id: 'code-review',
-    name: 'code-review',
-    subtitle: 'Diff 评审',
-    defaultTab: 'code',
-  },
-  {
-    id: 'ship-triage',
-    name: 'ship-triage',
-    subtitle: 'Ship 验收',
-    defaultTab: 'verify',
-  },
+  {id: 'requirements', name: '需求讨论', subtitle: 'PRD 共编'},
+  {id: 'architecture', name: '架构与原型', subtitle: '白板与 Spec'},
+  {id: 'review', name: '评审验收', subtitle: '交叉审校'},
 ];
 
 export interface StudioSidebarProps {
@@ -55,9 +40,11 @@ export interface StudioSidebarProps {
   readonly onChangeMode: (mode: SessionMode) => void;
   readonly activeNav: SidebarNavView;
   readonly onSelectNav: (nav: SidebarNavView) => void;
-  readonly activeChannel: ChannelId;
-  readonly onSelectChannel: (channel: ChannelId) => void;
-  readonly onMentionAgent: (kernelId: KernelId) => void;
+  readonly activeChannel: string;
+  readonly channels: readonly CollabChannelRecord[];
+  readonly onSelectChannel: (channelId: string) => void;
+  readonly agents: readonly AgentPersonaRecord[];
+  readonly onMentionHandle: (handle: string) => void;
   readonly sessions: readonly MasterSession[];
   readonly activeSessionId: string | null;
   readonly onSelectSession: (sessionId: string) => void;
@@ -65,7 +52,7 @@ export interface StudioSidebarProps {
   readonly onOnboardFolder: (folderPath: string) => Promise<void>;
   readonly catchupOnly: boolean;
   readonly onToggleCatchup: () => void;
-  readonly pendingApprovalsCount: number;
+  readonly queuedCount: number;
   readonly openTriageCount: number;
   readonly kernels: readonly NativeKernelCard[];
   readonly hostedApps: readonly HostedAppCard[];
@@ -98,8 +85,10 @@ export function StudioSidebar({
   activeNav,
   onSelectNav,
   activeChannel,
+  channels,
   onSelectChannel,
-  onMentionAgent,
+  agents,
+  onMentionHandle,
   sessions,
   activeSessionId,
   onSelectSession,
@@ -107,7 +96,7 @@ export function StudioSidebar({
   onOnboardFolder,
   catchupOnly,
   onToggleCatchup,
-  pendingApprovalsCount,
+  queuedCount,
   openTriageCount,
   kernels,
   hostedApps,
@@ -116,12 +105,9 @@ export function StudioSidebar({
   onToggleTheme,
   onOpenSettings,
   onSwitchToLegacy,
-  onDemoRun,
   busy,
 }: StudioSidebarProps): ReactElement {
-  const [accountMenuOpen, setAccountMenuOpen] = useState(
-    () => window.location.hash === '#smoke-home',
-  );
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<
     Record<string, boolean>
@@ -156,7 +142,7 @@ export function StudioSidebar({
       return;
     }
     onSelectNav('projects');
-    setFolderNote('请在 Projects 面板输入本地工程目录路径。');
+    setFolderNote('请在项目面板选择或输入工程目录路径。');
   };
 
   const normalizedQuery = (localSearch || searchQuery).trim().toLowerCase();
@@ -164,9 +150,7 @@ export function StudioSidebar({
     if (catchupOnly && s.stage !== 'spec' && s.stage !== 'review') {
       return false;
     }
-    if (!normalizedQuery) {
-      return true;
-    }
+    if (!normalizedQuery) return true;
     return (
       s.title.toLowerCase().includes(normalizedQuery) ||
       s.workspacePath.toLowerCase().includes(normalizedQuery) ||
@@ -183,12 +167,21 @@ export function StudioSidebar({
   }
 
   const readyKernels = kernels.filter(
-    k => k.status === 'ready' || k.status === 'builtin',
+    k => k.status === 'ready' && k.kernelId !== ('master' as KernelId),
   ).length;
 
   const toggleGroup = (key: string): void => {
     setCollapsedGroups(prev => ({...prev, [key]: !prev[key]}));
   };
+
+  const displayChannels =
+    channels.length > 0
+      ? channels.map(c => ({id: c.id, name: c.title, subtitle: c.slug}))
+      : CHANNELS.map(c => ({
+          id: c.id,
+          name: c.name,
+          subtitle: c.subtitle,
+        }));
 
   return (
     <aside
@@ -213,7 +206,7 @@ export function StudioSidebar({
               onClick={() => onChangeMode('solo')}
             >
               <CdsIcon name="Code" size="small" />
-              <span>Solo</span>
+              <span>专注</span>
             </button>
             <button
               type="button"
@@ -223,7 +216,7 @@ export function StudioSidebar({
               onClick={() => onChangeMode('team')}
             >
               <CdsIcon name="Team" size="small" />
-              <span>Team</span>
+              <span>团队协同</span>
             </button>
           </div>
         </div>
@@ -243,7 +236,23 @@ export function StudioSidebar({
                 <CdsIcon name="Add" size="small" />
               </span>
             </span>
-            <span className="mp-nav-label mpw-new-session-label">New</span>
+            <span className="mp-nav-label mpw-new-session-label">
+              新建协同会话
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={`mpw-customize ${activeNav === 'dashboard' ? 'is-on' : ''}`}
+            onClick={() => onSelectNav('dashboard')}
+          >
+            <span className="mp-nav-leading">
+              <CdsIcon name="BarChart" size="small" />
+            </span>
+            <span className="mp-nav-label">协同调度台</span>
+            {queuedCount > 0 ? (
+              <span className="sd-nav-count">{queuedCount}</span>
+            ) : null}
           </button>
 
           <button
@@ -254,31 +263,19 @@ export function StudioSidebar({
             <span className="mp-nav-leading">
               <CdsIcon name="Projects" size="small" anim="ANIM" />
             </span>
-            <span className="mp-nav-label">Projects</span>
+            <span className="mp-nav-label">工程项目</span>
           </button>
 
-          <div className="mp-nav-row">
-            <button
-              type="button"
-              className={`mpw-customize ${activeNav === 'artifacts' ? 'is-on' : ''}`}
-              onClick={() => onSelectNav('artifacts')}
-            >
-              <span className="mp-nav-leading">
-                <CdsIcon name="Artifacts" size="small" anim="ANIM" />
-              </span>
-              <span className="mp-nav-label">Artifacts</span>
-            </button>
-            <button
-              type="button"
-              className="mp-nav-create"
-              aria-label="Run Demo Pipeline"
-              title="一键生成示例交付与白板"
-              disabled={busy}
-              onClick={() => void onDemoRun()}
-            >
-              <CdsIcon name="Add" size="small" />
-            </button>
-          </div>
+          <button
+            type="button"
+            className={`mpw-customize ${activeNav === 'artifacts' ? 'is-on' : ''}`}
+            onClick={() => onSelectNav('artifacts')}
+          >
+            <span className="mp-nav-leading">
+              <CdsIcon name="Artifacts" size="small" anim="ANIM" />
+            </span>
+            <span className="mp-nav-label">产物与交付</span>
+          </button>
 
           <button
             type="button"
@@ -288,7 +285,7 @@ export function StudioSidebar({
             <span className="mp-nav-leading">
               <CdsIcon name="Inbox" size="small" />
             </span>
-            <span className="mp-nav-label">Triage</span>
+            <span className="mp-nav-label">议题与反馈</span>
             {openTriageCount > 0 ? (
               <span className="sd-nav-count">{openTriageCount}</span>
             ) : null}
@@ -302,7 +299,7 @@ export function StudioSidebar({
             <span className="mp-nav-leading">
               <CdsIcon name="Customize" size="small" anim="ANIM" />
             </span>
-            <span className="mp-nav-label">Customize</span>
+            <span className="mp-nav-label">能力与连接</span>
           </button>
 
           <div ref={moreRef} style={{position: 'relative'}}>
@@ -316,10 +313,7 @@ export function StudioSidebar({
               <span className="mp-nav-leading">
                 <CdsIcon name="CaretDown" size="small" />
               </span>
-              <span className="mp-nav-label">
-                More
-                {pendingApprovalsCount > 0 ? ` (${pendingApprovalsCount})` : ''}
-              </span>
+              <span className="mp-nav-label">更多工具</span>
             </button>
 
             {moreMenuOpen ? (
@@ -333,35 +327,22 @@ export function StudioSidebar({
                   role="menuitem"
                   onClick={() => {
                     setMoreMenuOpen(false);
-                    onSelectNav('kernels');
-                  }}
-                >
-                  <CdsIcon name="CommandLinePrompt" size="small" />
-                  <span>
-                    Kernels &amp; Bus ({readyKernels}/{kernels.length})
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
                     onSelectNav('tasks');
                   }}
                 >
                   <CdsIcon name="Tasks" size="small" />
-                  <span>Tasks &amp; Checkpoints</span>
+                  <span>任务拆解与检查点</span>
                 </button>
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => {
                     setMoreMenuOpen(false);
-                    onSelectNav('artifacts');
+                    onOpenSettings('clis');
                   }}
                 >
-                  <CdsIcon name="Box" size="small" />
-                  <span>已交付应用 ({hostedApps.length})</span>
+                  <CdsIcon name="CommandLinePrompt" size="small" />
+                  <span>本地 CLI 引擎 ({readyKernels})</span>
                 </button>
                 <button
                   type="button"
@@ -372,11 +353,7 @@ export function StudioSidebar({
                   }}
                 >
                   <CdsIcon name="Filter" size="small" />
-                  <span>
-                    {catchupOnly
-                      ? '显示全部会话'
-                      : `仅看审批待办 (${pendingApprovalsCount})`}
-                  </span>
+                  <span>{catchupOnly ? '显示全部会话' : '仅看审校待确认'}</span>
                 </button>
                 <hr />
                 <button
@@ -388,19 +365,8 @@ export function StudioSidebar({
                   }}
                 >
                   <CdsIcon name="Settings" size="small" />
-                  <span>Settings</span>
+                  <span>全局设置</span>
                   <kbd>Ctrl+,</kbd>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    onSwitchToLegacy();
-                  }}
-                >
-                  <CdsIcon name="Code" size="small" />
-                  <span>ForgeOps v3.1 专家模式</span>
                 </button>
               </div>
             ) : null}
@@ -409,7 +375,7 @@ export function StudioSidebar({
 
         <section
           className={`mpw-workspace-browser ${searchFocused || localSearch ? 'is-searching' : ''}`}
-          aria-label="Workspace, Channels and Agents"
+          aria-label="Channels, Agents and Sessions"
         >
           <div className="mpw-workspace-header">
             <span className="mp-projects-label">Workspace</span>
@@ -431,7 +397,7 @@ export function StudioSidebar({
                 onFocus={() => setSearchFocused(true)}
                 onBlur={() => setSearchFocused(Boolean(localSearch))}
                 onChange={e => setLocalSearch(e.target.value)}
-                placeholder="Filter…"
+                placeholder="筛选…"
                 aria-label="Filter sessions"
               />
             </div>
@@ -455,7 +421,6 @@ export function StudioSidebar({
 
           <div className="mpw-session-list-seat">
             <div id="side-convos">
-              {/* Slack/Raft Channels group */}
               {mode === 'team' ? (
                 <div
                   className="mpw-project"
@@ -470,11 +435,11 @@ export function StudioSidebar({
                       <span className="mpw-project-chevron">
                         <CdsIcon name="CaretRight" size="xs" />
                       </span>
-                      <span className="mpw-project-name">Channels</span>
+                      <span className="mpw-project-name">协同频道</span>
                     </button>
                   </div>
                   <div className="mpw-project-sessions">
-                    {CHANNELS.map(ch => {
+                    {displayChannels.map(ch => {
                       const isSel =
                         activeNav === 'chat' && activeChannel === ch.id;
                       return (
@@ -486,11 +451,9 @@ export function StudioSidebar({
                             onSelectNav('chat');
                             onSelectChannel(ch.id);
                           }}
-                          title={`${ch.name} — ${ch.subtitle}`}
                         >
                           <span className="sd-channel-hash">#</span>
                           <span className="side-title">{ch.name}</span>
-                          <span className="sd-channel-hint">{ch.subtitle}</span>
                         </button>
                       );
                     })}
@@ -498,7 +461,7 @@ export function StudioSidebar({
                 </div>
               ) : null}
 
-              {/* Multi-Agent Direct Messages group with authentic SVG brand icons */}
+              {/* Specialist Agent Roster with Real Bound Model Icons */}
               <div
                 className="mpw-project"
                 data-open={!collapsedGroups['__agents'] ? 'true' : 'false'}
@@ -512,13 +475,13 @@ export function StudioSidebar({
                     <span className="mpw-project-chevron">
                       <CdsIcon name="CaretRight" size="xs" />
                     </span>
-                    <span className="mpw-project-name">Agents</span>
+                    <span className="mpw-project-name">团队角色</span>
                   </button>
                   <div className="mpw-project-actions">
                     <button
                       type="button"
-                      aria-label="Configure kernels"
-                      title="配置模型与原生内核"
+                      aria-label="Configure models and agents"
+                      title="配置模型与角色绑定"
                       onClick={() => onOpenSettings('models')}
                     >
                       <CdsIcon name="Settings" size="small" />
@@ -526,24 +489,29 @@ export function StudioSidebar({
                   </div>
                 </div>
                 <div className="mpw-project-sessions">
-                  {kernels.slice(0, 6).map(k => (
+                  {agents.map(ag => (
                     <button
-                      key={k.kernelId}
+                      key={ag.id}
                       type="button"
                       className="side-item sd-agent-dm-row"
                       onClick={() => {
                         onSelectNav('chat');
-                        onMentionAgent(k.kernelId);
+                        onMentionHandle(ag.handle);
                       }}
-                      title={`在对话中 @${k.displayName} (${k.status})`}
+                      title={`在讨论中 @${ag.handle} · ${ag.resolvedModelLabel}`}
                     >
                       <AgentBrandIcon
-                        kernelId={k.kernelId}
+                        kernelId={resolveBrandForAgent({
+                          avatarKey: ag.avatarKey,
+                          bindingKind: ag.bindingKind,
+                          providerId: ag.providerId,
+                          harnessId: ag.harnessId,
+                        })}
                         theme={theme}
                         size={15}
-                        status={k.status}
+                        status={ag.enabled ? 'ready' : 'offline'}
                       />
-                      <span className="side-title">{k.displayName}</span>
+                      <span className="side-title">{ag.displayName}</span>
                     </button>
                   ))}
                 </div>
@@ -551,7 +519,7 @@ export function StudioSidebar({
 
               {/* Project Folders & Sessions tree */}
               {grouped.size === 0 ? (
-                <div className="side-empty">No matching sessions</div>
+                <div className="side-empty">暂无协同会话</div>
               ) : (
                 Array.from(grouped.entries()).map(([groupName, items]) => {
                   const isOpen = !collapsedGroups[groupName];
@@ -629,17 +597,17 @@ export function StudioSidebar({
             type="button"
             className="mp-account-footer"
             id="account-footer"
-            aria-label="SDLC-Studio Gateway"
+            aria-label="工作台与模型设置"
             aria-haspopup="menu"
             aria-expanded={accountMenuOpen}
             onClick={() => setAccountMenuOpen(prev => !prev)}
           >
             <span className="mp-account-mark" aria-hidden="true">
-              F
+              Z
             </span>
             <span>
-              <strong>SDLC-Studio</strong>
-              <small>Gateway</small>
+              <strong>工作区负责人</strong>
+              <small>{agents.length} 个角色已配置</small>
             </span>
             <CdsIcon name="CaretDown" size="micro" />
           </button>
@@ -649,11 +617,11 @@ export function StudioSidebar({
               className="mp-account-menu"
               id="account-menu"
               role="menu"
-              aria-label="SDLC-Studio menu"
+              aria-label="Workspace settings menu"
               style={{bottom: 48, left: 8}}
             >
               <p className="mp-account-menu-header">
-                SDLC-Studio · {readyKernels}/{kernels.length} Kernels
+                协同工作区 · {hostedApps.length} 个已交付应用
               </p>
               <button
                 type="button"
@@ -664,7 +632,7 @@ export function StudioSidebar({
                 }}
               >
                 <CdsIcon name="Settings" size="small" />
-                <span>Settings</span>
+                <span>外观与通用设置</span>
                 <kbd>Ctrl+,</kbd>
               </button>
               <button
@@ -676,29 +644,29 @@ export function StudioSidebar({
                 }}
               >
                 <CdsIcon name="Agent" size="small" />
-                <span>Models &amp; Kernels</span>
+                <span>模型供应商与角色绑定</span>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   setAccountMenuOpen(false);
-                  onOpenSettings('permissions');
+                  onOpenSettings('routing');
                 }}
               >
-                <CdsIcon name="LockShield" size="small" />
-                <span>Permissions &amp; Ship</span>
+                <CdsIcon name="GitBranch" size="small" />
+                <span>路由组与隐私脱敏</span>
               </button>
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   setAccountMenuOpen(false);
-                  onOpenSettings('usage');
+                  onOpenSettings('connectors');
                 }}
               >
-                <CdsIcon name="BarChart" size="small" />
-                <span>Usage &amp; Activity</span>
+                <CdsIcon name="Plug" size="small" />
+                <span>外部连接器</span>
               </button>
               <hr />
               <button
@@ -710,7 +678,7 @@ export function StudioSidebar({
                 }}
               >
                 <CdsIcon name="Code" size="small" />
-                <span>v3.1 专家控制台</span>
+                <span>切换专家控制面板</span>
               </button>
             </div>
           ) : null}

@@ -18,7 +18,7 @@ import type {SidebarNavView} from './StudioSidebar.tsx';
 import {STAGE_META, kernelLabel} from './v4-labels.ts';
 
 export interface LibraryViewsProps {
-  readonly view: Exclude<SidebarNavView, 'chat' | 'triage'>;
+  readonly view: Exclude<SidebarNavView, 'chat' | 'triage' | 'dashboard'>;
   readonly detail: V4SessionDetail | null;
   readonly sessions: readonly MasterSession[];
   readonly kernels: readonly NativeKernelCard[];
@@ -228,9 +228,9 @@ export function LibraryViews({
         <div className="sd-library-inner">
           <header className="sd-library-header">
             <div>
-              <h1>Artifacts &amp; Shipped Apps</h1>
+              <h1>产物与已交付应用</h1>
               <p className="sd-triage-subtitle">
-                Excalidraw 架构白板、Spec IR 契约、Answer-in-HTML 与托管版本
+                架构白板、结构化 Spec 契约、交互验收报告与本地托管服务
               </p>
             </div>
             <div className="sd-toolbar-row">
@@ -275,8 +275,8 @@ export function LibraryViews({
                 <CdsIcon name="Verified" size="large" />
               </div>
               <div className="sd-template-copy">
-                <strong>Answer-in-HTML Report</strong>
-                <small>三权独立审校产物与沙箱验收预览</small>
+                <strong>交互式验收报告</strong>
+                <small>独立交叉审校结果与沙箱验收预览</small>
               </div>
             </button>
 
@@ -364,13 +364,9 @@ export function LibraryViews({
       <div className="sd-library-inner">
         <header className="sd-library-header">
           <div>
-            <h1>
-              {view === 'kernels'
-                ? 'Native Agent Kernels'
-                : 'Customize & Integrations'}
-            </h1>
+            <h1>{view === 'kernels' ? '本地引擎探测' : '能力与外部连接器'}</h1>
             <p className="sd-triage-subtitle">
-              原生 AI 编码内核、工具连接器与 Orca 多角色协作路由
+              管理本地编码助手引擎、模型供应商路由及外部平台同步通道
             </p>
           </div>
           <div className="sd-toolbar-row">
@@ -396,34 +392,38 @@ export function LibraryViews({
             <div className="sd-connector-card">
               <AppBrandIcon app="slack" theme={theme} size={20} />
               <div>
-                <strong>Slack / Thread Sync</strong>
-                <small>#general · #architecture · @mentions</small>
+                <strong>团队频道与外部同步</strong>
+                <small>#需求讨论 · #架构与原型 · Slack Webhook</small>
               </div>
-              <span className="sd-pill is-success">Built-in</span>
+              <span className="sd-pill is-success">内建实时</span>
             </div>
             <div className="sd-connector-card">
               <AppBrandIcon app="linear" theme={theme} size={20} />
               <div>
-                <strong>Issue Triage &amp; Ship</strong>
-                <small>Pins + Ship Findings → Triage</small>
+                <strong>议题追踪与独立审校</strong>
+                <small>画布批注 + 代码评审风险联动</small>
               </div>
-              <span className="sd-pill is-success">Active</span>
+              <span className="sd-pill is-success">已启用</span>
             </div>
             <div className="sd-connector-card">
               <AppBrandIcon app="figma" theme={theme} size={20} />
               <div>
-                <strong>Excalidraw Canvas</strong>
-                <small>Sketchy Nodes ↔ Spec IR</small>
+                <strong>协同白板与 PRD·Spec 联动</strong>
+                <small>双向绑定架构图 ↔ 结构化 Spec</small>
               </div>
-              <span className="sd-pill is-success">Ready</span>
+              <span className="sd-pill is-success">已就绪</span>
             </div>
             <div className="sd-connector-card">
-              <AgentBrandIcon kernelId="claude-code" theme={theme} size={20} />
+              <AgentBrandIcon
+                kernelId={roleRouting.reviewer}
+                theme={theme}
+                size={20}
+              />
               <div>
                 <strong>{kernelLabel(roleRouting.reviewer)}</strong>
-                <small>Reviewer Policy: Enforced</small>
+                <small>强制与编码角色模型物理隔离</small>
               </div>
-              <span className="sd-pill is-clay">Reviewer</span>
+              <span className="sd-pill">独立审校</span>
             </div>
           </div>
         ) : null}

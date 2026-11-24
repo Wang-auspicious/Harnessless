@@ -54,7 +54,7 @@ export function BoardSpecTab({
     >
       <div className="sd-pane-head">
         <div className="sd-pane-title-group">
-          <h3>Excalidraw 白板 × Spec IR 共识</h3>
+          <h3>架构白板 × Spec 实时共识</h3>
           <p>
             Board Rev {board.revision} · Spec Rev {specIR.revision} · Term{' '}
             {specIR.term}

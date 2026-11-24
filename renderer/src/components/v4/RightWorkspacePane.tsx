@@ -4,7 +4,9 @@ import type {
   ReactElement,
 } from 'react';
 import type {
+  AgentPersonaRecord,
   BoardSceneDoc,
+  CollabPostRecord,
   KernelId,
   NativeKernelCard,
   ShipReviewFinding,
@@ -16,9 +18,12 @@ import type {
 import {BoardSpecTab} from './BoardSpecTab.tsx';
 import {CdsIcon} from './CdsIcon.tsx';
 import {CodeDiffTab} from './CodeDiffTab.tsx';
+import {CollabDocPane} from './CollabDocPane.tsx';
 import {DagCheckpointTab} from './DagCheckpointTab.tsx';
+import {MediaPreviewTab} from './MediaPreviewTab.tsx';
 import {MountedKernelsTab} from './MountedKernelsTab.tsx';
 import {TasksPlanTab} from './TasksPlanTab.tsx';
+import {ThreadDrawerTab} from './ThreadDrawerTab.tsx';
 import {VerifyHtmlTab} from './VerifyHtmlTab.tsx';
 
 export interface RightWorkspacePaneProps {
@@ -28,13 +33,38 @@ export interface RightWorkspacePaneProps {
   readonly onStartResize: (e: ReactMouseEvent<HTMLDivElement>) => void;
   readonly onClose: () => void;
   readonly activeTab: WorkspaceTabId;
-  readonly onSelectTab: (tab: WorkspaceTabId) => void;
+  readonly onSelectTab: (
+    tab: WorkspaceTabId,
+    extra?: {readonly blockId?: string; readonly threadId?: string},
+  ) => void;
   readonly detail: V4SessionDetail | null;
+  readonly agents: readonly AgentPersonaRecord[];
+  readonly activeThreadRootId: string | null;
+  readonly focusedDocBlockId: string | null;
   readonly kernels: readonly NativeKernelCard[];
   readonly roleRouting: Record<TaskNodeRole, KernelId>;
   readonly theme: 'light' | 'dark';
   readonly selfApprovalBlockedMsg: string | null;
   readonly busy: boolean;
+  readonly onSaveDocBlock: (blockId: string, markdown: string) => Promise<void>;
+  readonly onAddDocComment: (blockId: string, text: string) => Promise<void>;
+  readonly onCompilePrdToSpec: () => Promise<void>;
+  readonly onReplyThread: (parentPostId: string, text: string) => Promise<void>;
+  readonly onToggleResolveThread: (
+    postId: string,
+    nextStatus: 'open' | 'resolved',
+  ) => Promise<void>;
+  readonly onReactPost: (postId: string, emoji: string) => Promise<void>;
+  readonly onSaveMockupHtml: (
+    postId: string,
+    attachmentId: string,
+    htmlContent: string,
+  ) => Promise<void>;
+  readonly onSelectPollOption: (
+    postId: string,
+    attachmentId: string,
+    optionId: string,
+  ) => Promise<void>;
   readonly onDecompose: (force?: boolean) => Promise<void>;
   readonly onMutateTasks: (mutation: TaskMutation) => Promise<void>;
   readonly onExecuteTasks: (opts?: {
@@ -82,11 +112,22 @@ export function RightWorkspacePane({
   activeTab,
   onSelectTab,
   detail,
+  agents,
+  activeThreadRootId,
+  focusedDocBlockId,
   kernels,
   roleRouting,
   theme,
   selfApprovalBlockedMsg,
   busy,
+  onSaveDocBlock,
+  onAddDocComment,
+  onCompilePrdToSpec,
+  onReplyThread,
+  onToggleResolveThread,
+  onReactPost,
+  onSaveMockupHtml,
+  onSelectPollOption,
   onDecompose,
   onMutateTasks,
   onExecuteTasks,
@@ -102,28 +143,57 @@ export function RightWorkspacePane({
   onUpdateRouting,
   onPostCollab,
 }: RightWorkspacePaneProps): ReactElement {
-  const taskCount = detail?.activePlan?.tasks.length ?? 0;
+  const posts = detail?.posts ?? [];
+  const docRev = detail?.collabDoc?.revision;
   const diffCount = detail?.diffs.length ?? 0;
+  const taskCount = detail?.activePlan?.tasks.length ?? 0;
   const pinCount =
     detail?.pins.filter(p => p.status !== 'resolved').length ?? 0;
-  const readyKernelCount = kernels.filter(
-    k => k.status === 'ready' || k.status === 'builtin',
-  ).length;
+  const mediaCount = posts.reduce(
+    (sum, p) =>
+      sum +
+      p.attachments.filter(
+        a =>
+          a.kind === 'html_mockup' ||
+          a.kind === 'image' ||
+          a.kind === 'video' ||
+          a.kind === 'markdown_doc',
+      ).length,
+    0,
+  );
   const primaryCoderKernel =
     detail?.activePlan?.tasks.find(t => t.role === 'coder')?.assignedKernel ??
     roleRouting.coder;
+
+  // Locate selected thread root or first post that has replies
+  const topPosts = posts.filter(p => !p.parentPostId);
+  const rootPost: CollabPostRecord | null =
+    (activeThreadRootId
+      ? topPosts.find(p => p.id === activeThreadRootId)
+      : null) ??
+    topPosts.find(p => (p.replyCount ?? 0) > 0) ??
+    topPosts[topPosts.length - 1] ??
+    null;
+  const threadReplies = rootPost
+    ? posts.filter(p => p.parentPostId === rootPost.id)
+    : [];
 
   const tabs: readonly {
     readonly id: WorkspaceTabId;
     readonly label: string;
     readonly badge?: number;
   }[] = [
-    {id: 'tasks', label: 'Tasks', badge: taskCount || undefined},
-    {id: 'board', label: 'Board · Spec', badge: pinCount || undefined},
-    {id: 'code', label: 'Diff', badge: diffCount || undefined},
-    {id: 'verify', label: 'Verify'},
-    {id: 'kernels', label: 'Kernels', badge: readyKernelCount || undefined},
-    {id: 'dag', label: 'DAG'},
+    {id: 'doc', label: '文档 PRD·Spec', badge: docRev},
+    {
+      id: 'thread',
+      label: '线程',
+      badge: threadReplies.length || undefined,
+    },
+    {id: 'board', label: '白板', badge: pinCount || undefined},
+    {id: 'preview', label: '预览', badge: mediaCount || undefined},
+    {id: 'code', label: '文件', badge: diffCount || undefined},
+    {id: 'tasks', label: '任务', badge: taskCount || undefined},
+    {id: 'verify', label: '审校'},
   ];
 
   return (
@@ -189,14 +259,38 @@ export function RightWorkspacePane({
       </header>
 
       <section className="mp-inspector-panel">
-        {activeTab === 'tasks' ? (
-          <TasksPlanTab
-            plan={detail?.activePlan ?? null}
+        {activeTab === 'doc' ? (
+          detail ? (
+            <CollabDocPane
+              doc={detail.collabDoc}
+              specIR={detail.specIR}
+              agents={agents}
+              focusedBlockId={focusedDocBlockId}
+              busy={busy}
+              onSaveBlock={onSaveDocBlock}
+              onAddComment={onAddDocComment}
+              onCompileSpec={onCompilePrdToSpec}
+              onOpenBoard={() => onSelectTab('board')}
+            />
+          ) : (
+            <p className="mp-inspector-empty">
+              新建或打开会话后，可在此进行实时多人 / 多智能体 PRD
+              共编并生成结构化 Spec。
+            </p>
+          )
+        ) : null}
+
+        {activeTab === 'thread' ? (
+          <ThreadDrawerTab
+            rootPost={rootPost}
+            replies={threadReplies}
+            agents={agents}
             theme={theme}
             busy={busy}
-            onDecompose={onDecompose}
-            onMutate={onMutateTasks}
-            onExecute={onExecuteTasks}
+            onReplyThread={onReplyThread}
+            onToggleResolve={onToggleResolveThread}
+            onReact={onReactPost}
+            onOpenTab={onSelectTab}
           />
         ) : null}
 
@@ -217,10 +311,19 @@ export function RightWorkspacePane({
             />
           ) : (
             <p className="mp-inspector-empty">
-              打开本地目录或运行示例项目后，可在此联动编辑 Excalidraw 白板与
-              Spec IR。
+              打开项目后可在此编辑架构拓扑白板并与 Spec 契约联动。
             </p>
           )
+        ) : null}
+
+        {activeTab === 'preview' ? (
+          <MediaPreviewTab
+            posts={posts}
+            busy={busy}
+            onOpenTab={onSelectTab}
+            onSaveMockupHtml={onSaveMockupHtml}
+            onSelectPollOption={onSelectPollOption}
+          />
         ) : null}
 
         {activeTab === 'code' ? (
@@ -239,6 +342,17 @@ export function RightWorkspacePane({
                 promptText: input.promptText,
               })
             }
+          />
+        ) : null}
+
+        {activeTab === 'tasks' ? (
+          <TasksPlanTab
+            plan={detail?.activePlan ?? null}
+            theme={theme}
+            busy={busy}
+            onDecompose={onDecompose}
+            onMutate={onMutateTasks}
+            onExecute={onExecuteTasks}
           />
         ) : null}
 
