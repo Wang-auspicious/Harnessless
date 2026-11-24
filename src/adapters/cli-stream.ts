@@ -11,7 +11,9 @@ import type {
 } from './contracts.ts';
 
 const RATE_LIMIT_PATTERN =
-  /\b429\b|rate[_ -]?limit|quota exceeded|too many requests|overloaded/i;
+  /\b429\b|rate[_ -]?limit|quota exceeded|resource[_ -]?exhausted|too many requests|overloaded|retry[- ]after/i;
+const AUTH_ERROR_PATTERN =
+  /\b401\b|\b403\b|unauthorized|unauthenticated|invalid[_ -]?api[_ -]?key|missing[_ -]?api[_ -]?key|authentication failed|not logged in|login required|please run .*login|oauth.*expired/i;
 const ENV_FAULT_PATTERN =
   /executable not found|command not found|enoent|eacces|spawn .* failed/i;
 
@@ -26,6 +28,30 @@ export interface ParsedCliStreamEvent {
   readonly isError: boolean;
 }
 
+function stripWriteFlagsForReadOnly(rawFlags: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < rawFlags.length; i += 1) {
+    const flag = rawFlags[i]!;
+    if (
+      flag === '--full-auto' ||
+      flag === '--dangerously-skip-permissions' ||
+      flag === '--yolo' ||
+      flag === '-y'
+    ) {
+      continue;
+    }
+    if (flag === '--approval-mode') {
+      const next = rawFlags[i + 1];
+      if (next === 'yolo' || next === 'auto_edit') {
+        i += 1;
+        continue;
+      }
+    }
+    out.push(flag);
+  }
+  return out;
+}
+
 export function buildCliInvocationArgs(req: AgentInvocationRequest): {
   readonly args: string[];
   readonly stdinText?: string;
@@ -37,10 +63,27 @@ export function buildCliInvocationArgs(req: AgentInvocationRequest): {
     ...adapter.permissionFlags[effectiveTier],
   ];
   const args: string[] = req.readOnly
-    ? rawFlags.filter(
-        f => f !== '--full-auto' && f !== '--dangerously-skip-permissions',
-      )
-    : rawFlags;
+    ? stripWriteFlagsForReadOnly(rawFlags)
+    : [...rawFlags];
+
+  const isGeminiCli = adapter.id === 'gemini-cli';
+  const modelId = req.model.trim();
+  const supportsModelFlag =
+    adapter.id === 'claude-code' ||
+    adapter.id === 'codex' ||
+    adapter.id === 'gemini-cli';
+  if (
+    supportsModelFlag &&
+    modelId.length > 0 &&
+    !args.includes('--model') &&
+    !args.includes('-m')
+  ) {
+    args.push('--model', modelId);
+  }
+
+  if (isGeminiCli && req.readOnly && !args.includes('--approval-mode')) {
+    args.push('--approval-mode', 'plan');
+  }
 
   if (mcpEndpointUrl) {
     if (adapter.mcpInjection === 'claude-mcp-json') {
@@ -70,6 +113,23 @@ export function buildCliInvocationArgs(req: AgentInvocationRequest): {
   const combinedPrompt = `${req.systemPrompt}\n\n${req.userPrompt}`.trim();
   const useStdin =
     adapter.promptTransport === 'stdin' || combinedPrompt.length > 2048;
+
+  if (isGeminiCli) {
+    // Gemini CLI `-p`/`--prompt` expects a string argument; normalize bare `-p`
+    // so following flags like `--output-format` are never swallowed as its value.
+    const promptFlagIdx = args.findIndex(a => a === '-p' || a === '--prompt');
+    if (promptFlagIdx >= 0) {
+      const nextToken = args[promptFlagIdx + 1];
+      const missingValue = nextToken === undefined || nextToken.startsWith('-');
+      if (missingValue) {
+        args.splice(promptFlagIdx + 1, 0, useStdin ? '' : combinedPrompt);
+      }
+    } else if (!useStdin) {
+      args.push('-p', combinedPrompt);
+    }
+    return useStdin ? {args, stdinText: combinedPrompt} : {args};
+  }
+
   if (useStdin) {
     return {args, stdinText: combinedPrompt};
   }
@@ -82,9 +142,30 @@ function numVal(obj: Record<string, unknown>, key: string): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
+function extractErrorMessage(obj: Record<string, unknown>): string {
+  const errVal = obj['error'];
+  if (typeof errVal === 'string') {
+    return errVal;
+  }
+  if (errVal && typeof errVal === 'object') {
+    const errObj = errVal as Record<string, unknown>;
+    if (typeof errObj['message'] === 'string') {
+      return errObj['message'];
+    }
+    if (typeof errObj['code'] === 'string') {
+      return errObj['code'];
+    }
+  }
+  if (typeof obj['message'] === 'string') {
+    return obj['message'];
+  }
+  return '';
+}
+
 export function parseCliJsonlLine(
   parser: AgentAdapterManifest['jsonlParser'],
   rawLine: string,
+  adapterId?: string,
 ): ParsedCliStreamEvent | null {
   const trimmed = rawLine.trim();
   if (!trimmed) {
@@ -120,6 +201,8 @@ export function parseCliJsonlLine(
     };
   }
 
+  const evType = typeof obj['type'] === 'string' ? obj['type'] : '';
+  const isGemini = adapterId === 'gemini-cli';
   let role: 'assistant' | 'tool' = 'assistant';
   let text = '';
   let toolName: string | null = null;
@@ -133,15 +216,20 @@ export function parseCliJsonlLine(
   const isError =
     obj['is_error'] === true ||
     obj['isError'] === true ||
-    obj['type'] === 'error';
+    evType === 'error' ||
+    evType === 'turn.failed' ||
+    obj['status'] === 'error' ||
+    obj['subtype'] === 'error';
 
-  // Extract usage across claude-stream, codex-rpc, opencode-json, pi-json, generic-jsonl
+  // Extract usage across claude-stream, codex-rpc, gemini-cli stats, opencode-json, pi-json
   const usageObj =
     obj['usage'] && typeof obj['usage'] === 'object'
       ? (obj['usage'] as Record<string, unknown>)
       : obj['tokens'] && typeof obj['tokens'] === 'object'
         ? (obj['tokens'] as Record<string, unknown>)
-        : null;
+        : obj['stats'] && typeof obj['stats'] === 'object'
+          ? (obj['stats'] as Record<string, unknown>)
+          : null;
 
   if (usageObj) {
     inputTokens =
@@ -153,6 +241,7 @@ export function parseCliJsonlLine(
       numVal(usageObj, 'cached_input_tokens') ||
       numVal(usageObj, 'cached_tokens') ||
       numVal(usageObj, 'cachedTokens') ||
+      numVal(usageObj, 'cached') ||
       numVal(usageObj, 'cacheRead');
     if (
       !cachedTokens &&
@@ -173,8 +262,57 @@ export function parseCliJsonlLine(
     }
   }
 
+  // Claude stream-json content_block_delta
+  if (
+    evType === 'content_block_delta' &&
+    obj['delta'] &&
+    typeof obj['delta'] === 'object'
+  ) {
+    const deltaObj = obj['delta'] as Record<string, unknown>;
+    if (typeof deltaObj['text'] === 'string') {
+      text = deltaObj['text'];
+    }
+  }
+
+  // Gemini CLI stream-json (`message`, `tool_use`, `tool_result`, `result`)
+  if ((isGemini || parser === 'generic-jsonl') && !text) {
+    if (evType === 'tool_use') {
+      role = 'tool';
+      toolName =
+        typeof obj['tool_name'] === 'string'
+          ? obj['tool_name']
+          : typeof obj['name'] === 'string'
+            ? obj['name']
+            : 'tool';
+      text = `[Tool: ${toolName}]`;
+    } else if (evType === 'tool_result') {
+      role = 'tool';
+      toolName =
+        typeof obj['tool_name'] === 'string'
+          ? obj['tool_name']
+          : typeof obj['name'] === 'string'
+            ? obj['name']
+            : 'tool';
+      text =
+        typeof obj['output'] === 'string'
+          ? obj['output']
+          : typeof obj['content'] === 'string'
+            ? obj['content']
+            : '';
+    } else if (
+      evType === 'message' &&
+      (obj['role'] === 'assistant' || obj['role'] === 'model')
+    ) {
+      if (typeof obj['content'] === 'string') {
+        text = obj['content'];
+      } else if (typeof obj['delta'] === 'string') {
+        text = obj['delta'];
+      }
+    }
+  }
+
   // Claude stream-json message nested content
-  if (obj['message'] && typeof obj['message'] === 'object') {
+  if (!text && obj['message'] && typeof obj['message'] === 'object') {
     const msgObj = obj['message'] as Record<string, unknown>;
     if (Array.isArray(msgObj['content'])) {
       const parts: string[] = [];
@@ -237,8 +375,14 @@ export function parseCliJsonlLine(
     }
   }
 
-  // Generic fallbacks
-  if (!text) {
+  // Structured error extraction
+  if (isError && !text) {
+    text = extractErrorMessage(obj);
+  }
+
+  // Generic fallbacks (skip user echo events on Gemini CLI)
+  const isUserEcho = evType === 'message' && obj['role'] === 'user';
+  if (!text && !isUserEcho) {
     if (typeof obj['text'] === 'string') {
       text = obj['text'];
     } else if (typeof obj['result'] === 'string') {
@@ -312,7 +456,11 @@ export async function runCliStreamSession(
   let streamErrorText = '';
 
   const onStdoutLine = (line: string): void => {
-    const parsed = parseCliJsonlLine(req.adapter.jsonlParser, line);
+    const parsed = parseCliJsonlLine(
+      req.adapter.jsonlParser,
+      line,
+      req.adapter.id,
+    );
     if (!parsed) {
       return;
     }
@@ -395,6 +543,21 @@ export async function runCliStreamSession(
       diagnostic: diagText
         ? `CLI harness timed out: ${diagText}`
         : `${req.adapter.command} timed out after ${Math.round((req.timeoutMs ?? 120_000) / 1000)}s`,
+    };
+  }
+
+  if (failed && AUTH_ERROR_PATTERN.test(diagText)) {
+    return {
+      outcome: 'env_fault',
+      finalText,
+      mcpSubmission: null,
+      inputTokens,
+      cachedTokens,
+      firstTurnCachedTokens,
+      outputTokens,
+      costUsd,
+      durationSec,
+      diagnostic: `AUTH_REQUIRED: ${diagText || `${req.adapter.command} authentication failed`}`,
     };
   }
 

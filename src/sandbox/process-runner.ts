@@ -6,9 +6,12 @@
 import {spawn} from 'node:child_process';
 import {
   accessSync,
+  closeSync,
   constants,
   existsSync,
+  openSync,
   readFileSync,
+  readSync,
   statSync,
 } from 'node:fs';
 import {
@@ -45,29 +48,79 @@ function isExecutableFile(filePath: string): boolean {
   }
 }
 
-function unwrapWindowsNpmCmdTarget(cmdPath: string): string | null {
+interface UnwrappedWindowsCmdTarget {
+  readonly kind: 'node' | 'exe';
+  readonly targetPath: string;
+}
+
+function isPosixShebangFile(filePath: string): boolean {
+  try {
+    const fd = openSync(filePath, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(2);
+      const n = readSync(fd, buf, 0, 2, 0);
+      return n === 2 && buf[0] === 0x23 && buf[1] === 0x21;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function unwrapWindowsNpmCmdTarget(
+  cmdPath: string,
+): UnwrappedWindowsCmdTarget | null {
   try {
     const content = readFileSync(cmdPath, 'utf8');
-    const match =
+    const jsMatch =
       /"%(?:dp0|~dp0)%[\\/]([^"\r\n]+?\.(?:c?m?js))"/i.exec(content) ??
       /"%~dp0([^"\r\n]+?\.(?:c?m?js))"/i.exec(content);
-    if (!match?.[1]) {
-      return null;
+    if (jsMatch?.[1]) {
+      const relTarget = jsMatch[1].replace(/^[/\\]+/, '');
+      const candidate = resolve(dirname(cmdPath), relTarget);
+      if (existsSync(candidate)) {
+        return {kind: 'node', targetPath: candidate};
+      }
     }
-    const relTarget = match[1].replace(/^[/\\]+/, '');
-    const candidate = resolve(dirname(cmdPath), relTarget);
-    return existsSync(candidate) ? candidate : null;
+
+    const exeMatch =
+      /"%(?:dp0|~dp0)%[\\/]([^"\r\n]+?\.exe)"/i.exec(content) ??
+      /"%~dp0([^"\r\n]+?\.exe)"/i.exec(content);
+    if (exeMatch?.[1]) {
+      const relTarget = exeMatch[1].replace(/^[/\\]+/, '');
+      if (relTarget.toLowerCase() !== 'node.exe') {
+        const candidate = resolve(dirname(cmdPath), relTarget);
+        if (existsSync(candidate)) {
+          return {kind: 'exe', targetPath: candidate};
+        }
+      }
+    }
+    return null;
   } catch {
     return null;
   }
 }
+
 function getWindowsPathExts(): string[] {
-  const raw = process.env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD';
-  const exts = raw
+  const raw = process.env['PATHEXT'] ?? '.EXE;.COM;.CMD;.BAT';
+  const fromEnv = raw
     .split(';')
     .map(e => e.trim().toLowerCase())
-    .filter(e => e.startsWith('.'));
-  return exts.length > 0 ? exts : ['.com', '.exe', '.bat', '.cmd'];
+    .filter(e => e.startsWith('.') && e !== '.ps1');
+  const preferred = ['.exe', '.com', '.cmd', '.bat'];
+  const ordered: string[] = [];
+  for (const ext of preferred) {
+    if (!ordered.includes(ext)) {
+      ordered.push(ext);
+    }
+  }
+  for (const ext of fromEnv) {
+    if (!ordered.includes(ext)) {
+      ordered.push(ext);
+    }
+  }
+  return ordered;
 }
 
 export function buildScrubbedEnvironment(
@@ -299,6 +352,10 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
             return withExt;
           }
         }
+        if (isExecutableFile(basePath) && !isPosixShebangFile(basePath)) {
+          return basePath;
+        }
+        return null;
       }
       if (isExecutableFile(basePath)) {
         return basePath;
@@ -385,10 +442,13 @@ export class SandboxProcessRunner implements ISandboxProcessRunner {
     let windowsVerbatimArguments = false;
 
     if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolved)) {
-      const nodeScript = unwrapWindowsNpmCmdTarget(resolved);
-      if (nodeScript) {
+      const unwrapped = unwrapWindowsNpmCmdTarget(resolved);
+      if (unwrapped?.kind === 'node') {
         spawnFile = process.execPath;
-        spawnArgs = [nodeScript, ...options.args];
+        spawnArgs = [unwrapped.targetPath, ...options.args];
+      } else if (unwrapped?.kind === 'exe') {
+        spawnFile = unwrapped.targetPath;
+        spawnArgs = [...options.args];
       } else {
         for (const part of [resolved, ...options.args]) {
           if (/[&|<>^%!\r\n\0]/.test(part)) {

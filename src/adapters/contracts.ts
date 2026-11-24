@@ -14,6 +14,28 @@ import type {
   SlotLoadSnapshot,
 } from '../shared/types.ts';
 import type {ExecutionMode} from '../shared/v3-types.ts';
+import type {
+  AudienceScope,
+  CollabBus,
+  CollabMessage,
+  CollabMessageKind,
+  CollabPostInput,
+  CollabQueryOptions,
+  DelegateKernelRequest,
+  DelegateKernelResult,
+} from './collab-bus.ts';
+import type {NativeKernelStatus} from './native-kernels.ts';
+
+export type {
+  AudienceScope,
+  CollabMessage,
+  CollabMessageKind,
+  CollabPostInput,
+  CollabQueryOptions,
+  DelegateKernelRequest,
+  DelegateKernelResult,
+  NativeKernelStatus,
+};
 
 export interface McpSubmissionPayload {
   readonly summary: string;
@@ -36,12 +58,19 @@ export interface McpHindsightBridge {
 
 export interface McpAttemptRegistrationInput {
   readonly hubId: string;
+  readonly missionId?: string;
   readonly changeId: string;
   readonly nodeId: string;
   readonly worktreePath: string;
   readonly contractMarkdown: string;
   readonly executionMode?: ExecutionMode;
   readonly fileScope?: readonly string[];
+  readonly collabBus?: CollabBus;
+  readonly agentIdentity?: string;
+  readonly audienceScope?: AudienceScope;
+  readonly onCollabDelegate?: (
+    req: DelegateKernelRequest,
+  ) => DelegateKernelResult | Promise<DelegateKernelResult>;
   readonly hindsight?: McpHindsightBridge;
   readonly onProgress?: (summary: string) => void;
   readonly onAskHuman?: (

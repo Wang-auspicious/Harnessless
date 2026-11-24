@@ -18,6 +18,16 @@ import type {IGitWorktreeManager} from '../sandbox/contracts.ts';
 import {ForgeError} from '../shared/errors.ts';
 import type {AttentionItem, GraphNode} from '../shared/types.ts';
 import type {ForgeStore} from '../store/database.ts';
+import {
+  CollabBus,
+  isValidAudienceScope,
+  isValidCollabMessageKind,
+  narrowAudienceScope,
+  type AudienceScope,
+  type CollabMessageKind,
+  type DelegateKernelRequest,
+  type DelegateKernelResult,
+} from './collab-bus.ts';
 import type {
   IMcpStationServer,
   McpAttemptRegistration,
@@ -182,6 +192,64 @@ const MCP_TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'forge_collab_post',
+    description:
+      'Post a structured peer collaboration message (handoff, question, review, finding, decision, delegate) to the audience-scoped CollabBus.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: [
+            'handoff',
+            'question',
+            'review',
+            'finding',
+            'decision',
+            'delegate',
+          ],
+        },
+        toAgent: {type: 'string'},
+        summary: {type: 'string'},
+        artifactRef: {type: 'string'},
+        audienceScope: {type: 'string'},
+        allowedReaders: {type: 'array', items: {type: 'string'}},
+      },
+      required: ['kind', 'summary'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'forge_collab_read',
+    description:
+      'Read sequence-ordered peer collaboration messages authorized for this attempt audience scope.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sinceSeq: {type: 'number'},
+        limit: {type: 'number'},
+        kinds: {type: 'array', items: {type: 'string'}},
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'forge_collab_delegate',
+    description:
+      'Delegate a scoped sub-task to another native agent kernel via the collaboration bus.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetKernel: {type: 'string'},
+        role: {type: 'string'},
+        prompt: {type: 'string'},
+        fileScope: {type: 'array', items: {type: 'string'}},
+      },
+      required: ['targetKernel', 'role', 'prompt'],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 const MAX_ARTIFACT_READ_BYTES = 524_288;
@@ -240,6 +308,7 @@ function asStringArray(value: unknown): string[] {
 export class McpStationServer implements IMcpStationServer {
   private readonly store: ForgeStore;
   private readonly worktrees: IGitWorktreeManager;
+  private readonly defaultCollabBus = new CollabBus();
   private readonly attempts = new Map<string, ActiveAttemptContext>();
   private readonly submissions = new Map<string, McpSubmissionPayload>();
   private server: Server | null = null;
@@ -451,7 +520,7 @@ export class McpStationServer implements IMcpStationServer {
             ? (params['arguments'] as Record<string, unknown>)
             : {};
 
-        const toolOutput = this.executeToolCall(ctx, toolName, args);
+        const toolOutput = await this.executeToolCall(ctx, toolName, args);
         this.sendJson(res, 200, {
           jsonrpc: '2.0',
           id: reqId,
@@ -491,11 +560,34 @@ export class McpStationServer implements IMcpStationServer {
     }
   }
 
-  private executeToolCall(
+  private recordCollabAudit(
+    ctx: ActiveAttemptContext,
+    actor: string,
+    title: string,
+    detail: string,
+  ): void {
+    try {
+      if (!this.store.isOpen) {
+        return;
+      }
+      this.store.appendAudit({
+        hubId: ctx.hubId || null,
+        changeId: ctx.changeId || null,
+        category: 'gate_decision',
+        actor,
+        title,
+        detail,
+      });
+    } catch {
+      // Do not fail collaboration tool calls when synthetic test IDs omit change rows.
+    }
+  }
+
+  private async executeToolCall(
     ctx: ActiveAttemptContext,
     toolName: string,
     args: Record<string, unknown>,
-  ): unknown {
+  ): Promise<unknown> {
     switch (toolName) {
       case 'forge_get_contract': {
         return {
@@ -727,6 +819,173 @@ export class McpStationServer implements IMcpStationServer {
           ctx.onSubmitted(payload);
         }
         return {accepted: true, submission: payload};
+      }
+
+      case 'forge_collab_post': {
+        const rawKind =
+          typeof args['kind'] === 'string' ? args['kind'].trim() : '';
+        if (!isValidCollabMessageKind(rawKind)) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            `forge_collab_post requires a valid "kind" (got "${rawKind}")`,
+            400,
+          );
+        }
+        const summary =
+          typeof args['summary'] === 'string' ? args['summary'].trim() : '';
+        if (!summary) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'forge_collab_post requires a non-empty "summary"',
+            400,
+          );
+        }
+        const toAgent =
+          typeof args['toAgent'] === 'string' &&
+          args['toAgent'].trim().length > 0
+            ? args['toAgent'].trim()
+            : null;
+        const artifactRef =
+          typeof args['artifactRef'] === 'string' &&
+          args['artifactRef'].trim().length > 0
+            ? args['artifactRef'].trim()
+            : null;
+
+        const callerScope: AudienceScope = ctx.audienceScope ?? 'team';
+        let requestedScope: AudienceScope | undefined;
+        if (
+          typeof args['audienceScope'] === 'string' &&
+          args['audienceScope'].trim().length > 0
+        ) {
+          const candidateScope = args['audienceScope'].trim();
+          if (!isValidAudienceScope(candidateScope)) {
+            throw new ForgeError(
+              'VALIDATION_ERROR',
+              `Invalid audienceScope "${candidateScope}"`,
+              400,
+            );
+          }
+          requestedScope = candidateScope;
+        }
+        const effectiveScope = narrowAudienceScope(callerScope, requestedScope);
+        const allowedReaders = asStringArray(args['allowedReaders']);
+        const actor =
+          ctx.agentIdentity?.trim() || `${ctx.changeId}:${ctx.nodeId}`;
+        const bus = ctx.collabBus ?? this.defaultCollabBus;
+        const missionId = ctx.missionId?.trim() || ctx.changeId;
+
+        const message = bus.post({
+          missionId,
+          taskId: ctx.nodeId,
+          fromAgent: actor,
+          fromKernel: actor,
+          toAgent,
+          kind: rawKind,
+          summary,
+          artifactRef,
+          audienceScope: effectiveScope,
+          allowedReaders,
+        });
+
+        this.recordCollabAudit(
+          ctx,
+          actor,
+          `forge_collab_post (${rawKind})`,
+          `seq=${message.seq} scope=${effectiveScope} to=${toAgent ?? 'all'}: ${summary.slice(0, 160)}`,
+        );
+
+        return {ok: true, message};
+      }
+
+      case 'forge_collab_read': {
+        const sinceSeq =
+          typeof args['sinceSeq'] === 'number' &&
+          Number.isFinite(args['sinceSeq'])
+            ? Math.max(0, Math.floor(args['sinceSeq']))
+            : 0;
+        const limit =
+          typeof args['limit'] === 'number' &&
+          Number.isFinite(args['limit']) &&
+          args['limit'] > 0
+            ? Math.min(100, Math.floor(args['limit']))
+            : 50;
+        const rawKinds = asStringArray(args['kinds']);
+        const kinds: CollabMessageKind[] = rawKinds.filter(
+          (k): k is CollabMessageKind => isValidCollabMessageKind(k),
+        );
+        const readerId =
+          ctx.agentIdentity?.trim() || `${ctx.changeId}:${ctx.nodeId}`;
+        const readerScope: AudienceScope = ctx.audienceScope ?? 'team';
+        const bus = ctx.collabBus ?? this.defaultCollabBus;
+        const missionId = ctx.missionId?.trim() || ctx.changeId;
+
+        const messages = bus.query({
+          missionId,
+          sinceSeq,
+          limit,
+          kinds: kinds.length > 0 ? kinds : undefined,
+          readerId,
+          readerScope,
+          readerTaskId: ctx.nodeId,
+        });
+
+        return {
+          missionId,
+          audienceScope: readerScope,
+          latestSeq: bus.getLatestSeq(missionId),
+          count: messages.length,
+          messages,
+        };
+      }
+
+      case 'forge_collab_delegate': {
+        const targetKernel =
+          typeof args['targetKernel'] === 'string'
+            ? args['targetKernel'].trim()
+            : '';
+        const role =
+          typeof args['role'] === 'string' ? args['role'].trim() : '';
+        const prompt =
+          typeof args['prompt'] === 'string' ? args['prompt'].trim() : '';
+        if (!targetKernel || !role || !prompt) {
+          throw new ForgeError(
+            'VALIDATION_ERROR',
+            'forge_collab_delegate requires non-empty "targetKernel", "role", and "prompt"',
+            400,
+          );
+        }
+        const fileScope = asStringArray(args['fileScope']);
+        const actor =
+          ctx.agentIdentity?.trim() || `${ctx.changeId}:${ctx.nodeId}`;
+        const audienceScope: AudienceScope = ctx.audienceScope ?? 'team';
+        const missionId = ctx.missionId?.trim() || ctx.changeId;
+        const reqPayload: DelegateKernelRequest = {
+          missionId,
+          taskId: ctx.nodeId,
+          fromAgent: actor,
+          targetKernel,
+          role,
+          prompt,
+          fileScope: fileScope.length > 0 ? fileScope : ctx.fileScope,
+          audienceScope,
+        };
+
+        let result: DelegateKernelResult;
+        if (ctx.onCollabDelegate) {
+          result = await ctx.onCollabDelegate(reqPayload);
+        } else {
+          const bus = ctx.collabBus ?? this.defaultCollabBus;
+          result = bus.recordDelegate(reqPayload);
+        }
+
+        this.recordCollabAudit(
+          ctx,
+          actor,
+          `forge_collab_delegate (${targetKernel}/${role})`,
+          `delegateId=${result.delegateId} scope=${audienceScope} status=${result.status}: ${prompt.slice(0, 140)}`,
+        );
+
+        return result;
       }
 
       default:

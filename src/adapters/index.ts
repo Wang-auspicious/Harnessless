@@ -28,6 +28,8 @@ import {ProviderRateLimiter} from './rate-limiter.ts';
 import {ResourceSlotBroker} from './resource-broker.ts';
 
 export * from './contracts.ts';
+export * from './collab-bus.ts';
+export * from './native-kernels.ts';
 export * from './mcp-station.ts';
 export * from './resource-broker.ts';
 export * from './rate-limiter.ts';
