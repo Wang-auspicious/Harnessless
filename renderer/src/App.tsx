@@ -53,6 +53,7 @@ import {MissionStudioView} from './views/MissionStudioView.tsx';
 import {RegistryView} from './views/RegistryView.tsx';
 import {RoomsView} from './views/RoomsView.tsx';
 import {WorkstationView} from './views/WorkstationView.tsx';
+import './styles/theme.css';
 
 type NavRoute =
   | 'missions'
@@ -93,7 +94,10 @@ export function App(): ReactElement {
   }
 
   return (
-    <div style={{position: 'relative', width: '100vw', height: '100vh'}}>
+    <div
+      className="legacy-forgeops-shell"
+      style={{position: 'relative', width: '100vw', height: '100vh'}}
+    >
       <button
         type="button"
         onClick={() => setExpertMode(false)}

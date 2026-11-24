@@ -105,10 +105,8 @@
   -webkit-user-drag: none;
 }
 
-/* DirectUI Non-Selectable Default (Desktop WeChat / Linear / Zed Grade) */
-html,
-body,
-#root {
+/* Legacy Expert DirectUI Scope (isolated from MP Studio body.studio) */
+.legacy-forgeops-shell {
   margin: 0;
   padding: 0;
   width: 100%;
@@ -127,44 +125,44 @@ body,
   font-feature-settings: 'kern' 1, 'liga' 1;
 }
 
-button,
-select,
-input,
-textarea,
-optgroup,
-option {
+.legacy-forgeops-shell button,
+.legacy-forgeops-shell select,
+.legacy-forgeops-shell input,
+.legacy-forgeops-shell textarea,
+.legacy-forgeops-shell optgroup,
+.legacy-forgeops-shell option {
   font-family: var(--font-sans);
 }
 
 /* Explicit Selectable Regions Only (Code, Diffs, Logs, Paths, Inputs) */
-input,
-textarea,
-pre,
-code,
-.selectable {
+.legacy-forgeops-shell input,
+.legacy-forgeops-shell textarea,
+.legacy-forgeops-shell pre,
+.legacy-forgeops-shell code,
+.legacy-forgeops-shell .selectable {
   user-select: text;
   -webkit-user-select: text;
   cursor: text;
 }
 
-::selection {
+.legacy-forgeops-shell ::selection {
   background: rgba(79, 70, 229, 0.15);
   color: #1e1b4b;
 }
 
 /* Custom Subtle Light Scrollbars */
-::-webkit-scrollbar {
+.legacy-forgeops-shell ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
-::-webkit-scrollbar-track {
+.legacy-forgeops-shell ::-webkit-scrollbar-track {
   background: transparent;
 }
-::-webkit-scrollbar-thumb {
+.legacy-forgeops-shell ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
   border-radius: 999px;
 }
-::-webkit-scrollbar-thumb:hover {
+.legacy-forgeops-shell ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
 

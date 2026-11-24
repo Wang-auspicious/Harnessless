@@ -6,6 +6,7 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileEntry,
 } from '../../api/v4-types.ts';
+import {CdsIcon, FileTypeIcon} from './CdsIcon.tsx';
 import {kernelLabel} from './v4-labels.ts';
 
 export interface CodeDiffTabProps {
@@ -110,93 +111,85 @@ export function CodeDiffTab({
   };
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 12,
-        height: '100%',
-      }}
-    >
-      <div className="cds-toolbar">
-        <div>
-          <h3 className="cds-card-title">代码与 Turn-level Git Diff</h3>
-          <p className="cds-card-sub">
-            点击任意代码行或 Diff 变更行即可直接插入 Pin 交给 Master
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>代码与 Turn-level Git Diff</h3>
+          <p>
+            点击任意 Diff 或代码行即可直接插入评论 Pin 交给 Master
             Agent，无需切出 IDE。
           </p>
         </div>
-        <div className="cds-toolbar-group">
+
+        <div className="sd-subtabs">
           <button
             type="button"
-            className={`cds-btn is-sm ${viewMode === 'diff' ? 'is-primary' : ''}`}
+            className={viewMode === 'diff' ? 'is-on' : ''}
             onClick={() => setViewMode('diff')}
           >
-            Turn Diff ({diffs.length})
+            Changes ({diffs.length})
           </button>
           <button
             type="button"
-            className={`cds-btn is-sm ${viewMode === 'files' ? 'is-primary' : ''}`}
+            className={viewMode === 'files' ? 'is-on' : ''}
             onClick={() => setViewMode('files')}
           >
-            工作区文件 ({files.filter(f => f.kind === 'file').length})
+            Files ({files.filter(f => f.kind === 'file').length})
           </button>
         </div>
       </div>
 
       {pinTarget ? (
-        <div className="cds-card is-subtle">
-          <div className="cds-card-head">
-            <span style={{fontSize: 12}}>
-              在{' '}
-              <span className="cds-mono-chip">
-                {pinTarget.filePath}:{pinTarget.line}
-              </span>{' '}
-              插入代码 Pin
+        <div className="sd-card">
+          <div className="sd-card-head">
+            <span style={{fontFamily: 'var(--mp-font-mono)', fontSize: 12}}>
+              Pin @ {pinTarget.filePath}:{pinTarget.line}
             </span>
             <button
               type="button"
-              className="cds-btn is-sm"
+              className="sd-btn"
               onClick={() => setPinTarget(null)}
             >
               取消
             </button>
           </div>
-          <div className="cds-toolbar">
-            <input
-              type="text"
-              className="cds-input"
-              style={{flex: 1}}
-              value={pinText}
-              onChange={e => setPinText(e.target.value)}
-              placeholder="输入针对此行代码的审查意见或修复指令..."
-            />
-            <button
-              type="button"
-              className="cds-btn is-sm is-clay"
-              disabled={busy || !pinText.trim()}
-              onClick={() => void handleSubmitPin()}
-            >
-              发给 Master Agent
-            </button>
+          <div className="sd-card-body">
+            <div className="sd-toolbar-row">
+              <input
+                type="text"
+                className="sd-input"
+                style={{flex: 1}}
+                value={pinText}
+                onChange={e => setPinText(e.target.value)}
+                placeholder="输入针对此行代码的审查意见或修复指令…"
+              />
+              <button
+                type="button"
+                className="sd-btn is-primary"
+                disabled={busy || !pinText.trim()}
+                onClick={() => void handleSubmitPin()}
+              >
+                发送 Pin → Master
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
 
       {viewMode === 'diff' ? (
         diffs.length === 0 ? (
-          <div className="cds-empty">
+          <p className="mp-inspector-empty">
             暂无 Turn 级 git write-tree
-            快照。执行任意任务波次后，此处会展示真实文件差异。
-          </div>
+            快照。执行任意任务波次后，此处将展示真实文件变更。
+          </p>
         ) : (
           <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
-            <div className="cds-toolbar-group">
+            <div className="sd-toolbar-row">
               {diffs.map((d, idx) => (
                 <button
                   key={d.id}
                   type="button"
-                  className={`cds-btn is-sm ${activeDiff?.id === d.id ? 'is-primary' : ''}`}
+                  className={`sd-btn ${activeDiff?.id === d.id ? 'is-ink' : ''}`}
                   onClick={() => setSelectedDiffId(d.id)}
                 >
                   Turn #{idx + 1} · {kernelLabel(d.kernelId)}
@@ -205,54 +198,85 @@ export function CodeDiffTab({
             </div>
 
             {activeDiff ? (
-              <div className="cds-card">
-                <div className="cds-card-head">
-                  <div className="cds-toolbar-group">
-                    <span className="cds-agent-pill is-master">
-                      {kernelLabel(activeDiff.kernelId)}
-                    </span>
-                    <span className="cds-mono-chip">
+              <div className="sd-card">
+                <div className="sd-card-head">
+                  <div className="sd-toolbar-row">
+                    <span>{kernelLabel(activeDiff.kernelId)}</span>
+                    <span
+                      className="sd-pill"
+                      style={{fontFamily: 'var(--mp-font-mono)'}}
+                    >
                       {activeDiff.beforeTreeSha.slice(0, 8)} →{' '}
                       {activeDiff.afterTreeSha.slice(0, 8)}
                     </span>
                   </div>
-                  <span style={{fontSize: 11, color: 'var(--cds-text-muted)'}}>
-                    {activeDiff.files.length} 个变更文件
+                  <span style={{fontSize: 11, color: 'var(--mp-text-muted)'}}>
+                    {activeDiff.files.length} files changed
                   </span>
                 </div>
 
                 {activeDiff.files.map(file => (
                   <div
                     key={file.path}
-                    style={{display: 'flex', flexDirection: 'column', gap: 5}}
+                    style={{borderTop: '1px solid var(--mp-rule)'}}
                   >
-                    <div className="cds-card-head">
-                      <span className="cds-mono-chip">{file.path}</span>
-                      <span className="cds-diff-stat">
-                        <span className="cds-diff-add">+{file.added}</span>
-                        <span className="cds-diff-del">
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        padding: '6px 12px',
+                        background: 'var(--mp-panel-subtle)',
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          fontFamily: 'var(--mp-font-mono)',
+                          fontSize: 12,
+                        }}
+                      >
+                        <FileTypeIcon filename={file.path} size={14} />
+                        <span>{file.path}</span>
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: 'var(--mp-font-mono)',
+                          fontSize: 12,
+                          fontVariantNumeric: 'tabular-nums',
+                        }}
+                      >
+                        <span style={{color: 'var(--mp-git-added)'}}>
+                          +{file.added}
+                        </span>{' '}
+                        <span style={{color: 'var(--mp-git-removed)'}}>
                           {'\u2212'}
                           {file.removed}
                         </span>
                       </span>
                     </div>
-                    <div className="cds-code-panel" style={{maxHeight: 280}}>
+
+                    <div className="sd-code-block" style={{maxHeight: 280}}>
                       {file.patch.split('\n').map((line, idx) => {
                         const isAdd =
                           line.startsWith('+') && !line.startsWith('+++');
                         const isDel =
                           line.startsWith('-') && !line.startsWith('---');
+                        const isHunk = line.startsWith('@@');
                         return (
                           <div
                             key={idx}
-                            className={`cds-code-line ${isAdd ? 'is-add' : ''} ${isDel ? 'is-del' : ''}`}
+                            className={`sd-diff-line ${isAdd ? 'is-add' : ''} ${isDel ? 'is-del' : ''} ${isHunk ? 'is-hunk' : ''}`}
                             title="点击此行插入评论 Pin"
                             onClick={() =>
                               setPinTarget({filePath: file.path, line: idx + 1})
                             }
                           >
-                            <span className="cds-line-no">{idx + 1}</span>
-                            <span>{line}</span>
+                            <span className="sd-diff-lnum">{idx + 1}</span>
+                            <span style={{whiteSpace: 'pre-wrap'}}>{line}</span>
                           </div>
                         );
                       })}
@@ -264,18 +288,24 @@ export function CodeDiffTab({
           </div>
         )
       ) : (
-        <div className="cds-code-split">
-          <div className="cds-file-tree">
+        <div
+          className="sd-card"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '210px minmax(0, 1fr)',
+            minHeight: 360,
+          }}
+        >
+          <div
+            style={{
+              borderRight: '1px solid var(--mp-rule)',
+              padding: 6,
+              overflow: 'auto',
+              maxHeight: 520,
+            }}
+          >
             {files.length === 0 ? (
-              <div
-                style={{
-                  padding: 10,
-                  fontSize: 11.5,
-                  color: 'var(--cds-text-muted)',
-                }}
-              >
-                暂无工作区文件
-              </div>
+              <p className="mp-inspector-empty">暂无文件</p>
             ) : (
               files
                 .filter(f => f.kind === 'file')
@@ -283,63 +313,77 @@ export function CodeDiffTab({
                   <button
                     key={file.path}
                     type="button"
-                    className={`cds-file-row ${selectedPath === file.path ? 'is-selected' : ''}`}
+                    className={`mp-file-tree-row ${selectedPath === file.path ? 'is-on' : ''}`}
+                    style={{paddingInline: 6, justifyContent: 'space-between'}}
                     onClick={() => setSelectedPath(file.path)}
                     title={file.path}
                   >
                     <span
                       style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        minWidth: 0,
                       }}
                     >
-                      {file.path}
-                    </span>
-                    <span
-                      style={{fontSize: 10, color: 'var(--cds-text-faint)'}}
-                    >
-                      {file.sizeBytes}B
+                      <FileTypeIcon filename={file.path} size={13} />
+                      <span
+                        style={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {file.path}
+                      </span>
                     </span>
                   </button>
                 ))
             )}
           </div>
 
-          <div className="cds-code-panel">
+          <div
+            className="sd-code-block"
+            style={{maxHeight: 520, overflow: 'auto'}}
+          >
             {fileContent ? (
               fileContent.content.split('\n').map((line, idx) => (
                 <div
                   key={idx}
-                  className="cds-code-line"
+                  className="sd-diff-line"
                   title="点击此行插入 Pin 交给 Master Agent"
                   onClick={() =>
                     setPinTarget({filePath: fileContent.path, line: idx + 1})
                   }
                 >
-                  <span className="cds-line-no">{idx + 1}</span>
-                  <span>{line}</span>
+                  <span className="sd-diff-lnum">{idx + 1}</span>
+                  <span style={{whiteSpace: 'pre-wrap'}}>{line}</span>
                 </div>
               ))
             ) : (
-              <div style={{padding: 16, color: 'var(--cds-text-muted)'}}>
-                选择左侧文件查看源码内容
-              </div>
+              <p className="mp-inspector-empty">选择左侧文件查看源码内容</p>
             )}
           </div>
         </div>
       )}
 
       {codePins.length > 0 ? (
-        <div className="cds-card is-subtle">
-          <strong style={{fontSize: 12}}>
-            代码行 Pin 记录 ({codePins.length})
-          </strong>
-          {codePins.map(pin => (
-            <div key={pin.id} style={{fontSize: 12}}>
-              <strong>#{pin.pinNumber}</strong> [{pin.status}] {pin.promptText}
-            </div>
-          ))}
+        <div className="sd-card">
+          <div className="sd-card-head">
+            <span>代码行 Pin ({codePins.length})</span>
+          </div>
+          <div>
+            {codePins.map(pin => (
+              <div key={pin.id} className="sd-wbs-row">
+                <div className="sd-wbs-title">
+                  <CdsIcon name="Pin" size="xs" />
+                  <span>#{pin.pinNumber}</span>
+                  <span className="sd-pill">{pin.status}</span>
+                  <span style={{fontWeight: 400}}>{pin.promptText}</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>

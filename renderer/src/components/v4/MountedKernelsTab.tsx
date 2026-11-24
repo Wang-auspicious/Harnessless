@@ -5,6 +5,7 @@ import type {
   NativeKernelCard,
   TaskNodeRole,
 } from '../../api/v4-types.ts';
+import {CdsIcon} from './CdsIcon.tsx';
 import {ALL_KERNELS, ROLE_LABELS, kernelLabel} from './v4-labels.ts';
 
 export interface MountedKernelsTabProps {
@@ -66,32 +67,32 @@ export function MountedKernelsTab({
   };
 
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 12}}>
-      <div className="cds-toolbar">
-        <div>
-          <h3 className="cds-card-title">
-            原生 Agent 内核挂载与跨 Agent 协作总线
-          </h3>
-          <p className="cds-card-sub">
-            探测本机已安装的 Claude Code / Codex / Gemini CLI / OpenCode
-            版本与路径，并监控 CollabBus 消息流。
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>原生 Agent 内核挂载与跨 Agent 协作总线</h3>
+          <p>
+            探测本机安装的 Claude Code / Codex / Gemini CLI / OpenCode
+            路径与版本，监控 CollabBus 消息流。
           </p>
         </div>
+
         <button
           type="button"
-          className="cds-btn is-sm is-clay"
+          className="sd-btn is-primary"
           disabled={busy}
           onClick={() => void onProbeKernels()}
         >
-          重新探测本机 CLI
+          <CdsIcon name="ArrowClockwise" size="xs" />
+          <span>重新探测本机 CLI</span>
         </button>
       </div>
 
-      <div className="cds-card">
-        <strong style={{fontSize: 12.5}}>
-          本机原生内核探测表 ({kernels.length})
-        </strong>
-        <table className="cds-table">
+      <div className="sd-card">
+        <div className="sd-card-head">
+          <span>本机原生内核探测表 ({kernels.length})</span>
+        </div>
+        <table className="sd-table">
           <thead>
             <tr>
               <th>内核</th>
@@ -109,21 +110,24 @@ export function MountedKernelsTab({
                 </td>
                 <td>
                   <span
-                    className={`cds-stage-pill ${k.status === 'ready' || k.status === 'builtin' ? 'is-success' : k.status === 'degraded' ? 'is-warning' : ''}`}
+                    className={`sd-pill ${k.status === 'ready' || k.status === 'builtin' ? 'is-success' : k.status === 'degraded' ? 'is-clay' : ''}`}
                   >
                     {k.status}
                   </span>
                 </td>
                 <td>
-                  <span className="cds-mono-chip">
+                  <span
+                    className="sd-pill"
+                    style={{fontFamily: 'var(--mp-font-mono)'}}
+                  >
                     {k.version ?? (k.installed ? 'detected' : '—')}
                   </span>
                 </td>
                 <td
                   style={{
-                    fontFamily: 'var(--cds-font-mono)',
+                    fontFamily: 'var(--mp-font-mono)',
                     fontSize: 11,
-                    maxWidth: 200,
+                    maxWidth: 180,
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
@@ -139,13 +143,16 @@ export function MountedKernelsTab({
         </table>
       </div>
 
-      <div className="cds-card">
-        <strong style={{fontSize: 12.5}}>角色默认路由表</strong>
+      <div className="sd-card">
+        <div className="sd-card-head">
+          <span>角色默认路由表</span>
+        </div>
         <div
+          className="sd-card-body"
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-            gap: 8,
+            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+            gap: 10,
           }}
         >
           {ROLES.map(role => (
@@ -156,12 +163,12 @@ export function MountedKernelsTab({
                 flexDirection: 'column',
                 gap: 4,
                 fontSize: 11.5,
-                color: 'var(--cds-text-muted)',
+                color: 'var(--mp-text-muted)',
               }}
             >
               <span>{ROLE_LABELS[role]}</span>
               <select
-                className="cds-select"
+                className="sd-select"
                 disabled={busy}
                 value={roleRouting[role] ?? 'native-api'}
                 onChange={e =>
@@ -179,21 +186,22 @@ export function MountedKernelsTab({
         </div>
       </div>
 
-      <div className="cds-card">
-        <div className="cds-card-head">
-          <strong style={{fontSize: 12.5}}>
-            跨 Agent 协作总线 (CollabBus · {collabFeed.length})
-          </strong>
-          <span style={{fontSize: 11, color: 'var(--cds-text-muted)'}}>
-            受 Audience Scope 权限交集保护
+      <div className="sd-card">
+        <div className="sd-card-head">
+          <span>跨 Agent 协作总线 (CollabBus · {collabFeed.length})</span>
+          <span style={{fontSize: 11, color: 'var(--mp-text-muted)'}}>
+            Audience Scope 权限交集保护
           </span>
         </div>
 
-        <div className="cds-toolbar">
-          <div className="cds-toolbar-group">
+        <div
+          className="sd-card-body"
+          style={{display: 'flex', flexDirection: 'column', gap: 10}}
+        >
+          <div className="sd-toolbar-row">
             <select
               aria-label="发送方内核"
-              className="cds-select"
+              className="sd-select"
               value={fromKernel}
               onChange={e => setFromKernel(e.target.value as KernelId)}
             >
@@ -204,10 +212,10 @@ export function MountedKernelsTab({
                 </option>
               ))}
             </select>
-            <span>→</span>
+            <CdsIcon name="ArrowRight" size="xs" />
             <select
               aria-label="接收方内核"
-              className="cds-select"
+              className="sd-select"
               value={toKernel}
               onChange={e => setToKernel(e.target.value as KernelId)}
             >
@@ -220,7 +228,7 @@ export function MountedKernelsTab({
             </select>
             <select
               aria-label="消息类型"
-              className="cds-select"
+              className="sd-select"
               value={kind}
               onChange={e => setKind(e.target.value)}
             >
@@ -232,7 +240,7 @@ export function MountedKernelsTab({
             </select>
             <select
               aria-label="可见域"
-              className="cds-select"
+              className="sd-select"
               value={audienceScope}
               onChange={e => setAudienceScope(e.target.value)}
             >
@@ -241,57 +249,59 @@ export function MountedKernelsTab({
               <option value="private:master">private:master</option>
             </select>
           </div>
-        </div>
 
-        <div className="cds-toolbar">
-          <input
-            type="text"
-            className="cds-input"
-            style={{flex: 1}}
-            disabled={!sessionId}
-            value={content}
-            onChange={e => setContent(e.target.value)}
-            placeholder={
-              sessionId
-                ? '输入测试协作消息 (例如: 已完成核心接口，请 Reviewer 校验并发边界)...'
-                : '请先打开或创建一个会话以发送协作消息'
-            }
-          />
-          <button
-            type="button"
-            className="cds-btn is-sm is-primary"
-            disabled={busy || !sessionId || !content.trim()}
-            onClick={() => void handleSendCollab()}
-          >
-            发信协作
-          </button>
-        </div>
-
-        {collabFeed.length === 0 ? (
-          <div className="cds-empty" style={{padding: 16}}>
-            暂无跨内核协作消息。启动多内核并行执行或手动发信协作后将实时记录在此。
+          <div className="sd-toolbar-row">
+            <input
+              type="text"
+              className="sd-input"
+              style={{flex: 1}}
+              disabled={!sessionId}
+              value={content}
+              onChange={e => setContent(e.target.value)}
+              placeholder={
+                sessionId
+                  ? '输入跨内核协作消息 (例如: 已完成核心接口，请 Reviewer 校验并发边界)…'
+                  : '请先打开或创建一个会话以发送协作消息'
+              }
+            />
+            <button
+              type="button"
+              className="sd-btn is-ink"
+              disabled={busy || !sessionId || !content.trim()}
+              onClick={() => void handleSendCollab()}
+            >
+              发信协作
+            </button>
           </div>
-        ) : (
-          <div style={{display: 'flex', flexDirection: 'column', gap: 6}}>
-            {collabFeed.map(item => (
-              <div key={item.id} className="cds-collab-strip">
-                <div className="cds-collab-route">
-                  <span className="cds-mono-chip">#{item.seq}</span>
-                  <span className="cds-agent-pill is-master">
-                    {kernelLabel(item.fromKernel)}
-                  </span>
-                  <span>→</span>
-                  <span className="cds-agent-pill">
-                    {kernelLabel(item.toKernel)}
-                  </span>
-                  <span className="cds-stage-pill">{item.kind}</span>
-                  <span className="cds-mono-chip">{item.audienceScope}</span>
-                  <span>{item.content}</span>
+
+          {collabFeed.length === 0 ? (
+            <p className="mp-inspector-empty">
+              暂无跨内核协作消息。启动多内核并行执行或手动发信协作后将实时记录于此。
+            </p>
+          ) : (
+            <div>
+              {collabFeed.map(item => (
+                <div key={item.id} className="sd-wbs-row">
+                  <div className="sd-wbs-title">
+                    <span
+                      className="sd-pill"
+                      style={{fontFamily: 'var(--mp-font-mono)'}}
+                    >
+                      #{item.seq}
+                    </span>
+                    <span>
+                      {kernelLabel(item.fromKernel)} →{' '}
+                      {kernelLabel(item.toKernel)}
+                    </span>
+                    <span className="sd-pill">{item.kind}</span>
+                    <span className="sd-pill">{item.audienceScope}</span>
+                  </div>
+                  <p className="sd-wbs-desc">{item.content}</p>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -28,6 +28,8 @@ const bridge: ForgePreloadBridge = {
     ipcRenderer.invoke('forgeops:open-path', targetPath),
   openInEditor: (targetPath: string) =>
     ipcRenderer.invoke('forgeops:open-in-editor', targetPath),
+  setWindowTheme: (theme: 'light' | 'dark') =>
+    ipcRenderer.invoke('forgeops:set-window-theme', theme),
 };
 
 contextBridge.exposeInMainWorld('forgeops', bridge);

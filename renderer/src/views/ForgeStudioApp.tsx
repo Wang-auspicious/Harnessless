@@ -9,7 +9,6 @@ import {
 import {v4Api} from '../api/v4-client.ts';
 import type {
   BoardSceneDoc,
-  CatchupSummaryItem,
   HostedAppCard,
   KanoAhpInputItem,
   KernelId,
@@ -22,11 +21,17 @@ import type {
   V4SessionDetail,
   WorkspaceTabId,
 } from '../api/v4-types.ts';
+import {CdsIcon} from '../components/v4/CdsIcon.tsx';
+import {LibraryViews} from '../components/v4/LibraryViews.tsx';
 import {MasterChatPane} from '../components/v4/MasterChatPane.tsx';
 import {RightWorkspacePane} from '../components/v4/RightWorkspacePane.tsx';
-import {StudioSidebar} from '../components/v4/StudioSidebar.tsx';
+import {
+  StudioSidebar,
+  type SidebarNavView,
+} from '../components/v4/StudioSidebar.tsx';
 import {TitleBar} from '../components/v4/TitleBar.tsx';
-import '../styles/cds-claude.css';
+import {kernelLabel} from '../components/v4/v4-labels.ts';
+import '../styles/mp/index.ts';
 
 export interface ForgeStudioAppProps {
   readonly onSwitchToLegacy: () => void;
@@ -52,11 +57,18 @@ function readInitialTheme(): 'light' | 'dark' {
   return 'light';
 }
 
+interface NavHistoryEntry {
+  readonly nav: SidebarNavView;
+  readonly sessionId: string | null;
+}
+
 export function ForgeStudioApp({
   onSwitchToLegacy,
 }: ForgeStudioAppProps): ReactElement {
   const [theme, setTheme] = useState<'light' | 'dark'>(readInitialTheme);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeNav, setActiveNav] = useState<SidebarNavView>('chat');
+  const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [preferredMode, setPreferredMode] = useState<SessionMode>('solo');
   const [catchupOnly, setCatchupOnly] = useState(false);
@@ -69,13 +81,16 @@ export function ForgeStudioApp({
     useState<Record<TaskNodeRole, KernelId>>(DEFAULT_ROUTING);
   const [hostedApps, setHostedApps] = useState<readonly HostedAppCard[]>([]);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
-  const [catchupItems, setCatchupItems] = useState<
-    readonly CatchupSummaryItem[]
-  >([]);
 
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkspaceTabId>('tasks');
-  const [rightWidthPx, setRightWidthPx] = useState(500);
+  const [rightWidthPx, setRightWidthPx] = useState(520);
   const [isDraggingSplitter, setIsDraggingSplitter] = useState(false);
+
+  const [navHistory, setNavHistory] = useState<readonly NavHistoryEntry[]>([
+    {nav: 'chat', sessionId: null},
+  ]);
+  const [navCursor, setNavCursor] = useState(0);
 
   const [busy, setBusy] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -87,6 +102,43 @@ export function ForgeStudioApp({
     readonly x: number;
     readonly width: number;
   } | null>(null);
+  const smokeHandledRef = useRef(false);
+
+  // Ensure body.studio and theme tokens stay synchronized cleanly
+  useEffect(() => {
+    document.body.classList.add('studio');
+    return () => {
+      document.body.classList.remove('studio');
+      document.body.removeAttribute('data-ds-dark-theme');
+      delete document.documentElement.dataset['theme'];
+    };
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset['theme'] = theme;
+    document.body.toggleAttribute('data-ds-dark-theme', theme === 'dark');
+    void window.forgeops?.setWindowTheme?.(theme);
+  }, [theme]);
+
+  const pushHistory = useCallback(
+    (entry: NavHistoryEntry) => {
+      setNavHistory(prev => {
+        const sliced = prev.slice(0, navCursor + 1);
+        const last = sliced[sliced.length - 1];
+        if (
+          last &&
+          last.nav === entry.nav &&
+          last.sessionId === entry.sessionId
+        ) {
+          return prev;
+        }
+        const next = [...sliced, entry];
+        setNavCursor(next.length - 1);
+        return next;
+      });
+    },
+    [navCursor],
+  );
 
   const loadSessionDetail = useCallback(async (sessionId: string) => {
     try {
@@ -101,17 +153,16 @@ export function ForgeStudioApp({
 
   const loadBootstrap = useCallback(async () => {
     try {
-      const [boot, catchup] = await Promise.all([
-        v4Api.getBootstrap(),
-        v4Api.getCatchup().catch(() => ({items: []})),
-      ]);
+      const boot = await v4Api.getBootstrap();
       setSessions(boot.sessions);
       setKernels(boot.kernels);
       setRoleRouting({...DEFAULT_ROUTING, ...boot.roleRouting});
       setHostedApps(boot.hostedApps);
       setPendingApprovalsCount(boot.pendingApprovalsCount);
-      setCatchupItems(catchup.items);
       setActiveSessionId(prev => {
+        if (window.location.hash === '#smoke-home') {
+          return null;
+        }
         if (prev && boot.sessions.some(s => s.id === prev)) {
           return prev;
         }
@@ -124,6 +175,36 @@ export function ForgeStudioApp({
 
   useEffect(() => {
     void loadBootstrap();
+  }, [loadBootstrap]);
+
+  // Smoke verification hashes for clean Electron Home & Split Workspace screenshots
+  useEffect(() => {
+    if (smokeHandledRef.current) {
+      return;
+    }
+    const hash = window.location.hash;
+    if (hash === '#smoke-home') {
+      smokeHandledRef.current = true;
+      setActiveNav('chat');
+      setActiveSessionId(null);
+      setDetail(null);
+      setInspectorOpen(false);
+    } else if (hash === '#smoke-workspace') {
+      smokeHandledRef.current = true;
+      setActiveNav('chat');
+      setInspectorOpen(true);
+      setActiveTab('board');
+      void v4Api
+        .demoRun({mode: 'solo'})
+        .then(next => {
+          setDetail(next);
+          setActiveSessionId(next.session.id);
+          void loadBootstrap();
+        })
+        .catch(() => {
+          // Non-fatal fallback if already initialized
+        });
+    }
   }, [loadBootstrap]);
 
   useEffect(() => {
@@ -151,6 +232,32 @@ export function ForgeStudioApp({
   }, [activeSessionId, loadBootstrap, loadSessionDetail]);
 
   useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(prev => !prev);
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setInspectorOpen(prev => !prev);
+      } else if (mod && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setSidebarCollapsed(prev => !prev);
+      } else if (mod && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setActiveNav('chat');
+        setActiveSessionId(null);
+        setDetail(null);
+        setInspectorOpen(false);
+      } else if (e.key === 'Escape' && searchOpen) {
+        setSearchOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [searchOpen]);
+
+  useEffect(() => {
     if (!isDraggingSplitter) {
       return;
     }
@@ -160,8 +267,8 @@ export function ForgeStudioApp({
         return;
       }
       const delta = start.x - e.clientX;
-      const maxW = Math.max(360, Math.round(window.innerWidth * 0.68));
-      const clamped = Math.min(maxW, Math.max(320, start.width + delta));
+      const maxW = Math.max(360, Math.round(window.innerWidth * 0.72));
+      const clamped = Math.min(maxW, Math.max(300, start.width + delta));
       setRightWidthPx(clamped);
     };
     const onUp = (): void => {
@@ -210,11 +317,30 @@ export function ForgeStudioApp({
     void loadBootstrap();
   };
 
+  const openInspectorTab = (tab: WorkspaceTabId): void => {
+    setActiveNav('chat');
+    setActiveTab(tab);
+    setInspectorOpen(true);
+  };
+
+  const toggleInspectorTab = (tab: WorkspaceTabId): void => {
+    setActiveNav('chat');
+    if (inspectorOpen && activeTab === tab) {
+      setInspectorOpen(false);
+    } else {
+      setActiveTab(tab);
+      setInspectorOpen(true);
+    }
+  };
+
   const handleDemoRun = async (): Promise<void> => {
     await withBusy(async () => {
       const next = await v4Api.demoRun({mode: preferredMode});
       applySessionDetail(next);
+      setActiveNav('chat');
       setActiveTab('board');
+      setInspectorOpen(true);
+      pushHistory({nav: 'chat', sessionId: next.session.id});
     });
   };
 
@@ -226,7 +352,10 @@ export function ForgeStudioApp({
         executionMode: 'auto',
       });
       applySessionDetail(next);
+      setActiveNav('chat');
       setActiveTab('board');
+      setInspectorOpen(true);
+      pushHistory({nav: 'chat', sessionId: next.session.id});
     });
   };
 
@@ -237,9 +366,9 @@ export function ForgeStudioApp({
         await handleOnboardFolder(picked);
         return;
       }
+      return;
     }
-    setSidebarCollapsed(false);
-    setErrorText('请在左侧边栏点击「打开本地目录」并输入项目文件夹路径。');
+    setActiveNav('projects');
   };
 
   const handleModeChange = async (nextMode: SessionMode): Promise<void> => {
@@ -280,11 +409,11 @@ export function ForgeStudioApp({
       });
       applySessionDetail(next);
       if (opts?.action === 'decompose' || opts?.action === 'execute') {
-        setActiveTab('tasks');
+        openInspectorTab('tasks');
       } else if (opts?.action === 'ship') {
-        setActiveTab('verify');
+        openInspectorTab('verify');
       } else if (opts?.action === 'freeze_spec') {
-        setActiveTab('board');
+        openInspectorTab('board');
       }
     });
   };
@@ -307,7 +436,7 @@ export function ForgeStudioApp({
       });
       applySessionDetail(next);
       if (freezeSpec) {
-        setActiveTab('board');
+        openInspectorTab('board');
       }
     });
   };
@@ -393,7 +522,7 @@ export function ForgeStudioApp({
       const res = await v4Api.executeTasks(detail.session.id, opts);
       applySessionDetail(res.detail);
       if (res.diffs.length > 0) {
-        setActiveTab('code');
+        openInspectorTab('code');
       }
     });
   };
@@ -567,18 +696,88 @@ export function ForgeStudioApp({
     setIsDraggingSplitter(true);
   };
 
+  const handleSelectNav = (nav: SidebarNavView): void => {
+    setActiveNav(nav);
+    pushHistory({nav, sessionId: activeSessionId});
+  };
+
+  const handleSelectSession = (sessionId: string): void => {
+    setActiveNav('chat');
+    setActiveSessionId(sessionId);
+    pushHistory({nav: 'chat', sessionId});
+  };
+
+  const handleNewSession = (): void => {
+    setActiveNav('chat');
+    setActiveSessionId(null);
+    setDetail(null);
+    setInspectorOpen(false);
+    pushHistory({nav: 'chat', sessionId: null});
+  };
+
+  const handleGoBack = (): void => {
+    if (navCursor <= 0) return;
+    const nextIdx = navCursor - 1;
+    const entry = navHistory[nextIdx];
+    if (entry) {
+      setNavCursor(nextIdx);
+      setActiveNav(entry.nav);
+      setActiveSessionId(entry.sessionId);
+    }
+  };
+
+  const handleGoForward = (): void => {
+    if (navCursor >= navHistory.length - 1) return;
+    const nextIdx = navCursor + 1;
+    const entry = navHistory[nextIdx];
+    if (entry) {
+      setNavCursor(nextIdx);
+      setActiveNav(entry.nav);
+      setActiveSessionId(entry.sessionId);
+    }
+  };
+
+  const tasks = detail?.activePlan?.tasks ?? [];
+  const completedTasks = tasks.filter(t => t.status === 'completed').length;
+
+  const qLower = searchQuery.trim().toLowerCase();
+  const matchedSessions = sessions.filter(
+    s =>
+      !qLower ||
+      s.title.toLowerCase().includes(qLower) ||
+      s.workspacePath.toLowerCase().includes(qLower),
+  );
+  const matchedKernels = kernels.filter(
+    k =>
+      !qLower ||
+      k.displayName.toLowerCase().includes(qLower) ||
+      k.kernelId.toLowerCase().includes(qLower),
+  );
+
   return (
     <div
-      className={`cds-studio-root ${sidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}
+      className="mpw-frame mp-shell"
+      id="shell"
+      data-view={activeNav === 'chat' ? 'chat' : 'projects'}
+      data-sidebar={sidebarCollapsed ? 'collapsed' : 'expanded'}
+      data-inspector={inspectorOpen ? 'open' : 'closed'}
+      data-pane-dragging={isDraggingSplitter ? 'true' : undefined}
       data-theme={theme}
       data-testid="sdlc-studio-v4-root"
     >
       <TitleBar
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed(prev => !prev)}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        activeSession={detail?.session ?? null}
+        onOpenSearch={() => setSearchOpen(prev => !prev)}
+        canGoBack={navCursor > 0}
+        canGoForward={navCursor < navHistory.length - 1}
+        onGoBack={handleGoBack}
+        onGoForward={handleGoForward}
+        onNewSession={handleNewSession}
+        onOpenFolderPrompt={handleOpenFolderPrompt}
+        onDemoRun={handleDemoRun}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen(prev => !prev)}
         theme={theme}
         onToggleTheme={toggleTheme}
         onSwitchToLegacy={onSwitchToLegacy}
@@ -588,74 +787,184 @@ export function ForgeStudioApp({
       <StudioSidebar
         mode={detail?.session.mode ?? preferredMode}
         onChangeMode={m => void handleModeChange(m)}
+        activeNav={activeNav}
+        onSelectNav={handleSelectNav}
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={id => setActiveSessionId(id)}
-        onNewSession={() => {
-          setActiveSessionId(null);
-          setDetail(null);
-        }}
+        onSelectSession={handleSelectSession}
+        onNewSession={handleNewSession}
         onOnboardFolder={handleOnboardFolder}
         catchupOnly={catchupOnly}
         onToggleCatchup={() => setCatchupOnly(prev => !prev)}
         pendingApprovalsCount={pendingApprovalsCount}
-        catchupItems={catchupItems}
         kernels={kernels}
-        onOpenKernelsTab={() => setActiveTab('kernels')}
         hostedApps={hostedApps}
-        onControlApp={handleControlApp}
         searchQuery={searchQuery}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onSwitchToLegacy={onSwitchToLegacy}
+        onDemoRun={handleDemoRun}
         busy={busy}
       />
 
-      <main className="cds-main-split">
-        <MasterChatPane
-          session={detail?.session ?? null}
-          messages={detail?.messages ?? []}
-          busy={busy}
-          errorText={errorText}
-          onDismissError={() => setErrorText(null)}
-          onDemoRun={handleDemoRun}
-          onOpenFolderPrompt={handleOpenFolderPrompt}
-          onOpenTab={tab => setActiveTab(tab)}
-          onSendTurn={handleSendTurn}
-          onSubmitGrilling={handleSubmitGrilling}
-          onRerunQuantize={handleRunQuantize}
-          onToggleExecutionMode={handleToggleExecutionMode}
-        />
-
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="调整工作区宽度"
-          className={`cds-splitter ${isDraggingSplitter ? 'is-dragging' : ''}`}
-          onMouseDown={handleSplitterMouseDown}
-        />
-
-        <RightWorkspacePane
-          widthPx={rightWidthPx}
-          activeTab={activeTab}
-          onSelectTab={setActiveTab}
-          detail={detail}
-          kernels={kernels}
-          roleRouting={roleRouting}
-          selfApprovalBlockedMsg={selfApprovalBlockedMsg}
-          busy={busy}
-          onDecompose={handleDecompose}
-          onMutateTasks={handleMutateTasks}
-          onExecuteTasks={handleExecuteTasks}
-          onSaveBoard={handleSaveBoard}
-          onCreatePin={handleCreatePin}
-          onResolvePin={handleResolvePin}
-          onRunQuantize={handleRunQuantize}
-          onRunShip={handleRunShip}
-          onApproveAndDeliver={handleApproveAndDeliver}
-          onRejectAndPin={handleRejectAndPin}
-          onProbeKernels={handleProbeKernels}
-          onUpdateRouting={handleUpdateRouting}
-          onPostCollab={handlePostCollab}
-        />
+      <main className="mpw-center-col">
+        {activeNav === 'chat' ? (
+          <MasterChatPane
+            session={detail?.session ?? null}
+            messages={detail?.messages ?? []}
+            diffs={detail?.diffs ?? []}
+            kernels={kernels}
+            sessionCount={sessions.length}
+            taskCount={tasks.length}
+            completedTaskCount={completedTasks}
+            pendingApprovalsCount={pendingApprovalsCount}
+            inspectorOpen={inspectorOpen}
+            activeTab={activeTab}
+            busy={busy}
+            errorText={errorText}
+            onDismissError={() => setErrorText(null)}
+            onDemoRun={handleDemoRun}
+            onOpenFolderPrompt={handleOpenFolderPrompt}
+            onToggleTab={toggleInspectorTab}
+            onOpenTab={openInspectorTab}
+            onSendTurn={handleSendTurn}
+            onSubmitGrilling={handleSubmitGrilling}
+            onRerunQuantize={handleRunQuantize}
+            onToggleExecutionMode={handleToggleExecutionMode}
+          />
+        ) : (
+          <LibraryViews
+            view={activeNav}
+            detail={detail}
+            sessions={sessions}
+            kernels={kernels}
+            roleRouting={roleRouting}
+            hostedApps={hostedApps}
+            busy={busy}
+            onBackToChat={tab => {
+              setActiveNav('chat');
+              if (tab) {
+                setActiveTab(tab);
+                setInspectorOpen(true);
+              }
+            }}
+            onSelectSession={handleSelectSession}
+            onOnboardFolder={handleOnboardFolder}
+            onDemoRun={handleDemoRun}
+            onProbeKernels={handleProbeKernels}
+            onUpdateRouting={handleUpdateRouting}
+            onPostCollab={handlePostCollab}
+            onControlApp={handleControlApp}
+            onRetryTask={taskId => handleExecuteTasks({taskIds: [taskId]})}
+          />
+        )}
       </main>
+
+      <RightWorkspacePane
+        isOpen={inspectorOpen}
+        widthPx={rightWidthPx}
+        isDragging={isDraggingSplitter}
+        onStartResize={handleSplitterMouseDown}
+        onClose={() => setInspectorOpen(false)}
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        detail={detail}
+        kernels={kernels}
+        roleRouting={roleRouting}
+        selfApprovalBlockedMsg={selfApprovalBlockedMsg}
+        busy={busy}
+        onDecompose={handleDecompose}
+        onMutateTasks={handleMutateTasks}
+        onExecuteTasks={handleExecuteTasks}
+        onSaveBoard={handleSaveBoard}
+        onCreatePin={handleCreatePin}
+        onResolvePin={handleResolvePin}
+        onRunQuantize={handleRunQuantize}
+        onRunShip={handleRunShip}
+        onApproveAndDeliver={handleApproveAndDeliver}
+        onRejectAndPin={handleRejectAndPin}
+        onProbeKernels={handleProbeKernels}
+        onUpdateRouting={handleUpdateRouting}
+        onPostCollab={handlePostCollab}
+      />
+
+      {searchOpen ? (
+        <section
+          className="mp-global-search"
+          id="global-search"
+          aria-label="Global search"
+        >
+          <button
+            type="button"
+            className="mp-global-search-mask"
+            aria-label="Close search"
+            onClick={() => setSearchOpen(false)}
+          />
+          <div
+            className="mp-global-search-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="global-search-label"
+          >
+            <label className="mp-global-search-field" id="global-search-label">
+              <CdsIcon name="Search" size="small" />
+              <input
+                autoFocus
+                type="search"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search sessions, kernels, or projects…"
+                aria-label="Global search"
+              />
+              <kbd>Esc</kbd>
+            </label>
+
+            <div className="mp-global-search-results" role="listbox">
+              {matchedSessions.map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className="mp-global-search-row"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    handleSelectSession(s.id);
+                  }}
+                >
+                  <span className="mp-global-search-kind">SES</span>
+                  <span className="mp-global-search-copy">
+                    <strong>{s.title}</strong>
+                    <small>{s.workspacePath}</small>
+                  </span>
+                </button>
+              ))}
+
+              {matchedKernels.map(k => (
+                <button
+                  key={k.kernelId}
+                  type="button"
+                  className="mp-global-search-row"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    openInspectorTab('kernels');
+                  }}
+                >
+                  <span className="mp-global-search-kind">KRN</span>
+                  <span className="mp-global-search-copy">
+                    <strong>{kernelLabel(k.kernelId)}</strong>
+                    <small>{k.binaryPath ?? k.command}</small>
+                  </span>
+                </button>
+              ))}
+
+              {matchedSessions.length === 0 && matchedKernels.length === 0 ? (
+                <div className="mp-global-search-empty">
+                  No matching sessions or kernels
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }

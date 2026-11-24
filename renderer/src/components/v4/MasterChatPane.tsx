@@ -4,20 +4,32 @@ import type {
   KernelId,
   MasterChatMessage,
   MasterSession,
+  NativeKernelCard,
   SessionExecutionMode,
   TraceProgressItem,
+  TurnDiffSnapshot,
   WorkspaceTabId,
 } from '../../api/v4-types.ts';
+import {CdsIcon, StarburstMark} from './CdsIcon.tsx';
 import {kernelLabel} from './v4-labels.ts';
 
 export interface MasterChatPaneProps {
   readonly session: MasterSession | null;
   readonly messages: readonly MasterChatMessage[];
+  readonly diffs: readonly TurnDiffSnapshot[];
+  readonly kernels: readonly NativeKernelCard[];
+  readonly sessionCount: number;
+  readonly taskCount: number;
+  readonly completedTaskCount: number;
+  readonly pendingApprovalsCount: number;
+  readonly inspectorOpen: boolean;
+  readonly activeTab: WorkspaceTabId;
   readonly busy: boolean;
   readonly errorText: string | null;
   readonly onDismissError: () => void;
   readonly onDemoRun: () => Promise<void>;
   readonly onOpenFolderPrompt: () => Promise<void>;
+  readonly onToggleTab: (tab: WorkspaceTabId) => void;
   readonly onOpenTab: (tab: WorkspaceTabId) => void;
   readonly onSendTurn: (
     text: string,
@@ -37,57 +49,138 @@ export interface MasterChatPaneProps {
   readonly onToggleExecutionMode: (mode: SessionExecutionMode) => Promise<void>;
 }
 
-const MENTION_KERNELS: readonly {
+const KERNEL_OPTIONS: readonly {
   readonly id: KernelId;
-  readonly tag: string;
+  readonly label: string;
+  readonly key: string;
 }[] = [
-  {id: 'master', tag: '@master'},
-  {id: 'codex', tag: '@codex'},
-  {id: 'claude-code', tag: '@claude'},
-  {id: 'gemini-cli', tag: '@gemini'},
+  {id: 'master', label: 'Master Agent', key: '@master'},
+  {id: 'claude-code', label: 'Claude Code', key: '@claude'},
+  {id: 'codex', label: 'Codex CLI', key: '@codex'},
+  {id: 'gemini-cli', label: 'Gemini CLI', key: '@gemini'},
 ];
 
-function TracePill({
+const SLASH_COMMANDS: readonly {
+  readonly cmd: string;
+  readonly desc: string;
+  readonly action: 'freeze_spec' | 'decompose' | 'execute' | 'ship' | 'demo';
+  readonly prompt: string;
+}[] = [
+  {
+    cmd: '/spec',
+    desc: '根据当前讨论共识生成或冻结 Spec IR 契约',
+    action: 'freeze_spec',
+    prompt: '根据当前共识生成并更新 Spec IR 契约',
+  },
+  {
+    cmd: '/decompose',
+    desc: '基于 Spec IR 智能拆解并行 WBS 子任务',
+    action: 'decompose',
+    prompt: '基于冻结 Spec 智能拆解并行任务波次',
+  },
+  {
+    cmd: '/execute',
+    desc: '在独立 Git Worktree 启动多内核并行编码',
+    action: 'execute',
+    prompt: '启动独立 Worktree 多内核并行执行',
+  },
+  {
+    cmd: '/ship',
+    desc: '发起三权分立独立审校并生成 Answer-in-HTML',
+    action: 'ship',
+    prompt: '发起三权分立 Ship 独立审校与验收报告',
+  },
+  {
+    cmd: '/demo',
+    desc: '一键初始化示例工程并跑通协同全流程',
+    action: 'demo',
+    prompt: '一键跑通示例项目全流程',
+  },
+];
+
+function repoShortName(pathStr?: string): string {
+  if (!pathStr) {
+    return 'Local';
+  }
+  const parts = pathStr.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] ?? 'Local';
+}
+
+function renderMessageText(text: string): ReactElement {
+  const paragraphs = text.split(/\n{2,}/).filter(p => p.trim().length > 0);
+  return (
+    <div className="mp-chat-markdown sd-msg-prose">
+      {paragraphs.map((p, idx) => (
+        <p key={idx} style={{whiteSpace: 'pre-wrap'}}>
+          {p}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function TraceDisclosure({
   items,
   summary,
 }: {
   readonly items: readonly TraceProgressItem[];
   readonly summary: string;
 }): ReactElement {
-  const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState(false);
   const doneCount = items.filter(i => i.status === 'done').length;
-  const headline =
-    items[items.length - 1] !== undefined
-      ? `${items[items.length - 1]!.verb} — ${items[items.length - 1]!.object} — ${items[items.length - 1]!.outcome}`
-      : summary;
+  const last = items[items.length - 1];
+  const headline = last
+    ? `${last.verb} · ${last.object} — ${last.outcome}`
+    : summary;
 
   return (
-    <div className="cds-trace-pill">
-      <button
-        type="button"
-        className="cds-trace-toggle"
-        onClick={() => setExpanded(prev => !prev)}
+    <div className="mp-chat-tool">
+      <details
+        className="mp-chat-disclosure"
+        open={open}
+        data-open={open ? 'true' : 'false'}
+        onToggle={e => setOpen((e.currentTarget as HTMLDetailsElement).open)}
       >
-        <span>
-          <strong style={{color: 'var(--cds-clay)', marginRight: 6}}>●</strong>
-          {headline} ({doneCount}/{items.length})
-        </span>
-        <span style={{fontSize: 11, color: 'var(--cds-text-muted)'}}>
-          {expanded ? '收起轨迹 ▴' : '展开轨迹 ▾'}
-        </span>
-      </button>
-      {expanded ? (
-        <div className="cds-trace-body">
-          {items.map((item, idx) => (
-            <div key={`${item.verb}-${idx}`}>
-              [{item.status.toUpperCase()}] {item.verb} · {item.object} →{' '}
-              {item.outcome}
-              {item.kernelId ? ` (${kernelLabel(item.kernelId)})` : ''}
-              {item.detail ? ` — ${item.detail}` : ''}
-            </div>
-          ))}
+        <summary className="mp-chat-row" data-expandable="true">
+          <span className="mp-chat-row-caret">
+            <CdsIcon name="CaretRight" size="xs" />
+          </span>
+          <span className="mp-chat-disclosure-title">
+            <span className="mp-chat-title">Thought process</span>
+            <span className="mp-chat-summary">
+              {headline} ({doneCount}/{items.length})
+            </span>
+          </span>
+        </summary>
+        <div className="mp-chat-body-wrap">
+          <div className="mp-chat-disclosure-body" style={{paddingLeft: 18}}>
+            {items.map((item, idx) => (
+              <div
+                key={`${item.verb}-${idx}`}
+                style={{
+                  fontSize: 12,
+                  lineHeight: '19px',
+                  color: 'var(--mp-text-secondary)',
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: 'var(--mp-font-mono)',
+                    fontSize: 11,
+                    color: 'var(--mp-text-muted)',
+                    marginRight: 6,
+                  }}
+                >
+                  [{item.status.toUpperCase()}]
+                </span>
+                <strong>{item.verb}</strong> · {item.object} → {item.outcome}
+                {item.kernelId ? ` (${kernelLabel(item.kernelId)})` : ''}
+                {item.detail ? ` — ${item.detail}` : ''}
+              </div>
+            ))}
+          </div>
         </div>
-      ) : null}
+      </details>
     </div>
   );
 }
@@ -129,119 +222,141 @@ function GrillingCard({
   };
 
   return (
-    <section className="mp-decision-card" data-testid="v4-grilling-card">
+    <section
+      className="mp-decision-card"
+      data-kind="question"
+      data-testid="v4-grilling-card"
+    >
       <div className="mp-decision-heading">
         <span className="mp-decision-eyebrow">
-          <span>●</span>
-          <span>Round {grilling.round} · 需求澄清与共识拷问</span>
+          <CdsIcon name="Checklist" size="xs" />
+          <span>Round {grilling.round} · 需求拷问与架构决策</span>
         </span>
-        <span className="cds-stage-pill">
+        <span className="mp-decision-caption">
           {grilling.resolved
-            ? '已采纳冻结'
+            ? '已采纳并冻结'
             : `${grilling.questions.length} 项待确认`}
         </span>
       </div>
 
-      <h3 className="mp-decision-title">{grilling.title}</h3>
-      {grilling.summary ? (
-        <div className="cds-prose" style={{fontSize: 12.5}}>
-          {grilling.summary}
-        </div>
-      ) : null}
+      <div className="mp-decision-body">
+        <p className="mp-decision-question">{grilling.title}</p>
+        {grilling.summary ? (
+          <p className="mp-decision-hint">{grilling.summary}</p>
+        ) : null}
 
-      {grilling.settled.length > 0 ? (
-        <div className="mp-decision-settled">
-          {grilling.settled.map((item, idx) => (
-            <span key={idx} className="mp-settled-chip">
-              ✓ {item}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {grilling.questions.map((q, idx) => {
-        const cur = selected[q.id] ?? q.defaultOptionId;
-        return (
-          <div key={q.id} className="mp-decision-qblock">
-            <p className="mp-decision-question">
-              Q{idx + 1}. {q.label}
-              {q.isForkQuestion ? (
-                <span className="mp-rec-tag" style={{marginLeft: 6}}>
-                  关键分叉
-                </span>
-              ) : null}
-            </p>
-            <div className="mp-decision-options">
-              {q.options.map(opt => {
-                const isSel = cur === opt.id;
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    disabled={busy || grilling.resolved}
-                    className={`mp-decision-option ${isSel ? 'is-selected' : ''}`}
-                    onClick={() =>
-                      setSelected(prev => ({...prev, [q.id]: opt.id}))
-                    }
-                  >
-                    <span>
-                      <strong>{opt.label}</strong>
-                      {opt.rationale ? (
-                        <span
-                          style={{
-                            display: 'block',
-                            fontSize: 11.5,
-                            color: 'var(--cds-text-muted)',
-                          }}
-                        >
-                          {opt.rationale}
-                        </span>
-                      ) : null}
-                    </span>
-                    {opt.recommended ? (
-                      <span className="mp-rec-tag">Recommended</span>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-            <input
-              type="text"
-              className="mp-decision-custom"
-              disabled={busy || grilling.resolved}
-              value={customNotes[q.id] ?? ''}
-              onChange={e =>
-                setCustomNotes(prev => ({...prev, [q.id]: e.target.value}))
-              }
-              placeholder="或输入你的自定义约束回答..."
-            />
+        {grilling.settled.length > 0 ? (
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 6,
+              marginBottom: 10,
+            }}
+          >
+            {grilling.settled.map((item, idx) => (
+              <span key={idx} className="sd-pill is-success">
+                <CdsIcon name="Check" size="xs" />
+                <span>{item}</span>
+              </span>
+            ))}
           </div>
-        );
-      })}
+        ) : null}
+
+        {grilling.questions.map((q, idx) => {
+          const cur = selected[q.id] ?? q.defaultOptionId;
+          const questionTitle = /^Q\d+/i.test(q.label)
+            ? q.label
+            : `Q${idx + 1}. ${q.label}`;
+          return (
+            <div key={q.id} style={{marginBottom: 12}}>
+              <p className="mp-decision-question" style={{fontSize: 13}}>
+                {questionTitle}
+                {q.isForkQuestion ? (
+                  <span className="sd-pill is-clay" style={{marginLeft: 8}}>
+                    关键分叉
+                  </span>
+                ) : null}
+              </p>
+              <div className="mp-decision-options">
+                {q.options.map(opt => {
+                  const isSel = cur === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      disabled={busy || grilling.resolved}
+                      className={`mp-decision-button mp-decision-option ${isSel ? 'is-selected' : ''}`}
+                      onClick={() =>
+                        setSelected(prev => ({...prev, [q.id]: opt.id}))
+                      }
+                    >
+                      <span className="mp-decision-choice-mark">
+                        {isSel ? <CdsIcon name="Check" size="xs" /> : null}
+                      </span>
+                      <span className="mp-decision-option-copy">
+                        <span className="mp-decision-option-label">
+                          {opt.label}
+                          {opt.recommended ? (
+                            <span
+                              className="sd-pill is-clay"
+                              style={{marginLeft: 6}}
+                            >
+                              Recommended
+                            </span>
+                          ) : null}
+                        </span>
+                        {opt.rationale ? (
+                          <span className="mp-decision-option-description">
+                            {opt.rationale}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mp-decision-other">
+                <input
+                  type="text"
+                  className="mp-decision-custom"
+                  style={{minHeight: 32, padding: '5px 10px'}}
+                  disabled={busy || grilling.resolved}
+                  value={customNotes[q.id] ?? ''}
+                  onChange={e =>
+                    setCustomNotes(prev => ({...prev, [q.id]: e.target.value}))
+                  }
+                  placeholder="补充自定义约束或反驳意见…"
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       <div className="mp-decision-actions">
         <button
           type="button"
-          className="cds-btn is-sm"
+          className="mp-decision-button"
           disabled={busy}
           onClick={() => void onRerunQuantize()}
         >
-          重跑量化校验 (Kano+AHP)
+          Kano+AHP 校验
         </button>
-        <div className="cds-toolbar-group">
+        <div className="mp-decision-allow">
           <button
             type="button"
-            className="cds-btn is-sm"
+            className="mp-decision-button"
             disabled={busy || grilling.resolved}
             onClick={() =>
               void onSubmit(messageId, buildAnswers(), false, false)
             }
           >
-            提交当前选择
+            提交选择
           </button>
           <button
             type="button"
-            className="cds-btn is-sm is-primary"
+            className="mp-decision-button is-primary"
             disabled={busy || grilling.resolved}
             onClick={() => void onSubmit(messageId, buildAnswers(), true, true)}
           >
@@ -256,11 +371,20 @@ function GrillingCard({
 export function MasterChatPane({
   session,
   messages,
+  diffs,
+  kernels,
+  sessionCount,
+  taskCount,
+  completedTaskCount,
+  pendingApprovalsCount,
+  inspectorOpen,
+  activeTab,
   busy,
   errorText,
   onDismissError,
   onDemoRun,
   onOpenFolderPrompt,
+  onToggleTab,
   onOpenTab,
   onSendTurn,
   onSubmitGrilling,
@@ -269,11 +393,43 @@ export function MasterChatPane({
 }: MasterChatPaneProps): ReactElement {
   const [draft, setDraft] = useState('');
   const [targetKernel, setTargetKernel] = useState<KernelId>('master');
-  const scrollEndRef = useRef<HTMLDivElement | null>(null);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashFilter, setSlashFilter] = useState('');
+  const [permMenuOpen, setPermMenuOpen] = useState(false);
+  const [permPreset, setPermPreset] = useState<'Auto' | 'Plan' | 'Strict'>(
+    'Auto',
+  );
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [prMenuOpen, setPrMenuOpen] = useState(false);
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [worktreeEnabled, setWorktreeEnabled] = useState(true);
+
+  const streamEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    scrollEndRef.current?.scrollIntoView({behavior: 'smooth', block: 'end'});
-  }, [messages.length]);
+    streamEndRef.current?.scrollIntoView({behavior: 'smooth', block: 'end'});
+  }, [messages.length, busy]);
+
+  useEffect(() => {
+    const onDocDown = (e: MouseEvent): void => {
+      if (
+        composerRef.current &&
+        !composerRef.current.contains(e.target as Node)
+      ) {
+        setSlashOpen(false);
+        setPermMenuOpen(false);
+        setModelMenuOpen(false);
+        setPrMenuOpen(false);
+      }
+      if (headerRef.current && !headerRef.current.contains(e.target as Node)) {
+        setThreadMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onDocDown);
+    return () => window.removeEventListener('mousedown', onDocDown);
+  }, []);
 
   const handleSubmit = async (): Promise<void> => {
     const trimmed = draft.trim();
@@ -281,6 +437,19 @@ export function MasterChatPane({
       return;
     }
     setDraft('');
+    setSlashOpen(false);
+    const matchedCmd = SLASH_COMMANDS.find(c => trimmed === c.cmd);
+    if (matchedCmd) {
+      if (matchedCmd.action === 'demo') {
+        await onDemoRun();
+      } else {
+        await onSendTurn(matchedCmd.prompt, {
+          targetKernel,
+          action: matchedCmd.action,
+        });
+      }
+      return;
+    }
     await onSendTurn(trimmed, {targetKernel, action: 'chat'});
   };
 
@@ -298,369 +467,950 @@ export function MasterChatPane({
     return 'code';
   };
 
+  const hasMessages = Boolean(session && messages.length > 0);
   const executionMode = session?.executionMode ?? 'auto';
+  const repoName = repoShortName(session?.workspacePath);
+
+  const diffAdded = diffs.reduce(
+    (sum, d) => sum + d.files.reduce((fs, f) => fs + f.added, 0),
+    0,
+  );
+  const diffRemoved = diffs.reduce(
+    (sum, d) => sum + d.files.reduce((fs, f) => fs + f.removed, 0),
+    0,
+  );
+
+  const readyKernelsCount = kernels.filter(
+    k => k.status === 'ready' || k.status === 'builtin',
+  ).length;
+  const ringPercent =
+    taskCount > 0
+      ? Math.round((completedTaskCount / taskCount) * 100)
+      : session
+        ? Math.min(90, Math.max(18, session.term * 20))
+        : 0;
+
+  const filteredSlash = SLASH_COMMANDS.filter(item => {
+    const q = slashFilter.trim().toLowerCase();
+    return (
+      !q ||
+      item.cmd.toLowerCase().includes(q) ||
+      item.desc.toLowerCase().includes(q)
+    );
+  });
+
+  const headerToggles: readonly {
+    readonly tab: WorkspaceTabId;
+    readonly icon: string;
+    readonly label: string;
+  }[] = [
+    {tab: 'tasks', icon: 'Tasks', label: 'Tasks · 任务拆解'},
+    {tab: 'board', icon: 'Palette', label: 'Board & Spec · 白板共识'},
+    {tab: 'code', icon: 'ChangesPlusMinus', label: 'Changes · 代码与 Diff'},
+    {tab: 'verify', icon: 'Globe', label: 'Verify · Answer-in-HTML'},
+    {tab: 'kernels', icon: 'CommandLinePrompt', label: 'Kernels · 原生内核'},
+    {tab: 'dag', icon: 'GitBranch', label: 'DAG · 断点执行图'},
+  ];
 
   return (
-    <section className="cds-chat-pane" data-testid="v4-master-chat">
-      <div className="cds-chat-scroll">
-        <div className="cds-chat-measure">
-          {errorText ? (
-            <div className="cds-banner-error" role="alert">
-              <span>{errorText}</span>
-              <button
-                type="button"
-                className="cds-btn is-sm"
-                onClick={onDismissError}
-              >
-                关闭
-              </button>
-            </div>
-          ) : null}
+    <section
+      className="mpw-conversation"
+      id="view-chat"
+      data-home={!hasMessages ? 'true' : 'false'}
+      data-has-messages={hasMessages ? 'true' : 'false'}
+      data-testid="v4-master-chat"
+    >
+      <header className="mpw-header" ref={headerRef}>
+        <div className="mpw-title-row">
+          <div className="mpw-title-cluster">
+            <CdsIcon name="Laptop" size="small" />
+            <b className="mpw-title" id="chat-title">
+              {session?.title ?? 'New chat'}
+            </b>
+            <span className="mp-chat-project">
+              <span>{repoName}</span>
+            </span>
+          </div>
 
-          {!session || messages.length === 0 ? (
-            <div className="cds-hero" data-testid="v4-empty-hero">
-              <div className="cds-hero-eyebrow">
-                <span>●</span>
-                <span>SDLC-Studio v4 · Master Agent 协同研发工作台</span>
-              </div>
-              <h1 className="cds-hero-title">
-                把自然语言想法，变成可审计、可并行的真实交付。
+          <div className="mpw-header-actions">
+            {headerToggles.map(item => {
+              const pressed = inspectorOpen && activeTab === item.tab;
+              return (
+                <button
+                  key={item.tab}
+                  type="button"
+                  className={`mp-thread-action mp-workspace-toggle ${pressed ? 'is-on' : ''}`}
+                  aria-label={item.label}
+                  title={item.label}
+                  aria-pressed={pressed}
+                  onClick={() => onToggleTab(item.tab)}
+                >
+                  <CdsIcon name={item.icon} size="small" />
+                </button>
+              );
+            })}
+
+            <button
+              type="button"
+              className={`mp-thread-action ${threadMenuOpen ? 'is-on' : ''}`}
+              id="thread-more"
+              aria-label="More options"
+              title="会话操作"
+              aria-haspopup="menu"
+              aria-expanded={threadMenuOpen}
+              onClick={() => setThreadMenuOpen(prev => !prev)}
+            >
+              <CdsIcon name="DotsVertical" size="small" />
+            </button>
+          </div>
+        </div>
+
+        {threadMenuOpen ? (
+          <div
+            className="mp-thread-menu"
+            role="menu"
+            style={{
+              top: 80,
+              right: inspectorOpen ? 'auto' : 16,
+              left: inspectorOpen ? 'auto' : undefined,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setThreadMenuOpen(false);
+                void onDemoRun();
+              }}
+            >
+              <span>一键运行示例全流程</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setThreadMenuOpen(false);
+                void onOpenFolderPrompt();
+              }}
+            >
+              <span>打开并接入本地目录</span>
+            </button>
+            {session ? (
+              <>
+                <hr />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setThreadMenuOpen(false);
+                    void onSendTurn('根据当前共识生成并更新 Spec IR 契约', {
+                      action: 'freeze_spec',
+                    });
+                  }}
+                >
+                  <span>冻结 Spec IR</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setThreadMenuOpen(false);
+                    void onSendTurn('基于冻结 Spec 智能拆解并行任务波次', {
+                      action: 'decompose',
+                    });
+                  }}
+                >
+                  <span>智能拆解 WBS</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setThreadMenuOpen(false);
+                    void onSendTurn('发起三权分立 Ship 独立审校与验收报告', {
+                      action: 'ship',
+                    });
+                  }}
+                >
+                  <span>Ship 独立审校</span>
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+      </header>
+
+      <div className="mpw-scrollbody">
+        {errorText ? (
+          <div
+            style={{
+              width: 'min(768px, calc(100% - 32px))',
+              margin: '8px auto 0',
+              padding: '8px 12px',
+              borderRadius: 8,
+              border:
+                '1px solid color-mix(in srgb, var(--mp-danger) 30%, var(--mp-rule))',
+              background:
+                'color-mix(in srgb, var(--mp-danger) 7%, var(--mp-panel))',
+              color: 'var(--mp-danger)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+              fontSize: 12.5,
+            }}
+            role="alert"
+          >
+            <span>{errorText}</span>
+            <button type="button" className="sd-btn" onClick={onDismissError}>
+              关闭
+            </button>
+          </div>
+        ) : null}
+
+        {!hasMessages ? (
+          <section
+            className="mp-studio-home"
+            id="studio-home"
+            aria-label="Studio home"
+            data-testid="v4-empty-hero"
+          >
+            <header className="mp-home-heading">
+              <StarburstMark size={24} />
+              <h1 id="studio-home-title">
+                {session ? session.title : '接下来构思什么？'}
               </h1>
-              <p className="cds-hero-sub">
-                由 Master Agent 统筹需求量化（Kano + AHP）、白板 × Spec IR
-                双向共识、独立 Git Worktree 多内核并行执行（Codex / Claude Code
-                / Gemini CLI）与三权分立 Ship 独立审校。
-              </p>
+            </header>
 
-              <div className="cds-hero-grid">
-                <button
-                  type="button"
-                  className="cds-hero-card is-featured"
-                  disabled={busy}
-                  onClick={() => void onDemoRun()}
-                >
-                  <span className="cds-hero-card-title">
-                    一键跑通示例项目全流程
-                  </span>
-                  <span className="cds-hero-card-desc">
-                    自动初始化沙箱项目、生成 Spec IR、拆解任务并准备并行交付。
-                  </span>
-                </button>
+            <div className="mp-home-attention" id="studio-home-attention">
+              <div className="mp-home-section">
+                <header>
+                  <h2>协同起步</h2>
+                </header>
+                <div className="mp-home-section-list">
+                  <button
+                    type="button"
+                    className="mp-home-attention-row"
+                    data-state="awaiting"
+                    data-testid="v4-demo-run-btn"
+                    disabled={busy}
+                    onClick={() => void onDemoRun()}
+                  >
+                    <span className="mp-home-state-dot" aria-hidden="true" />
+                    <strong>一键跑通示例项目全流程</strong>
+                    <span>Spec IR → WBS → Worktree Diff → Ship HTML</span>
+                    <span className="mp-home-row-arrow" aria-hidden="true">
+                      <CdsIcon name="ArrowRight" size="small" />
+                    </span>
+                  </button>
 
-                <button
-                  type="button"
-                  className="cds-hero-card"
-                  disabled={busy}
-                  onClick={() => void onOpenFolderPrompt()}
-                >
-                  <span className="cds-hero-card-title">
-                    打开项目开始需求构思
-                  </span>
-                  <span className="cds-hero-card-desc">
-                    选择任意本地目录，自动探测代码库并在缺失时执行 git init。
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className="mp-home-attention-row"
+                    data-testid="v4-open-folder-btn"
+                    disabled={busy}
+                    onClick={() => void onOpenFolderPrompt()}
+                  >
+                    <CdsIcon name="FolderOpen" size="small" />
+                    <strong>打开本地代码目录并接入协同队列</strong>
+                    <span>自动检测 Git 仓库或执行 git init</span>
+                    <span className="mp-home-row-arrow" aria-hidden="true">
+                      <CdsIcon name="ArrowRight" size="small" />
+                    </span>
+                  </button>
 
-                <button
-                  type="button"
-                  className="cds-hero-card"
-                  onClick={() => onOpenTab('kernels')}
-                >
-                  <span className="cds-hero-card-title">
-                    查看已挂载原生 Agent 内核
-                  </span>
-                  <span className="cds-hero-card-desc">
-                    探测本机 Claude Code / Codex / Gemini CLI 并配置角色路由。
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    className="mp-home-attention-row"
+                    onClick={() => onOpenTab('kernels')}
+                  >
+                    <CdsIcon name="CommandLinePrompt" size="small" />
+                    <strong>查看已挂载原生 Agent 内核 (Orca 架构)</strong>
+                    <span>
+                      {readyKernelsCount} 个可用内核 · Claude / Codex / Gemini
+                    </span>
+                    <span className="mp-home-row-arrow" aria-hidden="true">
+                      <CdsIcon name="ArrowRight" size="small" />
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
-          ) : (
-            messages.map(msg => {
+
+            <section
+              className="mp-home-stats"
+              id="studio-home-stats"
+              aria-label="Workspace telemetry"
+            >
+              <div className="mp-home-stat-grid">
+                <div className="mp-home-stat">
+                  <small>Native Kernels</small>
+                  <strong>{readyKernelsCount} online</strong>
+                </div>
+                <div className="mp-home-stat">
+                  <small>Sessions</small>
+                  <strong>{sessionCount} active</strong>
+                </div>
+                <div className="mp-home-stat">
+                  <small>WBS Tasks</small>
+                  <strong>
+                    {completedTaskCount}/{taskCount}
+                  </strong>
+                </div>
+                <div className="mp-home-stat">
+                  <small>Pending Gates</small>
+                  <strong>{pendingApprovalsCount}</strong>
+                </div>
+              </div>
+            </section>
+          </section>
+        ) : null}
+
+        <div className="mpw-stream" id="stream">
+          <div className="mpw-blank" aria-hidden="true" />
+          <div className="mp-chat-flow">
+            {messages.map(msg => {
               if (msg.role === 'human') {
                 return (
-                  <div key={msg.id} className="cds-msg-human">
-                    {msg.content}
+                  <div key={msg.id} className="mp-chat-user">
+                    <div className="mp-chat-user-stack">
+                      <div className="mp-chat-bubble">{msg.content}</div>
+                    </div>
                   </div>
                 );
               }
 
+              const msgTime = new Date(msg.createdAt).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+              });
+
               return (
-                <article key={msg.id} className="cds-msg-assistant">
-                  <div className="cds-msg-header">
-                    <span
-                      className={`cds-agent-pill ${msg.agentKernel === 'master' ? 'is-master' : ''}`}
-                    >
-                      {kernelLabel(msg.agentKernel)}
-                    </span>
-                    <span>
-                      {new Date(msg.createdAt).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
-                  </div>
-
-                  {msg.kind === 'decision_card' && msg.decisionCard ? (
-                    <div className="cds-buzz-card">
-                      <div className="cds-buzz-head">
-                        <span>Master 决策卡 · 6 维结构化摘要</span>
-                        <span className="cds-stage-pill is-clay">
-                          Decision Card
-                        </span>
+                <article key={msg.id} className="mp-chat-assistant">
+                  <div className="mp-chat-assistant-body">
+                    {msg.kind === 'trace_summary' &&
+                    msg.traceItems &&
+                    msg.traceItems.length > 0 ? (
+                      <TraceDisclosure
+                        items={msg.traceItems}
+                        summary={msg.content}
+                      />
+                    ) : msg.kind === 'trace_summary' && msg.content ? (
+                      <div
+                        style={{
+                          fontSize: 12.5,
+                          color: 'var(--mp-text-secondary)',
+                        }}
+                      >
+                        {msg.content}
                       </div>
-                      <div className="cds-buzz-grid">
-                        <div className="cds-buzz-cell is-full">
-                          <span className="cds-buzz-k">Conclusion · 结论</span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.conclusion}
-                          </span>
+                    ) : null}
+
+                    {msg.kind === 'decision_card' && msg.decisionCard ? (
+                      <div className="sd-card">
+                        <div className="sd-card-head">
+                          <span>Master 决策卡 · 6 维结构化摘要</span>
+                          <span className="sd-pill is-clay">Decision</span>
                         </div>
-                        <div className="cds-buzz-cell">
-                          <span className="cds-buzz-k">Evidence · 依据</span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.evidence.join('；')}
-                          </span>
-                        </div>
-                        <div className="cds-buzz-cell">
-                          <span className="cds-buzz-k">
-                            Recommendation · 建议
-                          </span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.recommendation}
-                          </span>
-                        </div>
-                        <div className="cds-buzz-cell">
-                          <span className="cds-buzz-k">Risk · 风险</span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.risk}
-                          </span>
-                        </div>
-                        <div className="cds-buzz-cell">
-                          <span className="cds-buzz-k">
-                            Decision Needed · 待决策
-                          </span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.decisionNeeded}
-                          </span>
-                        </div>
-                        <div className="cds-buzz-cell is-full">
-                          <span className="cds-buzz-k">
-                            Action Needed · 下一步动作
-                          </span>
-                          <span className="cds-buzz-v">
-                            {msg.decisionCard.actionNeeded}
-                          </span>
+                        <div
+                          className="sd-card-body"
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                            gap: 10,
+                            fontSize: 12.5,
+                          }}
+                        >
+                          <div style={{gridColumn: '1 / -1'}}>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--mp-text-muted)',
+                              }}
+                            >
+                              Conclusion · 结论
+                            </div>
+                            <div style={{fontWeight: 550}}>
+                              {msg.decisionCard.conclusion}
+                            </div>
+                          </div>
+                          <div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--mp-text-muted)',
+                              }}
+                            >
+                              Evidence · 依据
+                            </div>
+                            <div>{msg.decisionCard.evidence.join('；')}</div>
+                          </div>
+                          <div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--mp-text-muted)',
+                              }}
+                            >
+                              Recommendation · 建议
+                            </div>
+                            <div>{msg.decisionCard.recommendation}</div>
+                          </div>
+                          <div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--mp-text-muted)',
+                              }}
+                            >
+                              Risk · 风险
+                            </div>
+                            <div>{msg.decisionCard.risk}</div>
+                          </div>
+                          <div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'var(--mp-text-muted)',
+                              }}
+                            >
+                              Decision Needed · 待决策
+                            </div>
+                            <div>{msg.decisionCard.decisionNeeded}</div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ) : null}
+                    ) : null}
 
-                  {msg.kind === 'grilling' && msg.grilling ? (
-                    <GrillingCard
-                      messageId={msg.id}
-                      grilling={msg.grilling}
-                      busy={busy}
-                      onSubmit={onSubmitGrilling}
-                      onRerunQuantize={onRerunQuantize}
-                    />
-                  ) : null}
+                    {msg.kind === 'grilling' && msg.grilling ? (
+                      <GrillingCard
+                        messageId={msg.id}
+                        grilling={msg.grilling}
+                        busy={busy}
+                        onSubmit={onSubmitGrilling}
+                        onRerunQuantize={onRerunQuantize}
+                      />
+                    ) : null}
 
-                  {msg.kind === 'collab_event' && msg.collabMeta ? (
-                    <div className="cds-collab-strip">
-                      <div className="cds-collab-route">
-                        <span className="cds-agent-pill is-master">
-                          {kernelLabel(msg.collabMeta.fromKernel)}
-                        </span>
-                        <span>→</span>
-                        <span className="cds-agent-pill">
-                          {kernelLabel(msg.collabMeta.toKernel)}
-                        </span>
-                        <span>{msg.content}</span>
-                      </div>
+                    {msg.kind === 'collab_event' && msg.collabMeta ? (
                       <button
                         type="button"
-                        className="cds-btn is-sm"
+                        className="sd-handoff-row"
                         onClick={() =>
                           onOpenTab(resolveTab(msg.collabMeta?.targetTab))
                         }
                       >
-                        查看产物
+                        <CdsIcon name="ArrowSplitRight" size="xs" />
+                        <span>
+                          <strong>
+                            {kernelLabel(msg.collabMeta.fromKernel)}
+                          </strong>{' '}
+                          → {kernelLabel(msg.collabMeta.toKernel)}
+                        </span>
+                        <span
+                          style={{
+                            color: 'var(--mp-text-muted)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {msg.content}
+                        </span>
+                        <span className="sd-handoff-link">查看产物 →</span>
                       </button>
+                    ) : null}
+
+                    {msg.kind === 'text' ||
+                    msg.kind === 'ship_card' ||
+                    (msg.kind !== 'grilling' &&
+                      msg.kind !== 'decision_card' &&
+                      msg.kind !== 'collab_event' &&
+                      msg.kind !== 'trace_summary' &&
+                      Boolean(msg.content))
+                      ? renderMessageText(msg.content)
+                      : null}
+
+                    {msg.kind === 'ship_card' ? (
+                      <div>
+                        <button
+                          type="button"
+                          className="sd-btn is-primary"
+                          onClick={() => onOpenTab('verify')}
+                        >
+                          <CdsIcon name="Globe" size="xs" />
+                          <span>打开验收 HTML 与 Ship 审校</span>
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <div
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        marginTop: 2,
+                        fontSize: 11.5,
+                        color: 'var(--mp-text-muted)',
+                      }}
+                    >
+                      <StarburstMark size={13} />
+                      <span>
+                        {kernelLabel(msg.agentKernel)} · {msgTime}
+                      </span>
                     </div>
-                  ) : null}
-
-                  {msg.kind === 'trace_summary' &&
-                  msg.traceItems &&
-                  msg.traceItems.length > 0 ? (
-                    <TracePill items={msg.traceItems} summary={msg.content} />
-                  ) : null}
-
-                  {msg.kind === 'text' || msg.kind === 'ship_card' ? (
-                    <div className="cds-prose">{msg.content}</div>
-                  ) : null}
-
-                  {msg.kind === 'ship_card' ? (
-                    <div className="cds-toolbar-group">
-                      <button
-                        type="button"
-                        className="cds-btn is-sm is-clay"
-                        onClick={() => onOpenTab('verify')}
-                      >
-                        打开验收 HTML &amp; Ship 审校
-                      </button>
-                    </div>
-                  ) : null}
+                  </div>
                 </article>
               );
-            })
-          )}
-          <div ref={scrollEndRef} />
+            })}
+
+            {busy ? (
+              <div className="mp-chat-turn-status">
+                <span className="mp-chat-thinking-mark">
+                  <StarburstMark size={16} spinning />
+                </span>
+                <span className="mp-chat-turn-status-copy">
+                  <span className="mp-chat-turn-status-label">Thinking...</span>
+                </span>
+              </div>
+            ) : null}
+
+            <div ref={streamEndRef} />
+          </div>
         </div>
-      </div>
 
-      <div className="cds-composer-dock">
-        <div className="cds-composer-wrap">
-          {session ? (
-            <div className="cds-stage-chips">
-              <button
-                type="button"
-                className="cds-chip-btn"
-                disabled={busy}
-                onClick={() =>
-                  void onSendTurn('根据当前共识生成并更新 Spec IR 契约', {
-                    action: 'freeze_spec',
-                  })
-                }
+        <div className="mpw-composer-seat" ref={composerRef}>
+          <div className="mpw-composer-stack">
+            {session ? (
+              <div
+                className="mp-repository-context"
+                id="composer-repository-context"
+                aria-label="Repository status"
               >
-                生成/更新Spec
-              </button>
-              <button
-                type="button"
-                className="cds-chip-btn"
-                disabled={busy}
-                onClick={() =>
-                  void onSendTurn('基于冻结 Spec 智能拆解并行任务波次', {
-                    action: 'decompose',
-                  })
-                }
-              >
-                智能拆解任务
-              </button>
-              <button
-                type="button"
-                className="cds-chip-btn"
-                disabled={busy}
-                onClick={() =>
-                  void onSendTurn('启动独立 Worktree 多内核并行执行', {
-                    action: 'execute',
-                  })
-                }
-              >
-                并行执行
-              </button>
-              <button
-                type="button"
-                className="cds-chip-btn"
-                disabled={busy}
-                onClick={() =>
-                  void onSendTurn('发起三权分立 Ship 独立审校与验收报告', {
-                    action: 'ship',
-                  })
-                }
-              >
-                Ship独立审校
-              </button>
-            </div>
-          ) : null}
-
-          <div className="mcomp" data-state={busy ? 'running' : 'idle'}>
-            <div className="mcomp-line">
-              <textarea
-                className="mcomp-input"
-                rows={2}
-                value={draft}
-                disabled={busy}
-                onChange={e => setDraft(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    void handleSubmit();
-                  }
-                }}
-                placeholder={
-                  session
-                    ? '向 Master Agent 描述需求、约束或 @指定内核协作... (Enter 发送，Shift+Enter 换行)'
-                    : '输入你的产品想法，或点击上方「一键跑通示例项目全流程」开始...'
-                }
-              />
-              <button
-                type="button"
-                className="mcomp-go"
-                aria-label={busy ? '处理中' : '发送消息'}
-                disabled={busy || !draft.trim()}
-                onClick={() => void handleSubmit()}
-              >
-                {busy ? (
-                  <span
-                    style={{
-                      width: 9,
-                      height: 9,
-                      borderRadius: 2,
-                      background: '#ffffff',
-                    }}
-                  />
-                ) : (
-                  <svg
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2.1"
-                  >
-                    <path d="M12 19V5" />
-                    <path d="m6 11 6-6 6 6" />
-                  </svg>
-                )}
-              </button>
-            </div>
-
-            <div className="mcomp-meta">
-              <div className="mcomp-mentions">
-                {MENTION_KERNELS.map(k => (
+                <div className="mp-repository-identity">
                   <button
-                    key={k.id}
                     type="button"
-                    className={`mmeta ${targetKernel === k.id ? 'is-on' : ''}`}
-                    onClick={() => setTargetKernel(k.id)}
+                    className="mp-repository-location"
+                    title="查看变更文件与 Git Diff"
+                    onClick={() => onOpenTab('code')}
                   >
-                    {k.tag}
+                    <span id="composer-repository-name">{repoName}</span>
+                    <span id="composer-branch-name">main</span>
                   </button>
-                ))}
-              </div>
+                </div>
 
-              <div className="mcomp-mentions">
-                <button
-                  type="button"
-                  className={`mmeta ${executionMode !== 'live' ? 'is-on' : ''}`}
-                  disabled={busy || !session}
-                  onClick={() => void onToggleExecutionMode('auto')}
-                  title="优先本地确定性快速沙箱演示，离线亦零报错"
-                >
-                  自动演示(Fast)
-                </button>
-                <button
-                  type="button"
-                  className={`mmeta ${executionMode === 'live' ? 'is-on' : ''}`}
-                  disabled={busy || !session}
-                  onClick={() => void onToggleExecutionMode('live')}
-                  title="真实调用本机挂载的 Claude Code / Codex / Gemini CLI"
-                >
-                  真实CLI(Live)
-                </button>
+                <div className="mp-repository-actions">
+                  <button
+                    type="button"
+                    className="mp-repository-diff"
+                    title="View diff"
+                    onClick={() => onOpenTab('code')}
+                  >
+                    <span className="is-added">+{diffAdded}</span>
+                    <span className="is-deleted">
+                      {'\u2212'}
+                      {diffRemoved}
+                    </span>
+                  </button>
+
+                  <span
+                    className="mp-repository-pr-split"
+                    style={{position: 'relative'}}
+                  >
+                    <button
+                      type="button"
+                      id="composer-create-pr"
+                      disabled={busy}
+                      onClick={() => onOpenTab('verify')}
+                    >
+                      Ship 验收
+                    </button>
+                    <button
+                      type="button"
+                      id="composer-pr-menu"
+                      aria-label="More workflow actions"
+                      title="工作流快捷步骤"
+                      onClick={() => setPrMenuOpen(prev => !prev)}
+                    >
+                      <CdsIcon name="CaretDownSmall" size="xs" />
+                    </button>
+                  </span>
+                </div>
+
+                {prMenuOpen ? (
+                  <div
+                    className="mpw-perm-menu"
+                    style={{bottom: 98, right: 16}}
+                    role="menu"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrMenuOpen(false);
+                        void onSendTurn('根据当前共识生成并更新 Spec IR 契约', {
+                          action: 'freeze_spec',
+                        });
+                      }}
+                    >
+                      <span>1. 生成 / 冻结 Spec IR</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrMenuOpen(false);
+                        void onSendTurn('基于冻结 Spec 智能拆解并行任务波次', {
+                          action: 'decompose',
+                        });
+                      }}
+                    >
+                      <span>2. 智能拆解 WBS 任务</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrMenuOpen(false);
+                        void onSendTurn('启动独立 Worktree 多内核并行执行', {
+                          action: 'execute',
+                        });
+                      }}
+                    >
+                      <span>3. 多内核并行执行</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrMenuOpen(false);
+                        void onSendTurn(
+                          '发起三权分立 Ship 独立审校与验收报告',
+                          {
+                            action: 'ship',
+                          },
+                        );
+                      }}
+                    >
+                      <span>4. Ship 独立审校与交付</span>
+                    </button>
+                  </div>
+                ) : null}
               </div>
+            ) : null}
+
+            <div
+              className="mp-composer-context-row"
+              aria-label="Runtime environment"
+            >
+              <button
+                type="button"
+                className="mp-composer-environment"
+                onClick={() => onOpenTab('kernels')}
+              >
+                <CdsIcon name="Laptop" size="small" />
+                <span>Local</span>
+              </button>
+
+              <button
+                type="button"
+                className="mp-composer-workspace"
+                title="选择工作区文件夹"
+                onClick={() => void onOpenFolderPrompt()}
+              >
+                <CdsIcon name="Folder" size="small" />
+                <span>{session ? repoName : 'Select folder…'}</span>
+              </button>
+
+              {session ? (
+                <div className="mp-composer-git-context">
+                  <button
+                    type="button"
+                    className="mp-composer-branch"
+                    onClick={() => onOpenTab('code')}
+                  >
+                    <CdsIcon name="GitBranch" size="small" />
+                    <span>main</span>
+                  </button>
+                  <span
+                    className="mp-composer-git-divider"
+                    aria-hidden="true"
+                  />
+                  <button
+                    type="button"
+                    className="mp-composer-worktree"
+                    role="checkbox"
+                    aria-checked={worktreeEnabled}
+                    onClick={() => setWorktreeEnabled(prev => !prev)}
+                  >
+                    <span className="mp-worktree-box" aria-hidden="true">
+                      <CdsIcon name="Check" size="xs" />
+                    </span>
+                    <span>worktree</span>
+                  </button>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                className="mp-composer-folder-add"
+                aria-label="Open local folder"
+                title="打开或绑定本地目录"
+                onClick={() => void onOpenFolderPrompt()}
+              >
+                <CdsIcon name="FolderPlus" size="small" />
+              </button>
             </div>
+
+            <form
+              className="mpw-input-form mp-compact-composer"
+              id="composer-form"
+              onSubmit={e => {
+                e.preventDefault();
+                void handleSubmit();
+              }}
+            >
+              <div className="mpw-input-root">
+                <div className="mpw-card">
+                  <div className="mpw-scroll">
+                    <div className="mpw-input-line">
+                      <div className="mpw-grow">
+                        <textarea
+                          className="mpw-input"
+                          rows={1}
+                          maxLength={12000}
+                          value={draft}
+                          disabled={busy}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setDraft(val);
+                            if (val.startsWith('/')) {
+                              setSlashOpen(true);
+                              setSlashFilter(val);
+                            }
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              void handleSubmit();
+                            }
+                          }}
+                          placeholder="Type / for commands"
+                          aria-label="Continue conversation"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className={`mpw-primary ${busy ? 'is-stop' : ''}`}
+                        title={busy ? 'Running…' : 'Send'}
+                        aria-label={busy ? 'Running' : 'Send'}
+                        disabled={busy || !draft.trim()}
+                      >
+                        <CdsIcon
+                          name={busy ? 'Stop' : 'ArrowReturn'}
+                          size="small"
+                          strong={!busy}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mpw-row" style={{position: 'relative'}}>
+                    <div className="mpw-tools">
+                      <button
+                        type="button"
+                        className="mpw-add"
+                        id="composer-add"
+                        aria-label="Commands and workflow shortcuts"
+                        title="工作流快捷指令 (/spec, /decompose, /execute, /ship)"
+                        aria-expanded={slashOpen}
+                        onClick={() => setSlashOpen(prev => !prev)}
+                      >
+                        <CdsIcon name="Add" size="small" />
+                      </button>
+
+                      {slashOpen ? (
+                        <div
+                          className="mpw-add-menu mpw-slash-menu"
+                          role="menu"
+                        >
+                          <input
+                            type="search"
+                            value={slashFilter}
+                            onChange={e => setSlashFilter(e.target.value)}
+                            placeholder="Search commands (/spec, /decompose, /ship…)"
+                          />
+                          <div className="mpw-slash-rows">
+                            {filteredSlash.map(item => (
+                              <button
+                                key={item.cmd}
+                                type="button"
+                                className="mpw-slash-row"
+                                onClick={() => {
+                                  setSlashOpen(false);
+                                  setSlashFilter('');
+                                  setDraft('');
+                                  if (item.action === 'demo') {
+                                    void onDemoRun();
+                                  } else {
+                                    void onSendTurn(item.prompt, {
+                                      targetKernel,
+                                      action: item.action,
+                                    });
+                                  }
+                                }}
+                              >
+                                <span className="mpw-slash-text">
+                                  <span className="mpw-slash-name">
+                                    {item.cmd}
+                                  </span>
+                                  <small>{item.desc}</small>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        className="mpw-perm mp-permission-seat"
+                        id="composer-permission"
+                        aria-haspopup="listbox"
+                        aria-expanded={permMenuOpen}
+                        title="协同策略模式"
+                        onClick={() => setPermMenuOpen(prev => !prev)}
+                      >
+                        <CdsIcon
+                          name="CaretDownSmall"
+                          size="xs"
+                          className="mpw-perm-chev"
+                        />
+                        <span className="mpw-perm-label">{permPreset}</span>
+                      </button>
+
+                      {permMenuOpen ? (
+                        <div
+                          className="mpw-perm-menu"
+                          role="listbox"
+                          style={{bottom: 36, left: 32}}
+                        >
+                          {(['Auto', 'Plan', 'Strict'] as const).map(p => (
+                            <button
+                              key={p}
+                              type="button"
+                              onClick={() => {
+                                setPermPreset(p);
+                                setPermMenuOpen(false);
+                              }}
+                            >
+                              <span>{p}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="mpw-trailing">
+                      <button
+                        type="button"
+                        className="mpw-perm mpw-model"
+                        id="composer-model"
+                        aria-haspopup="listbox"
+                        aria-expanded={modelMenuOpen}
+                        title="选择当前主对话 / @指定执行内核"
+                        onClick={() => setModelMenuOpen(prev => !prev)}
+                      >
+                        <span className="mpw-perm-label">
+                          {kernelLabel(targetKernel)}
+                        </span>
+                        <CdsIcon
+                          name="CaretDownSmall"
+                          size="xs"
+                          className="mpw-perm-chev"
+                        />
+                      </button>
+
+                      {modelMenuOpen ? (
+                        <div
+                          className="mpw-model-menu"
+                          role="listbox"
+                          style={{bottom: 36, right: 64}}
+                        >
+                          {KERNEL_OPTIONS.map(k => (
+                            <button
+                              key={k.id}
+                              type="button"
+                              className={`mpw-model-row ${targetKernel === k.id ? 'is-active' : ''}`}
+                              onClick={() => {
+                                setTargetKernel(k.id);
+                                setModelMenuOpen(false);
+                              }}
+                            >
+                              <span className="mpw-perm-check">
+                                {targetKernel === k.id ? (
+                                  <CdsIcon name="Check" size="small" />
+                                ) : null}
+                              </span>
+                              <span className="mpw-model-name">{k.label}</span>
+                              <span className="mpw-model-key">{k.key}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <button
+                        type="button"
+                        className="mpw-add mp-composer-secondary"
+                        id="composer-effort"
+                        disabled={busy || !session}
+                        title={
+                          executionMode === 'live'
+                            ? 'Live CLI 真实调用模式 (点击切换 Fast 沙箱)'
+                            : 'Fast 本地确定性沙箱演示 (点击切换 Live CLI)'
+                        }
+                        onClick={() =>
+                          void onToggleExecutionMode(
+                            executionMode === 'live' ? 'auto' : 'live',
+                          )
+                        }
+                      >
+                        <span>
+                          {executionMode === 'live' ? 'Live' : 'Fast'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="mpw-ring"
+                        id="composer-context"
+                        aria-label={`Progress ${ringPercent}%`}
+                        title={`任务进度 ${completedTaskCount}/${taskCount || 0} (${ringPercent}%)`}
+                        data-empty={ringPercent === 0 ? 'true' : undefined}
+                        onClick={() => onOpenTab('tasks')}
+                      >
+                        <svg
+                          viewBox="0 0 20 20"
+                          width="15"
+                          height="15"
+                          aria-hidden="true"
+                        >
+                          <circle
+                            className="mp-context-track"
+                            cx="10"
+                            cy="10"
+                            r="6.75"
+                            pathLength="100"
+                          />
+                          <circle
+                            className="mp-context-value"
+                            cx="10"
+                            cy="10"
+                            r="6.75"
+                            pathLength="100"
+                            style={{
+                              strokeDasharray: `${ringPercent} 100`,
+                            }}
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </form>
           </div>
         </div>
       </div>

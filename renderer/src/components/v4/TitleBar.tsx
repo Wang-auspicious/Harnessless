@@ -1,13 +1,19 @@
-import type {ReactElement} from 'react';
-import type {MasterSession} from '../../api/v4-types.ts';
-import {STAGE_META} from './v4-labels.ts';
+import {useEffect, useRef, useState, type ReactElement} from 'react';
+import {CdsIcon} from './CdsIcon.tsx';
 
 export interface TitleBarProps {
   readonly sidebarCollapsed: boolean;
   readonly onToggleSidebar: () => void;
-  readonly searchQuery: string;
-  readonly onSearchChange: (value: string) => void;
-  readonly activeSession: MasterSession | null;
+  readonly onOpenSearch: () => void;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+  readonly onGoBack: () => void;
+  readonly onGoForward: () => void;
+  readonly onNewSession: () => void;
+  readonly onOpenFolderPrompt: () => Promise<void>;
+  readonly onDemoRun: () => Promise<void>;
+  readonly inspectorOpen: boolean;
+  readonly onToggleInspector: () => void;
   readonly theme: 'light' | 'dark';
   readonly onToggleTheme: () => void;
   readonly onSwitchToLegacy: () => void;
@@ -17,138 +23,187 @@ export interface TitleBarProps {
 export function TitleBar({
   sidebarCollapsed,
   onToggleSidebar,
-  searchQuery,
-  onSearchChange,
-  activeSession,
+  onOpenSearch,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
+  onNewSession,
+  onOpenFolderPrompt,
+  onDemoRun,
+  inspectorOpen,
+  onToggleInspector,
   theme,
   onToggleTheme,
   onSwitchToLegacy,
   hasNativeOverlay,
 }: TitleBarProps): ReactElement {
-  const stageInfo = activeSession ? STAGE_META[activeSession.stage] : null;
-  const stageClass =
-    stageInfo?.tone === 'clay'
-      ? 'is-clay'
-      : stageInfo?.tone === 'success'
-        ? 'is-success'
-        : stageInfo?.tone === 'warning'
-          ? 'is-warning'
-          : '';
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+    const onDocDown = (e: MouseEvent): void => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onDocDown);
+    return () => window.removeEventListener('mousedown', onDocDown);
+  }, [menuOpen]);
 
   return (
-    <header className="cds-titlebar" data-testid="v4-titlebar">
-      <div className="cds-titlebar-group">
+    <header
+      className="mp-window-titlebar mp-window-bar"
+      id="window-titlebar"
+      data-testid="v4-titlebar"
+    >
+      <div className="mp-window-titlebar-leading" ref={menuRef}>
         <button
           type="button"
-          className="cds-icon-btn"
-          title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-          aria-label="Toggle Sidebar"
+          className="mp-toolbar-button"
+          id="app-menu"
+          aria-label="App menu"
+          title="应用菜单"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen(prev => !prev)}
+        >
+          <CdsIcon name="Menu" size="small" />
+        </button>
+
+        <button
+          type="button"
+          className="mp-toolbar-button"
+          id="sidebar-toggle"
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          title={
+            sidebarCollapsed ? '展开侧边栏 (Ctrl+B)' : '收起侧边栏 (Ctrl+B)'
+          }
+          aria-expanded={!sidebarCollapsed}
           onClick={onToggleSidebar}
         >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.7"
-          >
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <line x1="9" y1="4" x2="9" y2="20" />
-          </svg>
-        </button>
-
-        <span className="cds-titlebar-brand">
-          <span className="cds-brand-mark">S</span>
-          <span>SDLC-Studio</span>
-        </span>
-
-        <label className="cds-top-search" aria-label="搜索任务与会话">
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5" />
-          </svg>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => onSearchChange(e.target.value)}
-            placeholder="搜索会话 / 路径..."
-          />
-        </label>
-      </div>
-
-      <div className="cds-titlebar-center">
-        {activeSession ? (
-          <>
-            <span className="cds-session-title" title={activeSession.title}>
-              {activeSession.title}
-            </span>
-            {stageInfo ? (
-              <span className={`cds-stage-pill ${stageClass}`}>
-                {stageInfo.label} · Term {activeSession.term}
-              </span>
-            ) : null}
-            {activeSession.crPassed ? (
-              <span className="cds-stage-pill is-success">CR &lt; 0.10</span>
-            ) : null}
-          </>
-        ) : (
-          <span className="cds-session-title">ForgeOps Collaborative IDE</span>
-        )}
-      </div>
-
-      <div className="cds-titlebar-group">
-        <button
-          type="button"
-          className="cds-icon-btn"
-          title={theme === 'light' ? '切换深色模式' : '切换浅色模式'}
-          aria-label="Toggle Theme"
-          onClick={onToggleTheme}
-        >
-          {theme === 'light' ? (
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.7"
-            >
-              <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
-            </svg>
-          ) : (
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.7"
-            >
-              <circle cx="12" cy="12" r="4" />
-              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" />
-            </svg>
-          )}
+          <CdsIcon name="Sidebar" size="small" />
         </button>
 
         <button
           type="button"
-          className="cds-ghost-pill"
-          onClick={onSwitchToLegacy}
-          title="切换回 ForgeOps v3.1 专家路由视图"
+          className="mp-toolbar-button"
+          id="global-search-toggle"
+          aria-label="Global search"
+          title="全局搜索会话、任务与文件 (Ctrl+K)"
+          onClick={onOpenSearch}
         >
-          专家模式
+          <CdsIcon name="Search" size="small" />
         </button>
 
-        {hasNativeOverlay ? <div className="cds-caption-safe" /> : null}
+        <button
+          type="button"
+          className="mp-toolbar-button"
+          id="window-back"
+          aria-label="Back"
+          title="后退"
+          disabled={!canGoBack}
+          onClick={onGoBack}
+        >
+          <CdsIcon name="ArrowLeft" size="small" />
+        </button>
+
+        <button
+          type="button"
+          className="mp-toolbar-button"
+          id="window-forward"
+          aria-label="Forward"
+          title="前进"
+          disabled={!canGoForward}
+          onClick={onGoForward}
+        >
+          <CdsIcon name="ArrowRight" size="small" />
+        </button>
+
+        {menuOpen ? (
+          <div className="mp-window-menu-popover" role="menu">
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onNewSession();
+              }}
+            >
+              <span>新建协同会话</span>
+              <kbd>Ctrl+N</kbd>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                void onOpenFolderPrompt();
+              }}
+            >
+              <span>打开本地项目…</span>
+              <kbd>Ctrl+O</kbd>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                void onDemoRun();
+              }}
+            >
+              <span>一键跑通示例全流程</span>
+              <kbd />
+            </button>
+            <hr />
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onToggleSidebar();
+              }}
+            >
+              <span>{sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}</span>
+              <kbd>Ctrl+B</kbd>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onToggleInspector();
+              }}
+            >
+              <span>{inspectorOpen ? '关闭右侧工作区' : '打开右侧工作区'}</span>
+              <kbd>Ctrl+Shift+B</kbd>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onToggleTheme();
+              }}
+            >
+              <span>{theme === 'light' ? '切换深色外观' : '切换浅色外观'}</span>
+              <kbd />
+            </button>
+            <hr />
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onSwitchToLegacy();
+              }}
+            >
+              <span>切换至 ForgeOps v3.1 专家模式</span>
+              <kbd />
+            </button>
+          </div>
+        ) : null}
       </div>
+
+      {hasNativeOverlay ? (
+        <div className="mp-window-caption-safe" aria-hidden="true" />
+      ) : null}
     </header>
   );
 }

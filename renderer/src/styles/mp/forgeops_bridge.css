@@ -1,0 +1,516 @@
+/* SDLC-Studio v4 minimal bridge extensions strictly using MP / CDS tokens */
+
+body.studio {
+  background: var(--mp-page);
+  color: var(--mp-text);
+  font-family: var(--mp-font-ui);
+  font-size: var(--mp-text-body);
+  line-height: var(--mp-leading-body);
+}
+
+/* Home heading uses editorial Anthropic Serif + Han Serif matching MP Learn/Home */
+body.studio .mp-home-heading h1 {
+  font-family: var(--mp-font-serif);
+  font-size: 26px;
+  line-height: 34px;
+  font-weight: 450;
+  letter-spacing: -0.02em;
+  color: var(--mp-text);
+}
+
+/* Keep composer visible centered beneath Home greeting when no session messages exist */
+body.studio #view-chat[data-home="true"] .mpw-scrollbody {
+  justify-content: center;
+  align-items: center;
+  padding: 24px 32px 48px;
+  gap: 24px;
+  overflow: auto;
+}
+
+body.studio #view-chat[data-home="true"] .mp-studio-home {
+  flex: 0 0 auto;
+  padding: 0;
+  overflow: visible;
+  width: min(768px, 100%);
+}
+
+body.studio #view-chat[data-home="true"] .mpw-stream {
+  display: none;
+}
+
+body.studio #view-chat[data-home="true"] .mpw-composer-seat {
+  flex: 0 0 auto;
+  width: min(768px, 100%);
+  padding: 0;
+}
+
+body.studio #view-chat[data-home="true"] .mp-home-attention {
+  margin-top: 20px;
+  padding-bottom: 0;
+  gap: 18px;
+}
+
+body.studio #view-chat[data-home="true"] .mp-home-stats {
+  width: 100%;
+  margin-top: 16px;
+  margin-left: 0;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}
+
+/* Inspector width driven smoothly by drag handle */
+body.studio .mp-inspector {
+  width: var(--mp-inspector-width, 500px);
+}
+
+/* Shared minimal SDLC Inspector inner layout */
+.sd-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 24px;
+  min-width: 0;
+  color: var(--mp-text);
+}
+
+.sd-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-pane-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sd-pane-title-group h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 560;
+  line-height: 20px;
+  color: var(--mp-text);
+}
+
+.sd-pane-title-group p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--mp-text-muted);
+}
+
+.sd-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Monochrome ghost + subtle pill controls matching MP .mp-decision-button */
+.sd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 6px;
+  background: var(--mp-panel);
+  color: var(--mp-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--mp-dur-fast), color var(--mp-dur-fast), border-color var(--mp-dur-fast);
+}
+
+.sd-btn:hover:not(:disabled) {
+  background: var(--mp-hover);
+  color: var(--mp-text);
+  border-color: var(--mp-rule-strong);
+}
+
+.sd-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sd-btn.is-primary {
+  background: var(--mp-clay);
+  border-color: var(--mp-clay);
+  color: #ffffff;
+}
+
+.sd-btn.is-primary:hover:not(:disabled) {
+  background: var(--mp-clay-strong);
+  border-color: var(--mp-clay-strong);
+  color: #ffffff;
+}
+
+.sd-btn.is-ink {
+  background: var(--mp-text);
+  border-color: var(--mp-text);
+  color: var(--mp-page);
+}
+
+.sd-btn.is-ink:hover:not(:disabled) {
+  opacity: 0.88;
+}
+
+.sd-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--mp-panel-subtle);
+  color: var(--mp-text-secondary);
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.sd-board-svg text,
+.sd-board-svg marker path,
+.sd-board-svg circle[fill] {
+  stroke: none;
+}
+
+.sd-starburst svg,
+svg[data-cds="Spark"] {
+  fill: currentColor;
+  stroke: none;
+}
+
+body.studio .mpw-workspace-tab {
+  min-width: 0;
+  max-width: none;
+}
+
+body.studio .mpw-workspace-tab-select {
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+body.studio .mp-decision-card {
+  max-height: min(520px, 58dvh);
+}
+
+.sd-pill.is-success {
+  background: color-mix(in srgb, var(--mp-git-added) 12%, transparent);
+  color: var(--mp-git-added);
+}
+
+.sd-pill.is-danger {
+  background: color-mix(in srgb, var(--mp-git-removed) 12%, transparent);
+  color: var(--mp-git-removed);
+}
+
+.sd-pill.is-clay {
+  background: color-mix(in srgb, var(--mp-clay) 14%, transparent);
+  color: var(--mp-clay-strong);
+}
+
+.sd-input,
+.sd-select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 6px;
+  background: var(--mp-panel);
+  color: var(--mp-text);
+  font-size: 12px;
+}
+
+.sd-input:focus,
+.sd-select:focus {
+  border-color: var(--mp-rule-strong);
+}
+
+.sd-card {
+  border: 1px solid var(--mp-rule);
+  border-radius: 10px;
+  background: var(--mp-panel);
+  overflow: hidden;
+}
+
+.sd-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--mp-rule);
+  background: var(--mp-panel-subtle);
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--mp-text);
+}
+
+.sd-card-body {
+  padding: 10px 12px;
+}
+
+/* Task WBS row inside Inspector */
+.sd-wbs-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--mp-rule);
+  transition: background var(--mp-dur-fast);
+}
+
+.sd-wbs-row:last-child {
+  border-bottom: 0;
+}
+
+.sd-wbs-row:hover {
+  background: var(--mp-hover);
+}
+
+.sd-wbs-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sd-wbs-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 520;
+  color: var(--mp-text);
+}
+
+.sd-wbs-desc {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--mp-text-muted);
+}
+
+.sd-wbs-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-left: 16px;
+  flex-wrap: wrap;
+}
+
+/* Diff / Code monospace surface */
+.sd-code-block {
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  background: var(--mp-code-surface);
+  font-family: var(--mp-font-mono);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.sd-diff-line {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.sd-diff-line:hover {
+  background: var(--mp-hover);
+}
+
+.sd-diff-line.is-add {
+  background: color-mix(in srgb, var(--mp-git-added) 10%, transparent);
+  color: var(--mp-git-added);
+}
+
+.sd-diff-line.is-del {
+  background: color-mix(in srgb, var(--mp-git-removed) 10%, transparent);
+  color: var(--mp-git-removed);
+}
+
+.sd-diff-line.is-hunk {
+  color: var(--mp-file-link);
+}
+
+.sd-diff-lnum {
+  color: var(--mp-text-muted);
+  text-align: right;
+  user-select: none;
+}
+
+/* Prose / Spec reader typography matching MP learn study artifact */
+.sd-spec-doc {
+  font-family: var(--mp-font-serif);
+  font-size: 13.5px;
+  line-height: 1.72;
+  color: var(--mp-text);
+}
+
+.sd-spec-doc pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mp-font-serif);
+}
+
+/* Segmented pills (subtabs inside Board & Spec or Preview) */
+.sd-subtabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--mp-panel-subtle);
+}
+
+.sd-subtabs button {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: var(--mp-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sd-subtabs button.is-on {
+  background: var(--mp-panel);
+  color: var(--mp-text);
+  box-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.08);
+}
+
+/* Chat handoff line (clean inline disclosure style, never noisy box) */
+.sd-handoff-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--mp-text-secondary);
+  font-size: 12.5px;
+  line-height: 19px;
+}
+
+.sd-handoff-row:hover {
+  background: var(--mp-hover);
+}
+
+.sd-handoff-link {
+  margin-left: auto;
+  color: var(--mp-file-link);
+  font-size: 11.5px;
+  flex: none;
+}
+
+/* Chat markdown light polish */
+.sd-msg-prose p {
+  margin: 0 0 8px;
+}
+.sd-msg-prose p:last-child {
+  margin-bottom: 0;
+}
+.sd-msg-prose code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--mp-panel-subtle);
+  color: var(--mp-prose-code-color);
+  font-family: var(--mp-font-mono);
+  font-size: 12px;
+}
+
+/* Starburst SVG inline */
+.sd-starburst {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mp-clay);
+  flex: none;
+}
+
+.sd-starburst.is-spinning svg {
+  animation: sd-star-spin 2.4s linear infinite;
+}
+
+@keyframes sd-star-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Library subviews inside center col when user clicks Projects / Tasks / Artifacts / Kernels / Customize */
+.sd-library-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 32px 48px;
+}
+
+.sd-library-inner {
+  width: min(860px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.sd-library-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--mp-rule);
+}
+
+.sd-library-header h1 {
+  margin: 0;
+  font-family: var(--mp-font-serif);
+  font-size: 22px;
+  font-weight: 480;
+  line-height: 28px;
+}
+
+.sd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.sd-table th,
+.sd-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--mp-rule);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.sd-table th {
+  color: var(--mp-text-muted);
+  font-weight: 550;
+  font-size: 11.5px;
+  background: var(--mp-panel-subtle);
+}
+
+.sd-verify-iframe {
+  width: 100%;
+  height: 360px;
+  border: 1px solid var(--mp-rule);
+  border-radius: 8px;
+  background: #ffffff;
+}

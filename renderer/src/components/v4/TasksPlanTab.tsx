@@ -6,6 +6,7 @@ import type {
   TaskMutation,
   TaskNodeRole,
 } from '../../api/v4-types.ts';
+import {CdsIcon} from './CdsIcon.tsx';
 import {ALL_KERNELS, ROLE_LABELS, kernelLabel} from './v4-labels.ts';
 
 export interface TasksPlanTabProps {
@@ -103,277 +104,295 @@ export function TasksPlanTab({
   );
 
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 12}}>
-      <div className="cds-toolbar">
-        <div>
-          <h3 className="cds-card-title">任务拆解与多内核编排</h3>
-          <p className="cds-card-sub">
-            为每个子任务指定文件域 Scope 与原生 Agent 内核，按依赖波次在独立 Git
-            Worktree 中并行执行。
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>任务拆解与多内核编排</h3>
+          <p>
+            为每个子任务指派文件域 Scope 与原生 Agent 内核，在独立 Git Worktree
+            按波次并行执行。
           </p>
         </div>
-        <div className="cds-toolbar-group">
+
+        <div className="sd-toolbar-row">
           <button
             type="button"
-            className="cds-btn is-sm"
+            className="sd-btn"
             disabled={busy}
             onClick={() => void onDecompose(Boolean(plan))}
           >
-            {plan ? '重新拆解' : '智能拆解任务'}
+            <CdsIcon name="ArrowClockwise" size="xs" />
+            <span>{plan ? '重新拆解' : '智能拆解'}</span>
           </button>
           <button
             type="button"
-            className="cds-btn is-sm"
+            className="sd-btn"
             disabled={busy || !plan}
             onClick={() => setShowAddForm(prev => !prev)}
           >
-            + 新增子任务
+            <CdsIcon name="Add" size="xs" />
+            <span>新增子任务</span>
           </button>
           {hasPausedOrFailed ? (
             <button
               type="button"
-              className="cds-btn is-sm"
+              className="sd-btn"
               disabled={busy}
               onClick={() => void onExecute({resumeOnly: true})}
             >
-              断点续跑
+              <CdsIcon name="Play" size="xs" />
+              <span>断点续跑</span>
             </button>
           ) : null}
           <button
             type="button"
-            className="cds-btn is-sm is-clay"
+            className="sd-btn is-primary"
             disabled={busy || tasks.length === 0}
             onClick={() => void onExecute({resumeOnly: false})}
           >
-            并行启动全部波次
+            <CdsIcon name="Play" size="xs" />
+            <span>并行启动全部波次</span>
           </button>
         </div>
       </div>
 
       {showAddForm ? (
-        <div className="cds-card is-subtle">
-          <div className="cds-card-head">
-            <strong style={{fontSize: 12.5}}>新增子任务</strong>
+        <div className="sd-card">
+          <div className="sd-card-head">
+            <span>新增 WBS 子任务</span>
             <button
               type="button"
-              className="cds-btn is-sm"
+              className="sd-btn"
               onClick={() => setShowAddForm(false)}
             >
               取消
             </button>
           </div>
           <div
-            style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8}}
+            className="sd-card-body"
+            style={{display: 'flex', flexDirection: 'column', gap: 8}}
           >
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                gap: 8,
+              }}
+            >
+              <input
+                type="text"
+                className="sd-input"
+                value={newTitle}
+                onChange={e => setNewTitle(e.target.value)}
+                placeholder="子任务标题"
+              />
+              <input
+                type="text"
+                className="sd-input"
+                value={newScope}
+                onChange={e => setNewScope(e.target.value)}
+                placeholder="文件域 Scope (逗号分隔)"
+              />
+              <select
+                className="sd-select"
+                value={newRole}
+                onChange={e => setNewRole(e.target.value as TaskNodeRole)}
+              >
+                {ROLES.map(r => (
+                  <option key={r} value={r}>
+                    {ROLE_LABELS[r]}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="sd-select"
+                value={newKernel}
+                onChange={e => setNewKernel(e.target.value as KernelId)}
+              >
+                {ALL_KERNELS.map(k => (
+                  <option key={k} value={k}>
+                    {kernelLabel(k)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <input
               type="text"
-              className="cds-input"
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              placeholder="子任务标题"
+              className="sd-input"
+              value={newDesc}
+              onChange={e => setNewDesc(e.target.value)}
+              placeholder="任务描述与验收边界…"
             />
-            <input
-              type="text"
-              className="cds-input"
-              value={newScope}
-              onChange={e => setNewScope(e.target.value)}
-              placeholder="文件域 Scope (逗号分隔)"
-            />
-            <select
-              className="cds-select"
-              value={newRole}
-              onChange={e => setNewRole(e.target.value as TaskNodeRole)}
-            >
-              {ROLES.map(r => (
-                <option key={r} value={r}>
-                  {ROLE_LABELS[r]}
-                </option>
-              ))}
-            </select>
-            <select
-              className="cds-select"
-              value={newKernel}
-              onChange={e => setNewKernel(e.target.value as KernelId)}
-            >
-              {ALL_KERNELS.map(k => (
-                <option key={k} value={k}>
-                  {kernelLabel(k)}
-                </option>
-              ))}
-            </select>
-          </div>
-          <input
-            type="text"
-            className="cds-input"
-            value={newDesc}
-            onChange={e => setNewDesc(e.target.value)}
-            placeholder="任务描述与验收边界..."
-          />
-          <div style={{display: 'flex', justifyContent: 'flex-end'}}>
-            <button
-              type="button"
-              className="cds-btn is-sm is-primary"
-              disabled={busy || !newTitle.trim()}
-              onClick={() => void handleAddTask()}
-            >
-              加入计划
-            </button>
+            <div style={{display: 'flex', justifyContent: 'flex-end'}}>
+              <button
+                type="button"
+                className="sd-btn is-ink"
+                disabled={busy || !newTitle.trim()}
+                onClick={() => void handleAddTask()}
+              >
+                加入计划
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
 
       {tasks.length === 0 ? (
-        <div className="cds-empty">
-          尚未生成任务计划。请点击「智能拆解任务」或先在对话区冻结 Spec IR。
-        </div>
+        <p className="mp-inspector-empty">
+          尚未生成任务计划。请点击「智能拆解」或在聊天中执行 `/decompose`。
+        </p>
       ) : (
-        waves.map(wave => (
-          <div
-            key={wave}
-            style={{display: 'flex', flexDirection: 'column', gap: 8}}
-          >
-            <div className="cds-section-label" style={{padding: '2px 2px 0'}}>
-              <span>Wave {wave + 1} · 并行波次</span>
-              <span>
-                {tasks.filter(t => t.waveIndex === wave).length} 个任务
-              </span>
-            </div>
+        waves.map(wave => {
+          const waveTasks = tasks.filter(t => t.waveIndex === wave);
+          return (
+            <div key={wave} className="sd-card">
+              <div className="sd-card-head">
+                <span>Wave {wave + 1} · 并行波次</span>
+                <span className="sd-pill">{waveTasks.length} tasks</span>
+              </div>
 
-            {tasks
-              .filter(t => t.waveIndex === wave)
-              .map(task => {
-                const statusTone =
-                  task.status === 'completed'
-                    ? 'is-success'
-                    : task.status === 'running'
-                      ? 'is-clay'
-                      : task.status === 'failed'
-                        ? 'is-danger'
-                        : '';
-                return (
-                  <div
-                    key={task.id}
-                    className={`cds-task-card ${task.status === 'running' ? 'is-running' : ''} ${task.status === 'failed' ? 'is-failed' : ''}`}
-                  >
-                    <div className="cds-card-head">
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 7,
-                          minWidth: 0,
-                        }}
-                      >
-                        <strong style={{fontSize: 13}}>{task.title}</strong>
-                        <span className={`cds-stage-pill ${statusTone}`}>
-                          {task.status}
-                        </span>
-                        <span className="cds-stage-pill">
-                          {ROLE_LABELS[task.role]}
-                        </span>
+              <div>
+                {waveTasks.map(task => {
+                  const tone =
+                    task.status === 'completed'
+                      ? 'is-success'
+                      : task.status === 'running'
+                        ? 'is-clay'
+                        : task.status === 'failed'
+                          ? 'is-danger'
+                          : '';
+                  return (
+                    <div key={task.id} className="sd-wbs-row">
+                      <div className="sd-wbs-top">
+                        <div className="sd-wbs-title">
+                          <span
+                            className="status-dot"
+                            data-status={
+                              task.status === 'completed'
+                                ? 'ready'
+                                : task.status === 'running'
+                                  ? 'running'
+                                  : task.status === 'failed'
+                                    ? 'error'
+                                    : 'awaiting'
+                            }
+                          />
+                          <span>{task.title}</span>
+                          <span className={`sd-pill ${tone}`}>
+                            {task.status}
+                          </span>
+                          <span className="sd-pill">
+                            {ROLE_LABELS[task.role]}
+                          </span>
+                        </div>
+
+                        <div className="sd-toolbar-row">
+                          <select
+                            aria-label={`选择 ${task.title} 的原生内核`}
+                            className="sd-select"
+                            disabled={busy}
+                            value={task.assignedKernel}
+                            onChange={e =>
+                              void onMutate({
+                                op: 'reassign_kernel',
+                                taskId: task.id,
+                                assignedKernel: e.target.value as KernelId,
+                              })
+                            }
+                          >
+                            {ALL_KERNELS.map(k => (
+                              <option key={k} value={k}>
+                                {kernelLabel(k)}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            className="sd-btn"
+                            disabled={busy}
+                            onClick={() => void handleSplitTask(task)}
+                          >
+                            拆分
+                          </button>
+                          <button
+                            type="button"
+                            className="sd-btn"
+                            disabled={busy}
+                            onClick={() =>
+                              void onMutate({
+                                op: 'remove_task',
+                                taskId: task.id,
+                              })
+                            }
+                          >
+                            移除
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="cds-toolbar-group">
-                        <select
-                          aria-label={`选择 ${task.title} 的原生内核`}
-                          className="cds-select"
-                          disabled={busy}
-                          value={task.assignedKernel}
-                          onChange={e =>
-                            void onMutate({
-                              op: 'reassign_kernel',
-                              taskId: task.id,
-                              assignedKernel: e.target.value as KernelId,
-                            })
-                          }
-                        >
-                          {ALL_KERNELS.map(k => (
-                            <option key={k} value={k}>
-                              {kernelLabel(k)}
-                            </option>
+                      <p className="sd-wbs-desc">{task.description}</p>
+
+                      <div className="sd-wbs-meta">
+                        <div className="sd-toolbar-row">
+                          {task.fileScope.map(f => (
+                            <span
+                              key={f}
+                              className="sd-pill"
+                              style={{fontFamily: 'var(--mp-font-mono)'}}
+                            >
+                              {f}
+                            </span>
                           ))}
-                        </select>
+                          {task.worktreeBranch ? (
+                            <span
+                              className="sd-pill"
+                              style={{fontFamily: 'var(--mp-font-mono)'}}
+                            >
+                              <CdsIcon name="GitBranch" size="xs" />
+                              <span>{task.worktreeBranch}</span>
+                            </span>
+                          ) : null}
+                        </div>
 
-                        <button
-                          type="button"
-                          className="cds-btn is-sm"
-                          disabled={busy}
-                          onClick={() => void handleSplitTask(task)}
-                        >
-                          拆分任务
-                        </button>
-
-                        <button
-                          type="button"
-                          className="cds-btn is-sm"
-                          disabled={busy}
-                          onClick={() =>
-                            void onMutate({op: 'remove_task', taskId: task.id})
-                          }
-                        >
-                          移除
-                        </button>
+                        <div className="sd-toolbar-row">
+                          {task.diffStats.added > 0 ||
+                          task.diffStats.removed > 0 ? (
+                            <span
+                              style={{
+                                fontSize: 11.5,
+                                fontFamily: 'var(--mp-font-mono)',
+                                fontVariantNumeric: 'tabular-nums',
+                              }}
+                            >
+                              <span style={{color: 'var(--mp-git-added)'}}>
+                                +{task.diffStats.added}
+                              </span>{' '}
+                              <span style={{color: 'var(--mp-git-removed)'}}>
+                                {'\u2212'}
+                                {task.diffStats.removed}
+                              </span>
+                            </span>
+                          ) : null}
+                          {task.error ? (
+                            <span
+                              style={{
+                                fontSize: 11.5,
+                                color: 'var(--mp-danger)',
+                              }}
+                            >
+                              {task.error}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
-
-                    <div
-                      style={{fontSize: 12, color: 'var(--cds-text-secondary)'}}
-                    >
-                      {task.description}
-                    </div>
-
-                    <div className="cds-task-meta-row">
-                      <span>文件域:</span>
-                      {task.fileScope.map(f => (
-                        <span key={f} className="cds-mono-chip">
-                          {f}
-                        </span>
-                      ))}
-                      {task.dependsOn.length > 0 ? (
-                        <span>依赖前置: {task.dependsOn.join(', ')}</span>
-                      ) : (
-                        <span>无前置依赖</span>
-                      )}
-                    </div>
-
-                    <div className="cds-task-meta-row">
-                      {task.worktreeBranch ? (
-                        <span className="cds-mono-chip">
-                          branch: {task.worktreeBranch}
-                        </span>
-                      ) : null}
-                      {task.diffStats.added > 0 ||
-                      task.diffStats.removed > 0 ||
-                      task.diffStats.filesChanged > 0 ? (
-                        <span className="cds-diff-stat">
-                          <span className="cds-diff-add">
-                            +{task.diffStats.added}
-                          </span>
-                          <span className="cds-diff-del">
-                            {'\u2212'}
-                            {task.diffStats.removed}
-                          </span>
-                          <span style={{color: 'var(--cds-text-muted)'}}>
-                            ({task.diffStats.filesChanged} files)
-                          </span>
-                        </span>
-                      ) : null}
-                      {task.outputSummary ? (
-                        <span style={{color: 'var(--cds-text-secondary)'}}>
-                          · {task.outputSummary}
-                        </span>
-                      ) : null}
-                      {task.error ? (
-                        <span style={{color: 'var(--cds-danger)'}}>
-                          错误: {task.error}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        ))
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })
       )}
     </div>
   );

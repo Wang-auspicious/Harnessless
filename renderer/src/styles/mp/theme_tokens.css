@@ -1,0 +1,489 @@
+
+@font-face {
+  font-family: "anthropic-sans";
+  src: url("./assets/fonts/AnthropicSansMicro-Text.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+  font-feature-settings: "dlig" 0, "ss01" 1, "ss02" 1;
+  unicode-range: U+0-5B, U+5D-A0, U+A2-A3, U+A5-316, U+318-DFFF, U+E140-10FFFF;
+}
+
+@font-face {
+  font-family: "anthropic-sans";
+  src: url("./assets/fonts/AnthropicSans-Roman-Variable-DDVos-BJ.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+5C, U+A1, U+A4, U+E000-E13F;
+}
+
+@font-face {
+  font-family: "anthropic-sans";
+  src: url("./assets/fonts/AnthropicSans-Italic-Variable-CJtkx3-S.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "anthropic-sans-display";
+  src: url("./assets/fonts/AnthropicSansMicro-Display.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+  font-feature-settings: "dlig" 0, "ss01" 1, "ss02" 1;
+}
+
+@font-face {
+  font-family: "anthropic-mono";
+  src: url("./assets/fonts/AnthropicMono-Regular.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "anthropic-mono";
+  src: url("./assets/fonts/AnthropicMono-Italic.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Anthropic Sans";
+  src: url("./assets/fonts/AnthropicSans-Roman-Variable-DDVos-BJ.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Anthropic Sans";
+  src: url("./assets/fonts/AnthropicSans-Italic-Variable-CJtkx3-S.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Anthropic Serif";
+  src: url("./assets/fonts/AnthropicSerif-Roman-Variable-2VcCjn5t.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Anthropic Serif";
+  src: url("./assets/fonts/AnthropicSerif-Italic-Variable-Dcb-9NUS.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "ForgeOps Han Serif";
+  src:
+    local("Source Han Serif SC"),
+    local("Source Han Serif CN"),
+    local("思源宋体"),
+    local("思源宋体 CN"),
+    local("Noto Serif SC");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root,
+:root[data-theme="light"],
+:root[data-theme="dark"],
+:root[data-mode="light"],
+:root[data-mode="dark"] {
+  --cds-font-sans: "Anthropic Serif", "ForgeOps Han Serif", "Source Han Serif SC", "Source Han Serif CN", "Noto Serif SC", "思源宋体", "anthropic-sans", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
+  --cds-font-sans-display: "Anthropic Serif", "ForgeOps Han Serif", "Source Han Serif SC", "思源宋体", "anthropic-sans-display", "anthropic-sans", Georgia, serif;
+  --cds-font-mono: "anthropic-mono", "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --mp-font-mono: var(--cds-font-mono);
+}
+
+:root {
+  color-scheme: light;
+  /* Geometry. 288px and the 700px collapse breakpoint are Claude's own values -
+     the desktop shell persists both. Claude's pane-overlay breakpoint is 768px
+     measured on the pane's own container, which is a different quantity from
+     --mp-content-width. The inspector bounds are Magic Pointer's own: Claude's
+     pane grid declares only a 320px per-column floor and no ceiling. */
+  --mp-window-bar: 36px; /* no CDS counterpart */
+  --mp-sidebar-width: 288px; /* Claude desktop bootFrameLayout.sidebarWidth */
+  --mp-content-width: 768px; /* Magic Pointer's own reading measure */
+  --mp-inspector-min: 300px; /* Free resizable right split pane floor */
+  --mp-inspector-max: 72vw; /* Dynamic proportion matching Claude split pane */
+
+  /* Surface roles aligned to Claude Desktop 4.23118 (c6a992d55-BxgTbpOo.css). */
+  --mp-page: #FFFFFF; /* --cds-gray-0 */
+  --mp-sidebar: #F9F9F7; /* --cds-gray-20 */
+  --mp-panel: #FFFFFF; /* --cds-surface-2 light = --cds-surface-3 light = --cds-gray-0 */
+  --mp-panel-subtle: #F3F3F0; /* --cds-gray-40 */
+  --mp-markdown-cell: #F6F6F4; /* --cds-gray-30 */
+  --mp-code-surface: #FFFFFF; /* --cds-gray-0 */
+  --mp-repository-surface: #F6F6F4; /* --cds-gray-30 */
+  --mp-composer: #FFFFFF;
+  --mp-user-bubble: rgba(11, 11, 11, .05); /* --cds-bg-user-message = --cds-alpha-1 */
+  --mp-prose-code-color: #8E2626; /* --cds-red-600 */
+  --mp-file-link: #184F95; /* --cds-blue-600 */
+  --mp-selected: #EDECE8; /* --cds-gray-60 */
+  --mp-text: var(--cds-text-primary);
+  --mp-text-secondary: var(--cds-text-secondary);
+  --mp-text-muted: var(--cds-text-muted);
+  --mp-rule: rgba(11, 11, 11, 0.09); /* --cds-alpha-2 */
+  --mp-rule-strong: rgba(11, 11, 11, .20); /* --cds-border-strong = --cds-alpha-3 */
+  --mp-hover: rgba(11, 11, 11, .05); /* --cds-fill-ghost-hover light = --cds-alpha-1 */
+  --mp-task-card: var(--mp-hover);
+  --mp-active: rgba(11, 11, 11, .10); /* --cds-fill-ghost-selected light = --cds-alpha-2 */
+  --mp-clay: #D97757; /* --cds-clay */
+  --mp-clay-strong: #CC5A36;
+  --mp-activity-blue: #86ACEA;
+  --mp-heat-level-1: #86ACEA;
+  --mp-heat-level-2: #6394E3;
+  --mp-heat-level-3: #407CDD;
+  --mp-heat-level-4: #2566D0;
+  --mp-pictogram-200: 51 16.5% 84.5%;
+  /* Deliberately NOT aligned to --cds-text-danger / --cds-text-success /
+     --cds-text-accent. Claude splits these into a text token (red-600 #8E2626,
+     green-600 #006300, blue-600 #184F95 in light) and a separate fill token
+     (--cds-fill-danger / -success / -accent). Magic Pointer has one token per
+     role and uses it for text, borders and 12% tints alike, so adopting the
+     text-level value would make every error fill too dark. */
+  --mp-danger: #B42318;
+  --mp-success: #2E7D4F;
+  --mp-focus: #2566D0;
+
+  /* Diff counts. The minus glyph is U+2212 MINUS SIGN, never a hyphen.
+     Exact matches for --cds-text-git-added (light #1e9e3c) and
+     --cds-text-git-removed (light #cd2054). */
+  --mp-git-added: #1E9E3C;
+  --mp-git-removed: #CD2054;
+
+  /* Shimmer band. A single solid peak colour swept across a masked clone of
+     the glyphs, so the text itself never changes colour — only the highlight
+     passes over it. This is the lighter companion of the running text colour. */
+  --mp-shimmer-peak: #F59575;
+
+  --mp-syn-command: #1D4ED8;
+  --mp-syn-keyword: #AF3A03;
+  --mp-syn-variable: #44403C;
+  --mp-syn-number: #BE123C;
+  --mp-syn-string: #15803D;
+  --mp-syn-comment: #6B7280;
+  --mp-syn-operator: #57534E;
+  --mp-syn-function: #1D4ED8;
+  --mp-syn-type: #7C3AED;
+  --mp-syn-decorator: #B45309;
+  --mp-syn-property: #0F766E;
+
+  --mp-usage-cache-read: #2E7D4F;
+  --mp-usage-cache-write: #8B3A9E;
+  --mp-usage-input: #2566D0;
+  --mp-usage-output: #D97757;
+
+  --mp-font-ui: var(--cds-font-sans);
+  --mp-font-serif: "Anthropic Serif", "ForgeOps Han Serif", "Source Han Serif SC", "Source Han Serif CN", "Noto Serif SC", "思源宋体", Georgia, "Times New Roman", serif;
+  --mp-font-mono: var(--cds-font-mono);
+  --mp-text-body: 13px;
+  --mp-leading-body: var(--cds-leading-body);
+  --mp-text-footnote: 12px;
+  --mp-leading-footnote: 16px;
+  --mp-text-caption: 11px;
+  --mp-leading-caption: 14px;
+  --mp-text-title: 22px;
+  --mp-leading-title: 28px;
+  --mp-weight-regular: 400;
+  --mp-weight-medium: 500;
+  --mp-weight-semibold: 580;
+  --mp-weight-bold: 600;
+  /* Type scale: --mp-text-body/footnote/caption already equal --cds-font-size-body
+     (.8125rem = 13px), --cds-font-size-footnote (.75rem = 12px) and
+     --cds-font-size-caption (.6875rem = 11px). Body leading now follows the
+     active CDS density instead of the former hardcoded 18px. Claude's
+     weights are also a different mechanism: --cds-font-wght-regular/medium/
+     semibold/bold resolve to the font default in light and to "wght" 360/460/540/560
+     in dark, used through font-variation-settings. Magic Pointer sets numeric
+     font-weight, so adopting 360/460/540/560 would lighten every glyph. */
+  /* --cds-font-grad-bold 200, --cds-font-grad-semibold 180 if the grade axis is ever used. */
+
+  --mp-s0: 0px;
+  /* Spacing. These are positional indices, not semantic names, so they are not
+     renumbered. They already contain every CDS named step - --cds-pad-xs 4,
+     --cds-pad-sm 6, --cds-pad-md 8, --cds-pad-lg 12, --cds-pad-xl 20 and
+     --cds-gap-xs 6, --cds-gap-sm 8, --cds-gap-md 12, --cds-gap-lg 20,
+     --cds-gap-xl 32 - so a call site that wants the measured step can pick it. */
+  --mp-s1: 2px;
+  --mp-s2: 3px;
+  --mp-s3: 4px;
+  --mp-s4: 5px;
+  --mp-s5: 6px;
+  --mp-s6: 8px;
+  --mp-s7: 10px;
+  --mp-s8: 12px;
+  --mp-s9: 16px;
+  --mp-s10: 20px;
+  --mp-s11: 24px;
+  --mp-s12: 32px;
+  --mp-s13: 40px;
+  --mp-s14: 56px;
+
+  --mp-r0: 0px;
+  /* Semantic radii are independent of the positional spacing ladder. */
+  --mp-r1: 2px;
+  --mp-r2: 3px;
+  --mp-r3: 4px;
+  --mp-r4: 5px;
+  --mp-r5: 6px;
+  --mp-r6: 8px;
+  --mp-r7: 10px;
+  --mp-r8: 12px;
+  --mp-r-sheet: 16px;
+  --mp-r-bubble: 14px;
+  --mp-r-pill: 999px;
+
+  /* Motion. Four of these are exact CDS values; --mp-dur-normal is Claude's
+     --cds-dur-base (.2s). Claude also has --cds-dur-sheet (.3s, = --mp-dur-structure)
+     and --cds-dur-slow (.45s), plus --cds-ease-out cubic-bezier(0, 0, .2, 1) and
+     --cds-ease-overshoot cubic-bezier(.34, 1.3, .64, 1). */
+  --mp-dur-fast: 120ms; /* --cds-dur-snap */
+  --mp-actions-in: .12s; /* --cds-dur-snap */
+  --mp-actions-in-delay: .1s; /* no CDS counterpart */
+  --mp-actions-out: 60ms; /* --cds-dur-fast */
+  --mp-actions-ease: cubic-bezier(.32, .72, 0, 1); /* --cds-ease-snap */
+  --mp-dur-normal: 200ms; /* --cds-dur-base */
+  --mp-dur-structure: 300ms; /* --cds-dur-sheet */
+  --mp-ease-out: cubic-bezier(.32,.72,0,1); /* --cds-ease-snap */
+
+  /* Shadows. No CDS counterpart: Magic Pointer's pair carries a 0.5px hairline
+     ring that Claude's shadow tokens do not, and dropping it would soften every
+     menu and sheet edge. For reference, Claude's ladder is
+     --cds-shadow-sm 0 1px 2px 0 hsl(from gray-900 / 6%), 0 2px 8px 0 #0000003d
+     --cds-shadow-md 0 2px 4px 0 hsl(from gray-900 / 7%), 0 6px 16px 0 #0000003d
+     --cds-shadow-lg 0 4px 8px 0 hsl(from gray-900 / 8%), 0 12px 28px -2px #0000003d
+     --cds-shadow-popover 0 8px 24px #00000052, 0 2px 6px #0003. */
+  --mp-shadow-menu: 0 0 0 .5px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.06), 0 16px 40px rgba(0,0,0,.08);
+  --mp-shadow-sheet: 0 0 0 .5px rgba(0,0,0,.05), 0 12px 32px rgba(0,0,0,.06);
+
+  --paper: var(--mp-page);
+  --paper-2: var(--mp-panel-subtle);
+  --card: var(--mp-panel);
+  --card-sunk: var(--mp-panel-subtle);
+  --card-hover: var(--mp-hover);
+  --ink: var(--mp-text);
+  --ink-2: var(--mp-text-secondary);
+  --ink-3: var(--mp-text-muted);
+  --ink-4: var(--mp-rule-strong);
+  --hairline: var(--mp-rule);
+  --hairline-2: var(--mp-rule-strong);
+  --terracotta: var(--mp-clay);
+  --terracotta-bg: color-mix(in srgb, var(--mp-clay) 12%, transparent);
+  --green: var(--mp-success);
+  --green-bg: color-mix(in srgb, var(--mp-success) 12%, transparent);
+  --indigo: var(--mp-focus);
+  --indigo-bg: color-mix(in srgb, var(--mp-focus) 10%, transparent);
+  --font-ui: var(--mp-font-ui);
+  --font-mono: var(--mp-font-mono);
+}
+
+:root[data-theme="dark"],
+body[data-ds-dark-theme] {
+  color-scheme: dark;
+  --mp-page: #0B0B0A;
+  --mp-sidebar: #151515;
+  --mp-panel: #1A1A19; /* --cds-surface-panel = --cds-surface-2 dark = --cds-gray-830 */
+  --mp-panel-subtle: #20201E;
+  --mp-markdown-cell: #30302F; /* no CDS counterpart */
+  --mp-code-surface: #30302F; /* no CDS counterpart: Claude uses --cds-fill-field dark = --cds-alpha-1 */
+  --mp-repository-surface: #292928; /* no CDS counterpart */
+  --mp-composer: #20201E;
+  --mp-user-bubble: rgba(255, 255, 255, .06);
+  --mp-prose-code-color: #EC7E7E; /* --cds-red-300 */
+  --mp-file-link: #6DA7EC; /* --cds-blue-300 */
+  --mp-selected: #343433; /* no CDS counterpart: Claude uses --cds-fill-ghost-selected dark = 15% white */
+  --mp-task-card: #2F2F2F; /* no CDS counterpart */
+  --mp-text: var(--cds-text-primary);
+  --mp-text-secondary: var(--cds-text-secondary);
+  --mp-text-muted: var(--cds-text-muted);
+  --mp-clay-strong: #E08264;
+  --mp-rule: rgba(255, 255, 255, .10); /* --cds-alpha-2 (neutral-900 flips to gray-0 in dark) */
+  --mp-rule-strong: rgba(255, 255, 255, .20); /* --cds-border-strong = --cds-alpha-3 */
+  --mp-hover: rgba(255, 255, 255, .075); /* --cds-fill-ghost-hover dark = 7.5% */
+  --mp-active: rgba(255, 255, 255, .15); /* --cds-fill-ghost-selected dark = 15% */
+  --mp-pictogram-200: 60 2.5% 23.3%;
+  --mp-danger: #FF6159;
+  --mp-success: #74C295;
+  --mp-focus: #86ACEA;
+  --mp-git-added: #32D74B; /* --cds-text-git-added dark */
+  --mp-git-removed: #FF2C56; /* --cds-text-git-removed dark */
+  --mp-shimmer-peak: #FFA98A;
+  --mp-syn-command: #79B8FF;
+  --mp-syn-keyword: #F2A365;
+  --mp-syn-variable: #E5E3DC;
+  --mp-syn-number: #FF8A80;
+  --mp-syn-string: #85D899;
+  --mp-syn-comment: #7E877E;
+  --mp-syn-operator: #A8A29E;
+  --mp-syn-function: #79B8FF;
+  --mp-syn-type: #C4A7E7;
+  --mp-syn-decorator: #F6C177;
+  --mp-syn-property: #7DD3FC;
+  --mp-usage-cache-read: #74C295;
+  --mp-usage-cache-write: #C77BD8;
+  --mp-usage-input: #86ACEA;
+  --mp-usage-output: #D97757;
+  --mp-shadow-menu: 0 0 0 .5px rgba(255,255,255,.08), 0 4px 12px rgba(0,0,0,.40), 0 16px 40px rgba(0,0,0,.50);
+  --mp-shadow-sheet: 0 0 0 .5px rgba(255,255,255,.07), 0 12px 32px rgba(0,0,0,.42);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--mp-page);
+  color: var(--mp-text);
+  font-family: var(--mp-font-ui);
+  font-weight: var(--mp-weight-regular);
+  line-height: var(--mp-leading-body);
+  -webkit-font-smoothing: antialiased;
+  font-optical-sizing: auto;
+  text-rendering: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+img,
+svg,
+a,
+button {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+pre,
+code,
+.mp-chat-bubble,
+.mp-chat-markdown,
+.mp-chat-stream-live,
+.mp-diff-table,
+.mp-diff-line,
+.mp-terminal-output,
+.mp-artifact-body,
+.mp-selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  font-size: var(--mp-text-body);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled {
+  cursor: default;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+svg {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--mp-focus);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--mp-activity-blue) 35%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: transparent;
+  background-clip: padding-box;
+  transition: background-color 180ms ease;
+}
+
+.is-scrolling::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--mp-text) 20%, transparent);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--mp-text) 34%, transparent);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+    transition-duration: var(--mp-dur-fast) !important;
+    transition-property: opacity, color, background-color, border-color !important;
+  }
+}

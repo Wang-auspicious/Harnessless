@@ -1,4 +1,8 @@
-import type {ReactElement} from 'react';
+import type {
+  CSSProperties,
+  MouseEvent as ReactMouseEvent,
+  ReactElement,
+} from 'react';
 import type {
   BoardSceneDoc,
   KernelId,
@@ -9,6 +13,7 @@ import type {
   WorkspaceTabId,
 } from '../../api/v4-types.ts';
 import {BoardSpecTab} from './BoardSpecTab.tsx';
+import {CdsIcon} from './CdsIcon.tsx';
 import {CodeDiffTab} from './CodeDiffTab.tsx';
 import {DagCheckpointTab} from './DagCheckpointTab.tsx';
 import {MountedKernelsTab} from './MountedKernelsTab.tsx';
@@ -16,7 +21,11 @@ import {TasksPlanTab} from './TasksPlanTab.tsx';
 import {VerifyHtmlTab} from './VerifyHtmlTab.tsx';
 
 export interface RightWorkspacePaneProps {
+  readonly isOpen: boolean;
   readonly widthPx: number;
+  readonly isDragging: boolean;
+  readonly onStartResize: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly onClose: () => void;
   readonly activeTab: WorkspaceTabId;
   readonly onSelectTab: (tab: WorkspaceTabId) => void;
   readonly detail: V4SessionDetail | null;
@@ -62,7 +71,11 @@ export interface RightWorkspacePaneProps {
 const EMPTY_BOARD: BoardSceneDoc = {nodes: [], edges: [], revision: 0};
 
 export function RightWorkspacePane({
+  isOpen,
   widthPx,
+  isDragging,
+  onStartResize,
+  onClose,
   activeTab,
   onSelectTab,
   detail,
@@ -97,39 +110,78 @@ export function RightWorkspacePane({
     readonly label: string;
     readonly badge?: number;
   }[] = [
-    {id: 'tasks', label: '任务拆解', badge: taskCount || undefined},
-    {id: 'board', label: '白板 × Spec', badge: pinCount || undefined},
-    {id: 'code', label: '代码 & Diff', badge: diffCount || undefined},
-    {id: 'verify', label: '验收 HTML'},
-    {id: 'kernels', label: '原生内核', badge: readyKernelCount || undefined},
-    {id: 'dag', label: '断点 DAG'},
+    {id: 'tasks', label: 'Tasks', badge: taskCount || undefined},
+    {id: 'board', label: 'Board · Spec', badge: pinCount || undefined},
+    {id: 'code', label: 'Diff', badge: diffCount || undefined},
+    {id: 'verify', label: 'Verify'},
+    {id: 'kernels', label: 'Kernels', badge: readyKernelCount || undefined},
+    {id: 'dag', label: 'DAG'},
   ];
 
   return (
     <aside
-      className="cds-right-pane"
-      style={{width: `${widthPx}px`}}
+      className="mp-inspector"
+      id="workspace-inspector"
+      hidden={!isOpen}
+      style={{'--mp-inspector-width': `${widthPx}px`} as CSSProperties}
       data-testid="v4-right-workspace"
     >
-      <nav className="cds-tabbar" role="tablist" aria-label="右侧协同工作区">
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === t.id}
-            className={`cds-tab ${activeTab === t.id ? 'is-active' : ''}`}
-            onClick={() => onSelectTab(t.id)}
-          >
-            <span>{t.label}</span>
-            {t.badge !== undefined ? (
-              <span className="cds-tab-count">{t.badge}</span>
-            ) : null}
-          </button>
-        ))}
-      </nav>
+      <div
+        className="mp-inspector-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整右侧工作区宽度"
+        data-dragging={isDragging ? 'true' : undefined}
+        onMouseDown={onStartResize}
+      />
 
-      <div className="cds-tab-body">
+      <header className="mp-inspector-header">
+        <div
+          className="mpw-workspace-tabs"
+          role="tablist"
+          aria-label="右侧协同工作区"
+        >
+          {tabs.map(t => (
+            <div
+              key={t.id}
+              className={`mpw-workspace-tab ${activeTab === t.id ? 'is-active' : ''}`}
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === t.id}
+                className="mpw-workspace-tab-select"
+                style={{paddingRight: t.badge !== undefined ? 10 : 10}}
+                onClick={() => onSelectTab(t.id)}
+              >
+                <span>{t.label}</span>
+                {t.badge !== undefined ? (
+                  <span
+                    className="sd-pill"
+                    style={{marginLeft: 5, height: 16, fontSize: 10}}
+                  >
+                    {t.badge}
+                  </span>
+                ) : null}
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="mp-inspector-actions">
+          <button
+            type="button"
+            className="mp-toolbar-button"
+            aria-label="Close workspace panel"
+            title="关闭右侧面板"
+            onClick={onClose}
+          >
+            <CdsIcon name="X" size="small" />
+          </button>
+        </div>
+      </header>
+
+      <section className="mp-inspector-panel">
         {activeTab === 'tasks' ? (
           <TasksPlanTab
             plan={detail?.activePlan ?? null}
@@ -154,10 +206,9 @@ export function RightWorkspacePane({
               onRunQuantize={onRunQuantize}
             />
           ) : (
-            <div className="cds-empty">
-              打开本地目录或一键跑通示例项目后，即可在此联动编辑架构白板与 Spec
-              IR。
-            </div>
+            <p className="mp-inspector-empty">
+              打开本地目录或运行示例项目后，可在此联动编辑架构白板与 Spec IR。
+            </p>
           )
         ) : null}
 
@@ -211,7 +262,7 @@ export function RightWorkspacePane({
             onRetryTask={taskId => onExecuteTasks({taskIds: [taskId]})}
           />
         ) : null}
-      </div>
+      </section>
     </aside>
   );
 }

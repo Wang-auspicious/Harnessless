@@ -6,6 +6,7 @@ import type {
   QuantizationResult,
   SpecIRContract,
 } from '../../api/v4-types.ts';
+import {CdsIcon} from './CdsIcon.tsx';
 
 export interface BoardSpecTabProps {
   readonly board: BoardSceneDoc;
@@ -67,7 +68,7 @@ export function BoardSpecTab({
       kind: 'module',
       x: 40 + ((idx * 55) % 340),
       y: 35 + ((idx * 45) % 160),
-      width: 146,
+      width: 148,
       height: 58,
       specModuleId: `mod-${idx}`,
       status: 'draft',
@@ -83,12 +84,12 @@ export function BoardSpecTab({
     e: MouseEvent<SVGSVGElement>,
   ): {x: number; y: number} => {
     const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
       return {x: 80, y: 80};
     }
     return {
-      x: Math.round(e.clientX - rect.left),
-      y: Math.round(e.clientY - rect.top),
+      x: Math.round(((e.clientX - rect.left) / rect.width) * 580),
+      y: Math.round(((e.clientY - rect.top) / rect.height) * 260),
     };
   };
 
@@ -174,55 +175,57 @@ export function BoardSpecTab({
   const nodeMap = new Map(nodes.map(n => [n.id, n]));
 
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 12}}>
-      <div className="cds-toolbar">
-        <div>
-          <h3 className="cds-card-title">白板 × Spec IR 双向共识</h3>
-          <p className="cds-card-sub">
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>白板 × Spec IR 双向共识</h3>
+          <p>
             Board Rev {board.revision} · Spec Rev {specIR.revision} · Term{' '}
             {specIR.term}
           </p>
         </div>
-        <div className="cds-toolbar-group">
+
+        <div className="sd-subtabs">
           <button
             type="button"
-            className={`cds-btn is-sm ${subView === 'split' ? 'is-primary' : ''}`}
+            className={subView === 'split' ? 'is-on' : ''}
             onClick={() => setSubView('split')}
           >
-            上下联动
+            Split
           </button>
           <button
             type="button"
-            className={`cds-btn is-sm ${subView === 'board' ? 'is-primary' : ''}`}
+            className={subView === 'board' ? 'is-on' : ''}
             onClick={() => setSubView('board')}
           >
-            仅白板
+            Board
           </button>
           <button
             type="button"
-            className={`cds-btn is-sm ${subView === 'spec' ? 'is-primary' : ''}`}
+            className={subView === 'spec' ? 'is-on' : ''}
             onClick={() => setSubView('spec')}
           >
-            仅 Spec IR
+            Spec IR
           </button>
         </div>
       </div>
 
       {subView !== 'spec' ? (
-        <div className="cds-card">
-          <div className="cds-toolbar">
-            <div className="cds-toolbar-group">
+        <div className="sd-card">
+          <div className="sd-card-head">
+            <div className="sd-toolbar-row">
               <button
                 type="button"
-                className="cds-btn is-sm"
+                className="sd-btn"
                 disabled={busy}
                 onClick={() => void handleAddNode()}
               >
-                + 添加模块节点
+                <CdsIcon name="Add" size="xs" />
+                <span>新增模块</span>
               </button>
               <button
                 type="button"
-                className={`cds-btn is-sm ${connectFromId ? 'is-clay' : ''}`}
+                className={`sd-btn ${connectFromId ? 'is-primary' : ''}`}
                 disabled={busy || nodes.length < 2}
                 onClick={() =>
                   setConnectFromId(prev =>
@@ -230,32 +233,42 @@ export function BoardSpecTab({
                   )
                 }
               >
-                {connectFromId ? '点击目标节点连线...' : '连接模块箭头'}
+                <CdsIcon name="Link" size="xs" />
+                <span>{connectFromId ? '点击目标节点连线…' : '连线'}</span>
               </button>
               <button
                 type="button"
-                className={`cds-btn is-sm ${pinMode ? 'is-clay' : ''}`}
+                className={`sd-btn ${pinMode ? 'is-primary' : ''}`}
                 onClick={() => setPinMode(prev => !prev)}
               >
-                {pinMode ? '点击画布落点插 Pin' : '插评论 Pin → Master'}
+                <CdsIcon name="Pin" size="xs" />
+                <span>{pinMode ? '点击画布落点…' : '插评论 Pin'}</span>
               </button>
             </div>
-            <span style={{fontSize: 11, color: 'var(--cds-text-muted)'}}>
-              拖拽节点即时同步 Spec IR
+            <span style={{fontSize: 11, color: 'var(--mp-text-muted)'}}>
+              拖拽同步 Spec IR
             </span>
           </div>
 
-          <div className="cds-board-canvas-wrap">
+          <div
+            style={{
+              background:
+                'radial-gradient(color-mix(in srgb, var(--mp-rule-strong) 45%, transparent) 1px, transparent 1px) 0 0 / 16px 16px, var(--mp-page)',
+            }}
+          >
             <svg
               ref={svgRef}
-              className="cds-board-svg"
+              className="sd-board-svg"
+              viewBox="0 0 580 260"
+              preserveAspectRatio="xMinYMin meet"
+              style={{display: 'block', width: '100%', height: 250}}
               onMouseMove={handleSvgMouseMove}
               onMouseUp={() => void handleSvgMouseUp()}
               onClick={handleSvgClick}
             >
               <defs>
                 <marker
-                  id="cds-arrow"
+                  id="sd-board-arrow"
                   viewBox="0 0 10 10"
                   refX="8"
                   refY="5"
@@ -263,7 +276,7 @@ export function BoardSpecTab({
                   markerHeight="6"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--cds-text-muted)" />
+                  <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--mp-text-muted)" />
                 </marker>
               </defs>
 
@@ -284,15 +297,15 @@ export function BoardSpecTab({
                       y1={y1}
                       x2={x2}
                       y2={y2}
-                      stroke="var(--cds-text-muted)"
+                      stroke="var(--mp-text-muted)"
                       strokeWidth="1.4"
-                      markerEnd="url(#cds-arrow)"
+                      markerEnd="url(#sd-board-arrow)"
                     />
                     <text
                       x={(x1 + x2) / 2}
                       y={(y1 + y2) / 2 - 5}
                       fontSize="10"
-                      fill="var(--cds-text-muted)"
+                      fill="var(--mp-text-muted)"
                       textAnchor="middle"
                     >
                       {edge.label}
@@ -329,11 +342,11 @@ export function BoardSpecTab({
                     width={node.width}
                     height={node.height}
                     rx="8"
-                    fill="var(--cds-panel)"
+                    fill="var(--mp-panel)"
                     stroke={
                       connectFromId === node.id
-                        ? 'var(--cds-clay)'
-                        : 'var(--cds-rule-strong)'
+                        ? 'var(--mp-clay)'
+                        : 'var(--mp-rule-strong)'
                     }
                     strokeWidth={connectFromId === node.id ? '2' : '1'}
                   />
@@ -342,7 +355,8 @@ export function BoardSpecTab({
                     y="22"
                     fontSize="12"
                     fontWeight="600"
-                    fill="var(--cds-text)"
+                    fill="var(--mp-text)"
+                    stroke="none"
                   >
                     {node.label.slice(0, 18)}
                   </text>
@@ -350,7 +364,8 @@ export function BoardSpecTab({
                     x="10"
                     y="40"
                     fontSize="10"
-                    fill="var(--cds-text-muted)"
+                    fill="var(--mp-text-muted)"
+                    stroke="none"
                   >
                     {node.kind} · {node.status}
                   </text>
@@ -368,21 +383,22 @@ export function BoardSpecTab({
                   if (typeof parsed.x === 'number') cx = parsed.x;
                   if (typeof parsed.y === 'number') cy = parsed.y;
                 } catch {
-                  // Use fallback coordinates.
+                  // Ignore malformed coordinates.
                 }
                 const fill =
                   pin.status === 'resolved'
-                    ? 'var(--cds-success)'
-                    : 'var(--cds-clay)';
+                    ? 'var(--mp-git-added)'
+                    : 'var(--mp-clay)';
                 return (
-                  <g key={pin.id} className="cds-pin-dot">
-                    <circle cx={cx} cy={cy} r="10" fill={fill} />
+                  <g key={pin.id}>
+                    <circle cx={cx} cy={cy} r="10" fill={fill} stroke="none" />
                     <text
                       x={cx}
                       y={cy + 3.5}
                       fontSize="10"
                       fontWeight="700"
                       fill="#ffffff"
+                      stroke="none"
                       textAnchor="middle"
                     >
                       {pin.pinNumber}
@@ -394,72 +410,72 @@ export function BoardSpecTab({
           </div>
 
           {pendingPinCoord ? (
-            <div className="cds-toolbar">
-              <input
-                type="text"
-                className="cds-input"
-                style={{flex: 1}}
-                value={pinPrompt}
-                onChange={e => setPinPrompt(e.target.value)}
-                placeholder="输入针对该位置的质疑或修改要求，发给 Master Agent..."
-              />
-              <button
-                type="button"
-                className="cds-btn is-sm is-clay"
-                disabled={busy || !pinPrompt.trim()}
-                onClick={() => void handleSubmitPin()}
-              >
-                发送 Pin
-              </button>
-              <button
-                type="button"
-                className="cds-btn is-sm"
-                onClick={() => setPendingPinCoord(null)}
-              >
-                取消
-              </button>
+            <div
+              className="sd-card-body"
+              style={{borderTop: '1px solid var(--mp-rule)'}}
+            >
+              <div className="sd-toolbar-row">
+                <input
+                  type="text"
+                  className="sd-input"
+                  style={{flex: 1}}
+                  value={pinPrompt}
+                  onChange={e => setPinPrompt(e.target.value)}
+                  placeholder="输入针对该位置的修改建议，发给 Master Agent…"
+                />
+                <button
+                  type="button"
+                  className="sd-btn is-primary"
+                  disabled={busy || !pinPrompt.trim()}
+                  onClick={() => void handleSubmitPin()}
+                >
+                  发送 Pin
+                </button>
+                <button
+                  type="button"
+                  className="sd-btn"
+                  onClick={() => setPendingPinCoord(null)}
+                >
+                  取消
+                </button>
+              </div>
             </div>
           ) : null}
 
           {boardPins.length > 0 ? (
-            <div style={{display: 'flex', flexDirection: 'column', gap: 6}}>
+            <div style={{borderTop: '1px solid var(--mp-rule)'}}>
               {boardPins.map(pin => (
-                <div key={pin.id} className="cds-collab-strip">
-                  <div style={{minWidth: 0, flex: 1}}>
-                    <strong>#{pin.pinNumber}</strong>{' '}
-                    <span className="cds-stage-pill">{pin.status}</span>{' '}
-                    <span>{pin.promptText}</span>
-                    {pin.replyText ? (
-                      <div
-                        style={{
-                          fontSize: 11.5,
-                          color: 'var(--cds-text-muted)',
-                          marginTop: 3,
-                        }}
-                      >
-                        Agent 回复: {pin.replyText}
+                <div key={pin.id} className="sd-wbs-row">
+                  <div className="sd-wbs-top">
+                    <div className="sd-wbs-title">
+                      <CdsIcon name="Pin" size="xs" />
+                      <span>#{pin.pinNumber}</span>
+                      <span className="sd-pill">{pin.status}</span>
+                      <span style={{fontWeight: 400}}>{pin.promptText}</span>
+                    </div>
+                    {pin.status !== 'resolved' ? (
+                      <div className="sd-toolbar-row">
+                        <button
+                          type="button"
+                          className="sd-btn"
+                          disabled={busy}
+                          onClick={() => void onResolvePin(pin.id, true)}
+                        >
+                          Ask Master
+                        </button>
+                        <button
+                          type="button"
+                          className="sd-btn is-ink"
+                          disabled={busy}
+                          onClick={() => void onResolvePin(pin.id, false)}
+                        >
+                          Resolve
+                        </button>
                       </div>
                     ) : null}
                   </div>
-                  {pin.status !== 'resolved' ? (
-                    <div className="cds-toolbar-group">
-                      <button
-                        type="button"
-                        className="cds-btn is-sm"
-                        disabled={busy}
-                        onClick={() => void onResolvePin(pin.id, true)}
-                      >
-                        Ask Master
-                      </button>
-                      <button
-                        type="button"
-                        className="cds-btn is-sm is-primary"
-                        disabled={busy}
-                        onClick={() => void onResolvePin(pin.id, false)}
-                      >
-                        Resolve
-                      </button>
-                    </div>
+                  {pin.replyText ? (
+                    <p className="sd-wbs-desc">Agent 回复: {pin.replyText}</p>
                   ) : null}
                 </div>
               ))}
@@ -470,25 +486,23 @@ export function BoardSpecTab({
 
       {subView !== 'board' ? (
         <>
-          <div className="cds-card">
-            <div className="cds-card-head">
-              <h4 className="cds-card-title">
-                Kano Better-Worse × AHP 量化权重表
-              </h4>
-              <div className="cds-toolbar-group">
+          <div className="sd-card">
+            <div className="sd-card-head">
+              <span>Kano Better-Worse × AHP 量化权重表</span>
+              <div className="sd-toolbar-row">
                 {quantization ? (
                   <span
-                    className={`cds-stage-pill ${quantization.passed ? 'is-success' : 'is-danger'}`}
+                    className={`sd-pill ${quantization.passed ? 'is-success' : 'is-danger'}`}
                   >
                     CR = {quantization.cr.toFixed(4)}{' '}
-                    {quantization.passed ? '< 0.10 通过' : '>= 0.10 冲突'}
+                    {quantization.passed ? '< 0.10' : '>= 0.10'}
                   </span>
                 ) : (
-                  <span className="cds-stage-pill">未校验</span>
+                  <span className="sd-pill">未校验</span>
                 )}
                 <button
                   type="button"
-                  className="cds-btn is-sm"
+                  className="sd-btn"
                   disabled={busy}
                   onClick={() => void onRunQuantize()}
                 >
@@ -498,16 +512,25 @@ export function BoardSpecTab({
             </div>
 
             {quantization && quantization.items.length > 0 ? (
-              <>
-                <p className="cds-card-sub">{quantization.diagnostic}</p>
-                <table className="cds-table">
+              <div>
+                <p
+                  style={{
+                    margin: 0,
+                    padding: '8px 12px',
+                    fontSize: 12,
+                    color: 'var(--mp-text-muted)',
+                  }}
+                >
+                  {quantization.diagnostic}
+                </p>
+                <table className="sd-table">
                   <thead>
                     <tr>
                       <th>需求项</th>
                       <th>Kano</th>
                       <th>Better / Worse</th>
                       <th>AHP 权重</th>
-                      <th>优先级桶</th>
+                      <th>优先级</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -515,11 +538,14 @@ export function BoardSpecTab({
                       <tr key={item.reqId}>
                         <td>{item.title}</td>
                         <td>
-                          <span className="cds-mono-chip">
+                          <span
+                            className="sd-pill"
+                            style={{fontFamily: 'var(--mp-font-mono)'}}
+                          >
                             {item.kanoCategory}
                           </span>
                         </td>
-                        <td>
+                        <td style={{fontFamily: 'var(--mp-font-mono)'}}>
                           +{item.betterSI.toFixed(2)} /{' '}
                           {item.worseDSI.toFixed(2)}
                         </td>
@@ -529,71 +555,98 @@ export function BoardSpecTab({
                     ))}
                   </tbody>
                 </table>
-              </>
+              </div>
             ) : (
-              <p className="cds-card-sub">
-                点击「执行量化校验」计算 Kano Better-Worse 系数与 AHP 一致性比率
-                CR。
+              <p className="mp-inspector-empty">
+                点击「执行量化校验」计算 Kano Better-Worse 系数与 AHP CR。
               </p>
             )}
           </div>
 
-          <div className="cds-card">
-            <div className="cds-card-head">
-              <h4 className="cds-card-title">
-                Spec IR 理解回放与模块伪代码 I/O 边界契约
-              </h4>
-              <span className="cds-stage-pill">{specIR.status}</span>
+          <div className="sd-card">
+            <div className="sd-card-head">
+              <span>Spec IR 理解回放与模块 I/O 边界契约</span>
+              <span className="sd-pill">{specIR.status}</span>
             </div>
 
-            {specIR.goals.length > 0 ? (
-              <div>
-                <div className="cds-buzz-k" style={{marginBottom: 4}}>
-                  目标 (Goals)
+            <div
+              className="sd-card-body sd-spec-doc"
+              style={{display: 'flex', flexDirection: 'column', gap: 12}}
+            >
+              {specIR.goals.length > 0 ? (
+                <div>
+                  <div
+                    style={{
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      color: 'var(--mp-text-muted)',
+                      marginBottom: 4,
+                    }}
+                  >
+                    目标 (Goals)
+                  </div>
+                  <ul style={{margin: 0, paddingLeft: 18}}>
+                    {specIR.goals.map((g, i) => (
+                      <li key={i}>{g}</li>
+                    ))}
+                  </ul>
                 </div>
-                <ul style={{margin: 0, paddingLeft: 18, fontSize: 12.5}}>
-                  {specIR.goals.map((g, i) => (
-                    <li key={i}>{g}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
+              ) : null}
 
-            {specIR.settledDecisions.length > 0 ? (
-              <div>
-                <div className="cds-buzz-k" style={{marginBottom: 4}}>
-                  Settled 共识决策
-                </div>
-                <div className="mp-decision-settled">
+              {specIR.settledDecisions.length > 0 ? (
+                <div style={{display: 'flex', flexWrap: 'wrap', gap: 6}}>
                   {specIR.settledDecisions.map(d => (
-                    <span key={d.decisionId} className="mp-settled-chip">
-                      #{d.logSeq} {d.summary}
+                    <span key={d.decisionId} className="sd-pill is-success">
+                      <CdsIcon name="Check" size="xs" />
+                      <span>
+                        #{d.logSeq} {d.summary}
+                      </span>
                     </span>
                   ))}
                 </div>
-              </div>
-            ) : null}
+              ) : null}
 
-            {specIR.modules.map(mod => (
-              <div key={mod.moduleId} className="cds-card is-subtle">
-                <div className="cds-card-head">
-                  <strong style={{fontSize: 12.5}}>{mod.title}</strong>
-                  <div className="cds-toolbar-group">
-                    {mod.allowedPaths.map(p => (
-                      <span key={p} className="cds-mono-chip">
-                        {p}
-                      </span>
-                    ))}
+              {specIR.modules.map(mod => (
+                <div key={mod.moduleId} className="sd-card">
+                  <div className="sd-card-head">
+                    <span>{mod.title}</span>
+                    <div className="sd-toolbar-row">
+                      {mod.allowedPaths.map(p => (
+                        <span
+                          key={p}
+                          className="sd-pill"
+                          style={{fontFamily: 'var(--mp-font-mono)'}}
+                        >
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="sd-card-body">
+                    <pre
+                      style={{
+                        fontFamily: 'var(--mp-font-mono)',
+                        fontSize: 12,
+                        lineHeight: '18px',
+                      }}
+                    >
+                      {mod.boundaryPseudocode}
+                    </pre>
+                    {mod.verificationChecks.length > 0 ? (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          fontSize: 11.5,
+                          color: 'var(--mp-text-muted)',
+                        }}
+                      >
+                        验收校验: {mod.verificationChecks.join(' | ')}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
-                <pre className="cds-pre">{mod.boundaryPseudocode}</pre>
-                {mod.verificationChecks.length > 0 ? (
-                  <div style={{fontSize: 11.5, color: 'var(--cds-text-muted)'}}>
-                    验收校验: {mod.verificationChecks.join(' | ')}
-                  </div>
-                ) : null}
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </>
       ) : null}

@@ -1,5 +1,6 @@
 import type {ReactElement} from 'react';
 import type {TaskDecompositionPlan} from '../../api/v4-types.ts';
+import {CdsIcon} from './CdsIcon.tsx';
 import {kernelLabel} from './v4-labels.ts';
 
 export interface DagCheckpointTabProps {
@@ -19,98 +20,132 @@ export function DagCheckpointTab({
   );
 
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 12}}>
-      <div>
-        <h3 className="cds-card-title">
-          断点检查点与执行槽位 (Checkpoint DAG)
-        </h3>
-        <p className="cds-card-sub">
-          仅用于异常回溯、Git Tree SHA 校验与失败任务单点续跑。
-        </p>
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>断点检查点与执行槽位 (Checkpoint DAG)</h3>
+          <p>仅用于异常回溯、Git Tree SHA 校验与失败任务单点续跑。</p>
+        </div>
       </div>
 
       {tasks.length === 0 ? (
-        <div className="cds-empty">
-          暂无活跃执行检查点。拆解并运行任务后，每个波次槽位的 Checkpoint
-          将记录在此。
-        </div>
+        <p className="mp-inspector-empty">
+          暂无活跃执行检查点。拆解并运行任务后，各波次 Checkpoint 将记录于此。
+        </p>
       ) : (
-        <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
-          {waves.map(wave => (
-            <div key={wave} className="cds-card is-subtle">
-              <div className="cds-card-head">
-                <strong style={{fontSize: 12}}>Wave {wave + 1} 检查点层</strong>
-                <span className="cds-stage-pill">
-                  {
-                    tasks.filter(
-                      t => t.waveIndex === wave && t.status === 'completed',
-                    ).length
-                  }
-                  /{tasks.filter(t => t.waveIndex === wave).length} 完成
+        waves.map(wave => {
+          const waveTasks = tasks.filter(t => t.waveIndex === wave);
+          const doneCount = waveTasks.filter(
+            t => t.status === 'completed',
+          ).length;
+          return (
+            <div key={wave} className="sd-card">
+              <div className="sd-card-head">
+                <span>Wave {wave + 1} 检查点层</span>
+                <span className="sd-pill">
+                  {doneCount}/{waveTasks.length} completed
                 </span>
               </div>
 
               <div
+                className="sd-card-body"
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                  gap: 8,
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                  gap: 10,
                 }}
               >
-                {tasks
-                  .filter(t => t.waveIndex === wave)
-                  .map(task => (
-                    <div key={task.id} className="cds-task-card">
-                      <div className="cds-card-head">
-                        <strong style={{fontSize: 12}}>{task.title}</strong>
+                {waveTasks.map(task => {
+                  const tone =
+                    task.status === 'completed'
+                      ? 'is-success'
+                      : task.status === 'failed'
+                        ? 'is-danger'
+                        : task.status === 'running'
+                          ? 'is-clay'
+                          : '';
+                  return (
+                    <div key={task.id} className="sd-card">
+                      <div className="sd-card-head">
                         <span
-                          className={`cds-stage-pill ${task.status === 'completed' ? 'is-success' : task.status === 'failed' ? 'is-danger' : task.status === 'running' ? 'is-clay' : ''}`}
-                        >
-                          {task.status}
-                        </span>
-                      </div>
-                      <div className="cds-task-meta-row">
-                        <span className="cds-agent-pill">
-                          {kernelLabel(task.assignedKernel)}
-                        </span>
-                        {task.checkpointId ? (
-                          <span className="cds-mono-chip">
-                            ckpt: {task.checkpointId.slice(0, 10)}
-                          </span>
-                        ) : null}
-                      </div>
-                      {task.beforeTreeSha || task.afterTreeSha ? (
-                        <div className="cds-mono-chip">
-                          tree: {(task.beforeTreeSha ?? '--------').slice(0, 7)}{' '}
-                          → {(task.afterTreeSha ?? '--------').slice(0, 7)}
-                        </div>
-                      ) : null}
-                      {task.dependsOn.length > 0 ? (
-                        <div
                           style={{
-                            fontSize: 11,
-                            color: 'var(--cds-text-muted)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
                           }}
                         >
-                          上游依赖: {task.dependsOn.join(', ')}
+                          {task.title}
+                        </span>
+                        <span className={`sd-pill ${tone}`}>{task.status}</span>
+                      </div>
+                      <div
+                        className="sd-card-body"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          fontSize: 12,
+                        }}
+                      >
+                        <div className="sd-toolbar-row">
+                          <span className="sd-pill">
+                            {kernelLabel(task.assignedKernel)}
+                          </span>
+                          {task.checkpointId ? (
+                            <span
+                              className="sd-pill"
+                              style={{fontFamily: 'var(--mp-font-mono)'}}
+                            >
+                              {task.checkpointId.slice(0, 10)}
+                            </span>
+                          ) : null}
                         </div>
-                      ) : null}
-                      {task.status === 'failed' || task.status === 'paused' ? (
-                        <button
-                          type="button"
-                          className="cds-btn is-sm is-clay"
-                          disabled={busy}
-                          onClick={() => void onRetryTask(task.id)}
-                        >
-                          从此断点单点重跑
-                        </button>
-                      ) : null}
+
+                        {task.beforeTreeSha || task.afterTreeSha ? (
+                          <div
+                            style={{
+                              fontFamily: 'var(--mp-font-mono)',
+                              fontSize: 11,
+                              color: 'var(--mp-text-muted)',
+                            }}
+                          >
+                            tree:{' '}
+                            {(task.beforeTreeSha ?? '--------').slice(0, 7)} →{' '}
+                            {(task.afterTreeSha ?? '--------').slice(0, 7)}
+                          </div>
+                        ) : null}
+
+                        {task.dependsOn.length > 0 ? (
+                          <div
+                            style={{
+                              fontSize: 11.5,
+                              color: 'var(--mp-text-muted)',
+                            }}
+                          >
+                            上游依赖: {task.dependsOn.join(', ')}
+                          </div>
+                        ) : null}
+
+                        {task.status === 'failed' ||
+                        task.status === 'paused' ? (
+                          <button
+                            type="button"
+                            className="sd-btn is-primary"
+                            disabled={busy}
+                            onClick={() => void onRetryTask(task.id)}
+                          >
+                            <CdsIcon name="ArrowClockwise" size="xs" />
+                            <span>从此断点单点重跑</span>
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
-                  ))}
+                  );
+                })}
               </div>
             </div>
-          ))}
-        </div>
+          );
+        })
       )}
     </div>
   );

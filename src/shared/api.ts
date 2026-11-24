@@ -443,4 +443,5 @@ export interface ForgePreloadBridge {
   openInEditor?(
     targetPath: string,
   ): Promise<{readonly ok: boolean; readonly editor: string}>;
+  setWindowTheme?(theme: 'light' | 'dark'): Promise<boolean>;
 }

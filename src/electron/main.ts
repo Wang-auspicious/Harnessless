@@ -297,6 +297,31 @@ async function bootstrapDesktop(): Promise<void> {
     return {ok: err === '', editor: 'explorer'};
   });
 
+  ipcMain.handle(
+    'forgeops:set-window-theme',
+    (ev, rawTheme: unknown): boolean => {
+      if (
+        !mainWindow ||
+        !isTrustedSenderFrame(ev.senderFrame, allowedFileUrl, allowedDevOrigin)
+      ) {
+        return false;
+      }
+      const dark = rawTheme === 'dark';
+      mainWindow.setBackgroundColor(dark ? '#0B0B0A' : '#FFFFFF');
+      if (
+        useWinOverlay &&
+        typeof mainWindow.setTitleBarOverlay === 'function'
+      ) {
+        mainWindow.setTitleBarOverlay({
+          color: dark ? '#0B0B0A' : '#FFFFFF',
+          symbolColor: dark ? '#ECEBE7' : '#3D3D3A',
+          height: 36,
+        });
+      }
+      return true;
+    },
+  );
+
   const preloadPath = resolve(__dirname, 'preload.cjs');
   const savedBounds = loadWindowBounds(boundsPath);
 
@@ -384,10 +409,16 @@ async function bootstrapDesktop(): Promise<void> {
     });
   }
 
+  const smokeHash = isSmoke
+    ? (process.env['FORGEOPS_SMOKE_HASH'] ?? '').trim().replace(/^#/, '')
+    : '';
   if (devUrl) {
-    await mainWindow.loadURL(devUrl);
+    await mainWindow.loadURL(smokeHash ? `${devUrl}#${smokeHash}` : devUrl);
   } else {
-    await mainWindow.loadFile(htmlPath);
+    await mainWindow.loadFile(
+      htmlPath,
+      smokeHash ? {hash: smokeHash} : undefined,
+    );
   }
 
   if (isSmoke) {
@@ -405,6 +436,10 @@ async function bootstrapDesktop(): Promise<void> {
           const domText = (await mainWindow?.webContents.executeJavaScript(
             'document.body ? document.body.innerText : ""',
           )) as string;
+          const loadedFonts = (await mainWindow?.webContents.executeJavaScript(
+            'Array.from(new Set(Array.from(document.fonts).filter(f => f.status === "loaded").map(f => f.family))).join(",")',
+          )) as string;
+          process.stdout.write(`[forgeops:smoke] fonts=${loadedFonts}\n`);
           if (smokeScreenshotPath && mainWindow) {
             mkdirSync(dirname(smokeScreenshotPath), {recursive: true});
             const image = await mainWindow.webContents.capturePage();

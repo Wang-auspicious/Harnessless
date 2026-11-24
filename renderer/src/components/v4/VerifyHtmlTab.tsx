@@ -1,5 +1,6 @@
 import {useState, type ReactElement} from 'react';
 import type {KernelId, ShipReviewBundle} from '../../api/v4-types.ts';
+import {CdsIcon} from './CdsIcon.tsx';
 import {ALL_KERNELS, kernelLabel} from './v4-labels.ts';
 
 export interface VerifyHtmlTabProps {
@@ -33,21 +34,20 @@ export function VerifyHtmlTab({
   const [rejectNote, setRejectNote] = useState('');
 
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 12}}>
-      <div className="cds-toolbar">
-        <div>
-          <h3 className="cds-card-title">
-            Claude Ship 三权审校 &amp; Answer-in-HTML
-          </h3>
-          <p className="cds-card-sub">
+    <div className="sd-pane">
+      <div className="sd-pane-head">
+        <div className="sd-pane-title-group">
+          <h3>Claude Ship 三权审校 &amp; Answer-in-HTML</h3>
+          <p>
             强制 Coder Kernel ≠ Reviewer Kernel
             物理防自批，并生成沙箱化的富交互验收报告。
           </p>
         </div>
-        <div className="cds-toolbar-group">
+
+        <div className="sd-toolbar-row">
           <select
             aria-label="独立审校内核"
-            className="cds-select"
+            className="sd-select"
             value={reviewerKernel}
             onChange={e => setReviewerKernel(e.target.value as KernelId)}
           >
@@ -59,7 +59,7 @@ export function VerifyHtmlTab({
           </select>
           <select
             aria-label="审校深度"
-            className="cds-select"
+            className="sd-select"
             value={reviewDepth}
             onChange={e =>
               setReviewDepth(e.target.value as 'fast' | 'standard' | 'deep')
@@ -71,7 +71,7 @@ export function VerifyHtmlTab({
           </select>
           <select
             aria-label="策略模式"
-            className="cds-select"
+            className="sd-select"
             value={policyMode}
             onChange={e =>
               setPolicyMode(e.target.value as 'shadow' | 'enforced')
@@ -82,114 +82,153 @@ export function VerifyHtmlTab({
           </select>
           <button
             type="button"
-            className="cds-btn is-sm is-clay"
+            className="sd-btn is-primary"
             disabled={busy}
             onClick={() =>
               void onRunShip({reviewDepth, reviewerKernel, policyMode})
             }
           >
-            发起独立审校
+            <CdsIcon name="Verified" size="xs" />
+            <span>发起独立审校</span>
           </button>
         </div>
       </div>
 
       {selfApprovalBlockedMsg ? (
-        <div className="cds-shield-banner is-blocked" role="alert">
-          <div>
-            <strong>物理防自批盾牌已拦截 (HTTP 409)</strong>
-            <div>{selfApprovalBlockedMsg}</div>
+        <div
+          className="sd-card"
+          style={{
+            borderColor:
+              'color-mix(in srgb, var(--mp-danger) 40%, var(--mp-rule))',
+          }}
+          role="alert"
+        >
+          <div className="sd-card-head">
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                color: 'var(--mp-danger)',
+              }}
+            >
+              <CdsIcon name="LockShield" size="xs" />
+              <span>物理防自批盾牌已拦截 (HTTP 409)</span>
+            </span>
+            <span className="sd-pill is-danger">SELF_APPROVAL_BLOCKED</span>
           </div>
-          <span className="cds-stage-pill is-danger">
-            SELF_APPROVAL_BLOCKED
-          </span>
+          <div
+            className="sd-card-body"
+            style={{fontSize: 12.5, color: 'var(--mp-danger)'}}
+          >
+            {selfApprovalBlockedMsg}
+          </div>
         </div>
       ) : null}
 
       {!latestShip ? (
-        <div className="cds-empty">
+        <p className="mp-inspector-empty">
           尚未运行 Ship
           独立审校。请选择与编码者不同的审校内核并点击「发起独立审校」。
-        </div>
+        </p>
       ) : (
         <>
-          <div
-            className={`cds-shield-banner ${latestShip.antiSelfApprovalPassed ? '' : 'is-blocked'}`}
-          >
-            <div>
-              <strong>
-                {latestShip.antiSelfApprovalPassed
-                  ? '✓ 三权分立校验通过 (Coder ≠ Reviewer)'
-                  : '✕ 检测到自批冲突'}
-              </strong>
-              <div style={{fontSize: 11.5}}>
-                Coder:{' '}
-                {latestShip.coderKernels.map(kernelLabel).join(', ') || 'none'}{' '}
-                → Reviewer: {kernelLabel(latestShip.reviewerKernel)} · Policy:{' '}
-                {latestShip.policyMode.toUpperCase()} · WouldApprove:{' '}
-                {latestShip.wouldApprove ? 'YES' : 'NO'}
-              </div>
+          <div className="sd-card">
+            <div className="sd-card-head">
+              <span
+                style={{display: 'inline-flex', alignItems: 'center', gap: 6}}
+              >
+                <CdsIcon
+                  name={
+                    latestShip.antiSelfApprovalPassed
+                      ? 'CheckCircle'
+                      : 'WarningCircle'
+                  }
+                  size="xs"
+                />
+                <span>
+                  {latestShip.antiSelfApprovalPassed
+                    ? '三权分立校验通过 (Coder ≠ Reviewer)'
+                    : '检测到自批冲突'}
+                </span>
+              </span>
+              <span
+                className={`sd-pill ${latestShip.antiSelfApprovalPassed ? 'is-success' : 'is-danger'}`}
+              >
+                Verdict: {latestShip.verdict}
+              </span>
             </div>
-            <span className="cds-stage-pill">
-              Verdict: {latestShip.verdict}
-            </span>
+            <div
+              className="sd-card-body"
+              style={{fontSize: 12, color: 'var(--mp-text-secondary)'}}
+            >
+              Coder:{' '}
+              {latestShip.coderKernels.map(kernelLabel).join(', ') || 'none'} →
+              Reviewer: {kernelLabel(latestShip.reviewerKernel)} · Policy:{' '}
+              {latestShip.policyMode.toUpperCase()} · WouldApprove:{' '}
+              {latestShip.wouldApprove ? 'YES' : 'NO'}
+            </div>
           </div>
 
-          <div className="cds-card">
-            <div className="cds-card-head">
-              <strong style={{fontSize: 13}}>
-                Answer-in-HTML 沙箱交互验收报告
-              </strong>
-              <div className="cds-toolbar-group">
-                <button
-                  type="button"
-                  className="cds-btn is-sm is-primary"
-                  disabled={busy}
-                  onClick={() => void onApproveAndDeliver(latestShip.id)}
-                >
-                  通过并合并交付
-                </button>
-              </div>
-            </div>
-
-            <iframe
-              title="Answer-in-HTML Verification Report"
-              className="cds-html-frame"
-              sandbox="allow-scripts"
-              srcDoc={latestShip.answerHtml}
-            />
-
-            <div className="cds-toolbar">
-              <input
-                type="text"
-                className="cds-input"
-                style={{flex: 1}}
-                value={rejectNote}
-                onChange={e => setRejectNote(e.target.value)}
-                placeholder="若需驳回，输入修复意见自动创建 html_verify Pin..."
-              />
+          <div className="sd-card">
+            <div className="sd-card-head">
+              <span>Answer-in-HTML 沙箱交互验收报告</span>
               <button
                 type="button"
-                className="cds-btn is-sm is-danger"
+                className="sd-btn is-primary"
                 disabled={busy}
-                onClick={() => {
-                  const note =
-                    rejectNote.trim() ||
-                    '验收未通过，请依据审校发现项创建修复任务';
-                  setRejectNote('');
-                  void onRejectAndPin(latestShip.id, note);
-                }}
+                onClick={() => void onApproveAndDeliver(latestShip.id)}
               >
-                驳回并创建修复 Pin
+                <CdsIcon name="Check" size="xs" />
+                <span>通过并合并交付</span>
               </button>
+            </div>
+
+            <div
+              className="sd-card-body"
+              style={{display: 'flex', flexDirection: 'column', gap: 10}}
+            >
+              <iframe
+                title="Answer-in-HTML Verification Report"
+                className="sd-verify-iframe"
+                sandbox="allow-scripts"
+                srcDoc={latestShip.answerHtml}
+              />
+
+              <div className="sd-toolbar-row">
+                <input
+                  type="text"
+                  className="sd-input"
+                  style={{flex: 1}}
+                  value={rejectNote}
+                  onChange={e => setRejectNote(e.target.value)}
+                  placeholder="若需驳回，输入修复意见自动创建 html_verify Pin…"
+                />
+                <button
+                  type="button"
+                  className="sd-btn"
+                  style={{color: 'var(--mp-danger)'}}
+                  disabled={busy}
+                  onClick={() => {
+                    const note =
+                      rejectNote.trim() ||
+                      '验收未通过，请依据审校发现项创建修复任务';
+                    setRejectNote('');
+                    void onRejectAndPin(latestShip.id, note);
+                  }}
+                >
+                  驳回并创建修复 Pin
+                </button>
+              </div>
             </div>
           </div>
 
           {latestShip.findings.length > 0 ? (
-            <div className="cds-card">
-              <strong style={{fontSize: 12.5}}>
-                审校发现项 ({latestShip.findings.length})
-              </strong>
-              <table className="cds-table">
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <span>审校发现项 ({latestShip.findings.length})</span>
+              </div>
+              <table className="sd-table">
                 <thead>
                   <tr>
                     <th>级别</th>
@@ -204,14 +243,19 @@ export function VerifyHtmlTab({
                     <tr key={f.id}>
                       <td>
                         <span
-                          className={`cds-stage-pill ${f.severity === 'blocker' ? 'is-danger' : f.severity === 'warn' ? 'is-warning' : ''}`}
+                          className={`sd-pill ${f.severity === 'blocker' ? 'is-danger' : f.severity === 'warn' ? 'is-clay' : ''}`}
                         >
                           {f.severity}
                         </span>
                       </td>
                       <td>{f.category}</td>
                       <td>
-                        <span className="cds-mono-chip">{f.filePath}</span>
+                        <span
+                          className="sd-pill"
+                          style={{fontFamily: 'var(--mp-font-mono)'}}
+                        >
+                          {f.filePath}
+                        </span>
                       </td>
                       <td>{f.summary}</td>
                       <td>{f.fixedBySteward ? '已自动修复' : '待处理'}</td>
@@ -223,21 +267,23 @@ export function VerifyHtmlTab({
           ) : null}
 
           {latestShip.stewardFixes.length > 0 ? (
-            <div className="cds-card is-subtle">
-              <strong style={{fontSize: 12.5}}>
-                PR Steward 自动修复清单 ({latestShip.stewardFixes.length})
-              </strong>
-              {latestShip.stewardFixes.map(fix => (
-                <div key={fix.id} style={{fontSize: 12}}>
-                  <div>
-                    <strong>{fix.summary}</strong> (
-                    {fix.filesTouched.join(', ')})
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <span>
+                  PR Steward 自动修复清单 ({latestShip.stewardFixes.length})
+                </span>
+              </div>
+              <div>
+                {latestShip.stewardFixes.map(fix => (
+                  <div key={fix.id} className="sd-wbs-row">
+                    <div className="sd-wbs-title">{fix.summary}</div>
+                    <p className="sd-wbs-desc">
+                      {fix.filesTouched.join(', ')} · 回滚配方:{' '}
+                      {fix.rollbackRecipe}
+                    </p>
                   </div>
-                  <div style={{fontSize: 11, color: 'var(--cds-text-muted)'}}>
-                    回滚配方: {fix.rollbackRecipe}
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           ) : null}
         </>
