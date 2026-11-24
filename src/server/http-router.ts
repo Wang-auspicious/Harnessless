@@ -57,9 +57,12 @@ import type {ContinuityEngine} from '../engines/continuity.ts';
 import type {DreamingEngine} from '../engines/dreaming.ts';
 import type {InfraStewardEngine} from '../engines/infra-steward.ts';
 import type {MissionOrchestrator} from '../engines/mission-orchestrator.ts';
+import type {MasterAgentEngine} from '../engines/master-agent.ts';
 import type {RequirementClosureEngine} from '../engines/requirement-closure.ts';
+import type {V4SseEvent} from '../shared/v4-types.ts';
 import type {EngineeringRoomsService} from './rooms-service.ts';
 import type {HostSecretVault} from './secret-vault.ts';
+import {handleV4Route} from './v4-routes.ts';
 
 export class ForgeHttpServer {
   readonly sessionToken: string;
@@ -81,6 +84,7 @@ export class ForgeHttpServer {
   private readonly hindsight?: HindsightEngine;
   private readonly hama?: HamaEngine;
   private readonly missions?: MissionOrchestrator;
+  private readonly master?: MasterAgentEngine;
   private readonly worktreesRoot: string;
 
   constructor(deps: {
@@ -97,6 +101,7 @@ export class ForgeHttpServer {
     readonly hindsight?: HindsightEngine;
     readonly hama?: HamaEngine;
     readonly missions?: MissionOrchestrator;
+    readonly master?: MasterAgentEngine;
     readonly worktreesRoot: string;
     readonly sessionToken?: string;
   }) {
@@ -114,6 +119,7 @@ export class ForgeHttpServer {
     this.hindsight = deps.hindsight;
     this.hama = deps.hama;
     this.missions = deps.missions;
+    this.master = deps.master;
     this.worktreesRoot = deps.worktreesRoot;
   }
 
@@ -170,7 +176,7 @@ export class ForgeHttpServer {
     ]);
   }
 
-  broadcast(event: ForgeSseEvent): void {
+  broadcast(event: ForgeSseEvent | V4SseEvent): void {
     const frame = `data: ${JSON.stringify(event)}\n\n`;
     for (const client of this.sseClients) {
       client.write(frame);
@@ -208,7 +214,10 @@ export class ForgeHttpServer {
       'Access-Control-Allow-Headers',
       'Authorization, Content-Type',
     );
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Methods',
+      'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    );
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -255,6 +264,16 @@ export class ForgeHttpServer {
       if (method === 'GET' && path === '/api/bootstrap') {
         this.sendJson(res, 200, this.buildBootstrapSnapshot());
         return;
+      }
+
+      if (path.startsWith('/api/v4')) {
+        const handled = await handleV4Route(req, res, url, this.master, {
+          readJsonBody: r => this.readJsonBody(r),
+          sendJson: (r, code, payload) => this.sendJson(r, code, payload),
+        });
+        if (handled) {
+          return;
+        }
       }
 
       if (method === 'POST' && path === '/api/hubs') {
@@ -1786,6 +1805,7 @@ export class ForgeHttpServer {
       if (err instanceof ForgeError) {
         this.sendJson(res, err.status, {
           code: err.code,
+          error: err.message,
           message: err.message,
           details: err.details,
         });
